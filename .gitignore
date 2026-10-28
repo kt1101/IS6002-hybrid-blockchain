@@ -16,3 +16,11 @@
 #
 # Logs
 scripts/logs*
+
+# Experiment toolchain
+scripts/temp/
+bin/
+results/raw/
+experiments/cluster/generated/
+__pycache__/
+.superpowers/

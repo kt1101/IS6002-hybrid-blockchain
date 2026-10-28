@@ -1,0 +1,22 @@
+# Build image: compiles the linux/arm64 binaries into /out and doubles as the Go test runner (WORKDIR /src).
+FROM golang:1.20-bullseye
+
+ENV CGO_ENABLED=1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+# Module download is cached in this layer; source changes below do not invalidate it.
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN mkdir -p /out \
+ && go build -o /out/veritas-kafka ./cmd/veritas \
+ && go build -o /out/veritas-tm ./cmd/veritastm \
+ && go build -o /out/veritas-tso ./cmd/tso \
+ && go build -o /out/ycsbbench ./veritas/benchmark/ycsbbench
+
+# Outside the hybrid module so the install is not resolved against its go.mod.
+RUN cd / && GOBIN=/out go install github.com/tendermint/tendermint/cmd/tendermint@v0.35.0
