@@ -322,8 +322,28 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# ---- host state ----
+# One line per run phase in results/raw/<EXP>/host.log: load average, free and
+# compressed memory and the cumulative swapout count of the macOS host, so a
+# row measured on a busy or swapping host can be spotted later. No-op where
+# vm_stat is missing (non-macOS hosts).
+host_state() {
+  command -v vm_stat >/dev/null 2>&1 || return 0
+  local load vm
+  load="$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{print $1","$2","$3}')"
+  vm="$(vm_stat 2>/dev/null | awk '
+    /page size of/ { ps = $8 }
+    /^Pages free/ { gsub(/\./, "", $3); free = $3 }
+    /occupied by compressor/ { gsub(/\./, "", $5); comp = $5 }
+    /^Swapouts/ { gsub(/\./, "", $2); sw = $2 }
+    END { printf "%d,%d,%d", free * ps / 1048576, comp * ps / 1048576, sw }')"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$tag,$1,$load,$vm" >>"$exp_dir/host.log" 2>/dev/null || true
+}
+
 # ---- cluster ----
 acquire_lock
+[ -s "$exp_dir/host.log" ] || echo "ts,tag,phase,load1,load5,load15,free_mb,compressor_mb,swapouts" >"$exp_dir/host.log"
+host_state start
 log "run $EXP/$tag (duration $DURATION, warmup $WARMUP, load threads $LOAD_THREADS, load timeout $LOAD_TIMEOUT, load op timeout $LOAD_OP_TIMEOUT, settle timeout $SETTLE_TIMEOUT, watchdog ${watchdog_secs}s)"
 "$HBDB_CLUSTER_DIR/down.sh" || exit 1
 # Record the project's container events (die, kill, oom, ...) for the whole
@@ -450,5 +470,6 @@ if [ ! -s "$csv" ]; then
   echo "$HBDB_CSV_HEADER" >"$csv"
 fi
 echo "$final" >>"$csv"
+host_state end
 log "row appended to $csv (host_cpu_max_pct=$host_cpu_max_pct saturated=$saturated)"
 echo "$final"

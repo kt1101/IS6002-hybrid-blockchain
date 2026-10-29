@@ -24,6 +24,8 @@
 #   run_one.sh invocations that would run, run nothing, write nothing)
 #   EXTRA_REPS=2 (max extra reps for a noisy configuration, 0 = never)
 #   BEST_CLIENTS_KAFKA_ORIG, BEST_CLIENTS_TM_ORIG (optional, positive ints)
+#   NS_B="4 8 16" (part (b) cluster sizes; lower the maximum when the host
+#   cannot hold N nodes x MEM without swapping, see NOTES.md)
 #   Everything else (DURATION=60s, WARMUP=10s, CPUS, MEM, LOAD_*, ...) is
 #   inherited by run_one.sh. COMMIT_MODE is unset here: each backend runs in
 #   its native mode (kafka-orig async, tm-orig sync).
@@ -65,7 +67,7 @@ EXP="${EXP:-p0}"
 DRY_RUN="${DRY_RUN:-0}"
 BACKENDS="kafka-orig tm-orig"
 CLIENTS_A="4 16 64 256"
-NS_B="4 8 16"
+NS_B="${NS_B:-4 8 16}"
 CV_MAX=0.10
 EXTRA_REPS="${EXTRA_REPS:-2}"
 # The brief: COMMIT_MODE is never passed; run_one.sh picks the native mode.
@@ -81,6 +83,11 @@ failures_file="$HBDB_RESULTS_RAW/$EXP.failures"
 case "$PART" in a | b | all) ;; *) die "PART must be a, b or all, got '$PART'" ;; esac
 hbdb_require_uint REPS "$REPS"
 [ "$REPS" -ge 1 ] || die "REPS must be >= 1"
+[ -n "$NS_B" ] || die "NS_B must list at least one cluster size"
+for n in $NS_B; do
+  hbdb_require_uint NS_B "$n"
+  [ "$n" -ge 1 ] || die "NS_B entries must be >= 1, got '$n'"
+done
 case "$EXP" in
   '' | *[!A-Za-z0-9._-]*) die "EXP must match [A-Za-z0-9._-]+, got '$EXP'" ;;
 esac
