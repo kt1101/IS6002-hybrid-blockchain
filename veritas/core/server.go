@@ -1,0 +1,631 @@
+package core
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/golang/protobuf/proto"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"hybrid/consensus"
+	pbv "hybrid/proto/veritas"
+	"hybrid/veritas"
+	"hybrid/veritas/ledger"
+)
+
+// CommitMode selects when Set returns.
+type CommitMode int
+
+const (
+	// CommitAsync returns as soon as the SharedLog is queued in the batcher
+	// (the original veritas behaviour).
+	CommitAsync CommitMode = iota
+	// CommitSync returns once the block containing the SharedLog has been
+	// applied on THIS node (other nodes apply the same block independently
+	// and may lag), or with an error.
+	CommitSync
+)
+
+var (
+	// ErrAborted: the SharedLog was applied as aborted (stale client
+	// version, VersionClient mode). gRPC code Aborted.
+	ErrAborted = errors.New("transaction aborted")
+	// ErrStopped: the node is stopped (Close, a fatal Apply error, or the
+	// consensus Deliver channel closed). gRPC code Unavailable.
+	ErrStopped = errors.New("node stopped")
+	// ErrCommitTimeout: a sync Set gave up waiting for its block (e.g. the
+	// block was lost after Submit accepted it). gRPC code DeadlineExceeded.
+	ErrCommitTimeout = errors.New("commit wait timed out")
+	// ErrSubmitFailed: consensus.Submit rejected the block that carried
+	// the SharedLog. gRPC code Unavailable.
+	ErrSubmitFailed = errors.New("block submit failed")
+)
+
+const (
+	// DefaultSyncTimeout bounds how long a sync Set waits for its block
+	// when the request ctx has no earlier deadline, so a block lost after
+	// Submit returned nil cannot leak its waiters.
+	DefaultSyncTimeout = 30 * time.Second
+	// submitTimeout bounds one consensus.Submit call.
+	submitTimeout = 30 * time.Second
+	// closeFlushTimeout is how long Close lets the final batcher flush run
+	// before cancelling the server context.
+	closeFlushTimeout = 2 * time.Second
+	// seqNodeShift: SharedLog.Seq = NodeID<<seqNodeShift | counter.
+	seqNodeShift = 40
+	// maxNodeID is the exclusive upper bound on NodeID, so that
+	// NodeID<<40 stays a positive int64.
+	maxNodeID = 1 << (63 - seqNodeShift)
+	// arrivalQueue is the capacity of the forwarder -> apply loop channel.
+	arrivalQueue = 128
+)
+
+// ServerConfig configures a Server. NodeID, Signature, BlockSize, Mode and
+// Commit are the fields of the plan; FlushInterval and SyncTimeout are
+// optional additions (zero = default).
+//
+// NodeID must be in [0, 2^23) and unique in the deployment: it is the high
+// part of every SharedLog.Seq this node creates. Signature must be non-empty
+// and distinct per node: waiters are only resolved, and consensus time only
+// measured, for delivered blocks carrying this node's signature. NewServer
+// panics on an out-of-range NodeID, an empty Signature or an unknown Commit.
+type ServerConfig struct {
+	NodeID    int
+	Signature string
+	BlockSize int // < 1 means DefaultBlockSize
+	Mode      VersionMode
+	Commit    CommitMode
+
+	FlushInterval time.Duration // <= 0 means DefaultFlushInterval (1 s)
+	SyncTimeout   time.Duration // <= 0 means DefaultSyncTimeout
+}
+
+// Server is the shared Veritas node core: it batches client Sets into
+// blocks, submits them to a consensus.Consensus, applies every delivered
+// block through the deterministic Executor and serves pbv.NodeServer.
+//
+// Goroutines: the batcher goroutine is the only caller of Submit. The
+// forwarder goroutine reads Deliver, stamps each block's arrival time and
+// hands it to the apply loop through a bounded channel (arrivalQueue); the
+// apply loop is the only caller of Apply. Neither ever calls Submit (see the
+// memnet self-block warning).
+//
+// Fatal errors: if Apply fails the store/ledger may be mid-block, so the
+// node stops instead of continuing on diverged state: it logs, fails all
+// waiters and every later RPC with ErrStopped, stops applying, and closes
+// the consensus backend (crash semantics). The forwarder keeps draining
+// Deliver (discarding blocks) until the channel closes, so peers sharing an
+// in-memory hub, or a backend whose Close waits for its Deliver buffer to
+// drain, are never blocked by a stopped node. SharedLogs already queued in
+// the batcher when the node stops are still flushed and submitted (by the
+// timer, or by Close), although their sync waiters have already been failed
+// with ErrStopped. A block that fails to unmarshal is skipped (every node
+// receives the same bytes, so skipping is deterministic); it still consumes
+// a height.
+type Server struct {
+	counter int64 // SharedLog.Seq counter; atomic; first for alignment
+
+	cfg         ServerConfig
+	c           consensus.Consensus
+	ex          *Executor
+	batcher     *Batcher
+	waiters     *waiterSet
+	metrics     *metrics
+	syncTimeout time.Duration
+	arrivals    chan arrival // forwarder -> apply loop; closed by forwarder
+
+	ctx    context.Context // cancelled by Close; parent of Submit contexts
+	cancel context.CancelFunc
+
+	stopMu  sync.Mutex
+	stopErr error         // non-nil once stopped
+	stopCh  chan struct{} // closed when stopped
+
+	loopDone  chan struct{} // closed when the apply loop returns
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// arrival is a delivered block stamped with the time the forwarder read it.
+type arrival struct {
+	raw []byte
+	at  time.Time
+}
+
+var _ pbv.NodeServer = (*Server)(nil)
+
+// NewServer starts a node over consensus c and executor ex and returns it;
+// it owns c from now on (Close closes it). l must be ex's ledger, or nil; it
+// is only checked, not kept: proofs are taken through ex.Prove, under the
+// executor lock, never from the ledger directly. NewServer panics on a wiring
+// bug: l is a different ledger, cfg.Mode differs from ex's mode, or cfg is
+// invalid (see ServerConfig). The caller still owns and closes l and ex's
+// store, after Close.
+func NewServer(cfg ServerConfig, c consensus.Consensus, ex *Executor, l *ledger.LogLedger) *Server {
+	if l != nil && l != ex.ledger {
+		panic("core: NewServer: ledger is not the executor's ledger")
+	}
+	if cfg.Mode != ex.mode {
+		panic(fmt.Sprintf("core: NewServer: config mode %d != executor mode %d", cfg.Mode, ex.mode))
+	}
+	if cfg.NodeID < 0 || int64(cfg.NodeID) >= maxNodeID {
+		panic(fmt.Sprintf("core: NewServer: NodeID %d out of range [0, %d)", cfg.NodeID, int64(maxNodeID)))
+	}
+	if cfg.Signature == "" {
+		panic("core: NewServer: empty Signature")
+	}
+	if cfg.Commit != CommitAsync && cfg.Commit != CommitSync {
+		panic(fmt.Sprintf("core: NewServer: unknown commit mode %d", cfg.Commit))
+	}
+	if cfg.SyncTimeout <= 0 {
+		cfg.SyncTimeout = DefaultSyncTimeout
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Server{
+		cfg:         cfg,
+		c:           c,
+		ex:          ex,
+		waiters:     newWaiterSet(),
+		metrics:     newMetrics(),
+		syncTimeout: cfg.SyncTimeout,
+		arrivals:    make(chan arrival, arrivalQueue),
+		ctx:         ctx,
+		cancel:      cancel,
+		stopCh:      make(chan struct{}),
+		loopDone:    make(chan struct{}),
+	}
+	s.batcher = newBatcher(cfg.BlockSize, cfg.FlushInterval, s.submitBlock, s.metrics.addBatch)
+	go s.forwardLoop()
+	go s.applyLoop()
+	return s
+}
+
+// Close stops the node and releases the backend, in this order:
+//
+//  1. The node is stopped FIRST: new RPCs fail with ErrStopped and waiting
+//     sync Sets are failed, including those whose SharedLog is still in the
+//     batcher.
+//  2. The batcher flushes what it holds (async Sets, and the SharedLogs of
+//     the sync Sets just failed). The flush gets closeFlushTimeout; then the
+//     server context is cancelled, which aborts its Submit if the backend
+//     honours ctx. Close then waits for the flush to return, so this step is
+//     bounded only for backends whose Submit honours ctx.
+//  3. The consensus backend is closed and the apply loop is waited for.
+//
+// It returns c.Close()'s error and is idempotent.
+func (s *Server) Close() error {
+	s.closeOnce.Do(func() {
+		s.stop(errors.New("server closed"))
+		flushed := make(chan struct{})
+		go func() {
+			s.batcher.Close()
+			close(flushed)
+		}()
+		select {
+		case <-flushed:
+		case <-time.After(closeFlushTimeout):
+		}
+		s.cancel()
+		<-flushed
+		s.closeErr = s.c.Close()
+		<-s.loopDone
+	})
+	return s.closeErr
+}
+
+// ---- gRPC handlers ----
+
+// Get reads the key from the executor's store and returns its value, like
+// the original server. A missing key is codes.NotFound (the original
+// returned redis.Nil as an error). Reads are not synchronised with Apply, so
+// a Get may observe a block half-applied (as in the original).
+func (s *Server) Get(ctx context.Context, req *pbv.GetRequest) (*pbv.GetResponse, error) {
+	if err := s.stoppedErr(); err != nil {
+		return nil, err
+	}
+	raw, ok, err := s.ex.store.Get(ctx, req.GetKey())
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "key %q not found", req.GetKey())
+	}
+	v, err := veritas.Decode(raw)
+	if err != nil {
+		return nil, err
+	}
+	return &pbv.GetResponse{Value: v.Val}, nil
+}
+
+// Set submits one write as a SharedLog{Seq, Sets: [req]} and, in CommitSync
+// mode, waits for its block (see commit). Unlike the original it does not
+// take a per-key lock: that lock only serialised the channel send and gave
+// no ordering guarantee.
+func (s *Server) Set(ctx context.Context, req *pbv.SetRequest) (*pbv.SetResponse, error) {
+	if err := s.commit(ctx, []*pbv.SetRequest{copySet(req)}); err != nil {
+		return nil, err
+	}
+	return &pbv.SetResponse{}, nil
+}
+
+// BatchSet mirrors the original: all Sets go into ONE SharedLog (staleness
+// is decided per Set version, and the SharedLog commits or aborts as a
+// whole); the commit mode applies as for Set. An empty request is
+// codes.InvalidArgument (the original panicked).
+func (s *Server) BatchSet(ctx context.Context, req *pbv.BatchSetRequest) (*pbv.BatchSetResponse, error) {
+	if len(req.GetSets()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "BatchSet: no sets")
+	}
+	sets := make([]*pbv.SetRequest, len(req.GetSets()))
+	for i, r := range req.GetSets() {
+		sets[i] = copySet(r)
+	}
+	if err := s.commit(ctx, sets); err != nil {
+		return nil, err
+	}
+	return &pbv.BatchSetResponse{}, nil
+}
+
+// Verify returns the ledger root and a Merkle proof for the key, as the
+// original server, but both come from Executor.Prove under one lock hold, so
+// the proof always matches the returned root.
+func (s *Server) Verify(ctx context.Context, req *pbv.VerifyRequest) (*pbv.VerifyResponse, error) {
+	if err := s.stoppedErr(); err != nil {
+		return nil, err
+	}
+	root, proof, err := s.ex.Prove([]byte(req.GetKey()))
+	if err != nil {
+		return nil, err
+	}
+	return &pbv.VerifyResponse{
+		RootDigest:            root,
+		SideNodes:             proof.SideNodes,
+		NonMembershipLeafData: proof.NonMembershipLeafData,
+	}, nil
+}
+
+func copySet(r *pbv.SetRequest) *pbv.SetRequest {
+	return &pbv.SetRequest{
+		Signature: r.GetSignature(),
+		Key:       r.GetKey(),
+		Value:     r.GetValue(),
+		Version:   r.GetVersion(),
+	}
+}
+
+// ---- commit path ----
+
+// nextSeq returns a new SharedLog seq, NodeID<<40 | counter (counter from
+// 1), in BOTH version modes. Seqs are therefore unique per deployment (given
+// unique NodeIDs); they identify waiters and blocks, never versions:
+// staleness (VersionClient) is decided by each Set's Version, and
+// VersionOrdered assigns versions from the height.
+func (s *Server) nextSeq() int64 {
+	n := atomic.AddInt64(&s.counter, 1) & (int64(1)<<seqNodeShift - 1)
+	return int64(s.cfg.NodeID)<<seqNodeShift | n
+}
+
+// commit queues SharedLog{seq, sets} with a fresh unique seq. CommitAsync
+// returns once it is queued. CommitSync registers a waiter for the seq
+// BEFORE queueing (the block can be applied before Submit even returns) and
+// waits for the first of:
+//
+//   - its block applied on this node: nil, or ErrAborted if the SharedLog
+//     was aborted;
+//   - its block's Submit failed: ErrSubmitFailed;
+//   - the node stopped: ErrStopped;
+//   - ctx done: ctx.Err() (wrapped with gRPC code Canceled or
+//     DeadlineExceeded);
+//   - SyncTimeout: ErrCommitTimeout.
+//
+// The waiter is removed on every path, so none leaks. If the block was
+// applied concurrently with ctx/timeout, the applied result wins. Two Sets
+// with the same client version get distinct seqs and therefore their own
+// results (e.g. one committed, the other aborted as stale).
+func (s *Server) commit(ctx context.Context, sets []*pbv.SetRequest) error {
+	if err := s.stoppedErr(); err != nil {
+		return err
+	}
+	seq := s.nextSeq()
+	sl := &pbv.SharedLog{Seq: seq, Sets: sets}
+
+	if s.cfg.Commit != CommitSync {
+		return s.addErr(s.batcher.addCtx(ctx, sl))
+	}
+
+	w, err := s.waiters.add(seq)
+	if err != nil {
+		return err
+	}
+	if err := s.batcher.addCtx(ctx, sl); err != nil {
+		s.waiters.remove(seq, w)
+		return s.addErr(err)
+	}
+
+	timer := time.NewTimer(s.syncTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-w.ch:
+		return err
+	case <-ctx.Done():
+		if err, ok := s.waiters.cancel(seq, w); ok {
+			return err
+		}
+		return ctxErr(ctx.Err())
+	case <-timer.C:
+		if err, ok := s.waiters.cancel(seq, w); ok {
+			return err
+		}
+		return &rpcError{codes.DeadlineExceeded, fmt.Errorf("%w after %v (seq %d)", ErrCommitTimeout, s.syncTimeout, seq)}
+	}
+}
+
+// ctxErr wraps a context error with its gRPC code, keeping errors.Is.
+func ctxErr(err error) error {
+	code := codes.Canceled
+	if errors.Is(err, context.DeadlineExceeded) {
+		code = codes.DeadlineExceeded
+	}
+	return &rpcError{code, err}
+}
+
+// addErr maps a batcher addCtx error to an RPC error.
+func (s *Server) addErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errBatcherClosed) {
+		if serr := s.stoppedErr(); serr != nil {
+			return serr
+		}
+		return &rpcError{codes.Unavailable, fmt.Errorf("%w: batcher closed", ErrStopped)}
+	}
+	return ctxErr(err) // the only other addCtx error is ctx.Err()
+}
+
+// submitBlock is the batcher's out: it stamps the block with this node's
+// signature, marshals it and submits it. It runs on the batcher goroutine
+// only. The block id used for the Consensus phase is Txs[0].Seq, unique per
+// node (the block identity the original server and the Kafka tracker use).
+// On failure the block's waiters get ErrSubmitFailed (even though the block
+// might in rare cases still be delivered later).
+func (s *Server) submitBlock(blk *pbv.Block) error {
+	start := time.Now()
+	blk.Signature = s.cfg.Signature
+	blk.Type = pbv.MessageType_Approve
+	raw, err := proto.Marshal(blk)
+	if err != nil {
+		s.failBlock(blk, err)
+		return fmt.Errorf("marshal: %w", err)
+	}
+	id := blk.Txs[0].GetSeq()
+	s.metrics.submitted(id, start)
+	ctx, cancel := context.WithTimeout(s.ctx, submitTimeout)
+	err = s.c.Submit(ctx, raw)
+	cancel()
+	if err != nil {
+		s.metrics.unsubmitted(id)
+		s.failBlock(blk, err)
+		return fmt.Errorf("submit: %w", err)
+	}
+	return nil
+}
+
+// failBlock fails the waiters of every SharedLog of blk.
+func (s *Server) failBlock(blk *pbv.Block, cause error) {
+	if s.cfg.Commit != CommitSync {
+		return
+	}
+	err := &rpcError{codes.Unavailable, fmt.Errorf("%w: %v", ErrSubmitFailed, cause)}
+	for _, sl := range blk.GetTxs() {
+		s.waiters.resolve(sl.GetSeq(), err)
+	}
+}
+
+// ---- deliver path ----
+
+// forwardLoop reads Deliver, stamps each block's arrival time and passes it
+// to the apply loop. Once the node is stopped it discards blocks instead of
+// waiting for room, so it always keeps draining Deliver. It closes
+// s.arrivals when Deliver is closed.
+func (s *Server) forwardLoop() {
+	defer close(s.arrivals)
+	for raw := range s.c.Deliver() {
+		a := arrival{raw: raw, at: time.Now()}
+		select {
+		case s.arrivals <- a:
+		case <-s.stopCh: // stopped: drop the block
+		}
+	}
+}
+
+// applyLoop is the only caller of Apply. height counts every block taken
+// from the arrival queue, starting at 1, so all nodes agree on it.
+func (s *Server) applyLoop() {
+	defer close(s.loopDone)
+	var height int64
+	for a := range s.arrivals {
+		height++
+		if s.stoppedErr() != nil {
+			continue // stopped: drain and discard
+		}
+		start := time.Now()
+		s.metrics.queued(start.Sub(a.at))
+		var blk pbv.Block
+		if err := proto.Unmarshal(a.raw, &blk); err != nil {
+			log.Printf("core: node %d: skipping undecodable block at height %d: %v", s.cfg.NodeID, height, err)
+			continue
+		}
+		own := blk.GetSignature() == s.cfg.Signature && len(blk.GetTxs()) > 0
+		if own {
+			s.metrics.delivered(blk.Txs[0].GetSeq(), a.at)
+		}
+		_, aborted, err := s.ex.Apply(context.Background(), height, a.raw, &blk)
+		ledgerTime := s.ex.TakeLedgerTime()
+		if err != nil {
+			log.Printf("core: node %d: FATAL apply at height %d, stopping node: %v", s.cfg.NodeID, height, err)
+			s.stop(fmt.Errorf("apply at height %d: %v", height, err))
+			go func() {
+				if cerr := s.c.Close(); cerr != nil {
+					log.Printf("core: node %d: closing consensus: %v", s.cfg.NodeID, cerr)
+				}
+			}()
+			continue
+		}
+		s.metrics.applied(time.Since(start)-ledgerTime, ledgerTime)
+		if own && s.cfg.Commit == CommitSync {
+			s.resolveBlock(&blk, aborted)
+		}
+	}
+	s.stop(errors.New("consensus delivery channel closed"))
+}
+
+// resolveBlock wakes the waiters of an applied own block. Waking a seq with
+// no waiter (async Set, waiter already gone, duplicate delivery) is a no-op.
+func (s *Server) resolveBlock(blk *pbv.Block, aborted []int64) {
+	var ab map[int64]struct{}
+	if len(aborted) > 0 {
+		ab = make(map[int64]struct{}, len(aborted))
+		for _, seq := range aborted {
+			ab[seq] = struct{}{}
+		}
+	}
+	for _, sl := range blk.GetTxs() {
+		seq := sl.GetSeq()
+		var err error
+		if _, ok := ab[seq]; ok {
+			err = &rpcError{codes.Aborted, fmt.Errorf("%w: seq %d", ErrAborted, seq)}
+		}
+		s.waiters.resolve(seq, err)
+	}
+}
+
+// ---- stop state ----
+
+// stop marks the node stopped (first cause wins), releases the forwarder
+// and fails all waiters.
+func (s *Server) stop(cause error) {
+	s.stopMu.Lock()
+	if s.stopErr != nil {
+		s.stopMu.Unlock()
+		return
+	}
+	err := &rpcError{codes.Unavailable, fmt.Errorf("%w: %v", ErrStopped, cause)}
+	s.stopErr = err
+	close(s.stopCh)
+	s.stopMu.Unlock()
+	s.waiters.failAll(err)
+}
+
+func (s *Server) stoppedErr() error {
+	s.stopMu.Lock()
+	defer s.stopMu.Unlock()
+	return s.stopErr
+}
+
+// ---- errors ----
+
+// rpcError carries a gRPC code (via GRPCStatus, which grpc-go uses when the
+// handler returns it) while still unwrapping to the sentinel errors above,
+// so errors.Is works for in-process callers.
+type rpcError struct {
+	code codes.Code
+	err  error
+}
+
+func (e *rpcError) Error() string              { return e.err.Error() }
+func (e *rpcError) Unwrap() error              { return e.err }
+func (e *rpcError) GRPCStatus() *status.Status { return status.New(e.code, e.err.Error()) }
+
+// ---- waiters ----
+
+// waiter receives exactly one result: it is sent at most once, under the
+// waiterSet lock, at the moment the waiter is removed from the set.
+type waiter struct {
+	ch chan error // capacity 1
+}
+
+// waiterSet holds the sync Sets waiting for their block, keyed by their
+// unique seq. Entries exist only while a Set is waiting, so the set is
+// bounded by the number of in-flight sync Sets (no per-seq history is kept).
+type waiterSet struct {
+	mu     sync.Mutex
+	m      map[int64]*waiter
+	closed error // set by failAll; add fails afterwards
+}
+
+func newWaiterSet() *waiterSet {
+	return &waiterSet{m: make(map[int64]*waiter)}
+}
+
+// add registers a waiter for seq, or returns the failAll error. seq must not
+// already have a waiter (seqs are unique; a duplicate is a bug).
+func (ws *waiterSet) add(seq int64) (*waiter, error) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if ws.closed != nil {
+		return nil, ws.closed
+	}
+	if _, dup := ws.m[seq]; dup {
+		panic(fmt.Sprintf("core: duplicate waiter for seq %#x", seq))
+	}
+	w := &waiter{ch: make(chan error, 1)}
+	ws.m[seq] = w
+	return w, nil
+}
+
+// remove deletes w if it is still registered; a no-op otherwise.
+func (ws *waiterSet) remove(seq int64, w *waiter) {
+	ws.mu.Lock()
+	if ws.m[seq] == w {
+		delete(ws.m, seq)
+	}
+	ws.mu.Unlock()
+}
+
+// cancel removes w and reports the result it had already been sent, if any
+// (ok=true), so a result that raced with ctx/timeout is not lost.
+func (ws *waiterSet) cancel(seq int64, w *waiter) (error, bool) {
+	ws.remove(seq, w)
+	select {
+	case err := <-w.ch:
+		return err, true
+	default:
+		return nil, false
+	}
+}
+
+// resolve sends err to the waiter of seq, if any, and removes it.
+func (ws *waiterSet) resolve(seq int64, err error) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if w, ok := ws.m[seq]; ok {
+		delete(ws.m, seq)
+		w.ch <- err
+	}
+}
+
+// failAll sends err to every waiter, empties the set and makes later adds
+// fail with err.
+func (ws *waiterSet) failAll(err error) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	ws.closed = err
+	for seq, w := range ws.m {
+		w.ch <- err
+		delete(ws.m, seq)
+	}
+}
+
+// count returns the number of registered waiters (for tests).
+func (ws *waiterSet) count() int {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	return len(ws.m)
+}
