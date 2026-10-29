@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	"errors"
 
 	"google.golang.org/grpc"
 
@@ -24,9 +25,15 @@ func Open(serverAddr, tsoAddr, signature string) (*Driver, error) {
 	}
 	dbCli := pbv.NewNodeClient(cc)
 
-	tsCli, err := tso.NewClient(tsoAddr)
-	if err != nil {
-		return nil, err
+	// An empty tsoAddr means no TSO is used (e.g. veritastm): writes carry
+	// Version 0 and no TSO client is created.
+	var tsCli *tso.Client
+	if tsoAddr != "" {
+		tsCli, err = tso.NewClient(tsoAddr)
+		if err != nil {
+			cc.Close()
+			return nil, err
+		}
 	}
 
 	return &Driver{
@@ -38,6 +45,9 @@ func Open(serverAddr, tsoAddr, signature string) (*Driver, error) {
 }
 
 func (d *Driver) Begin() (*db.TransactionDB, error) {
+	if d.tsCli == nil {
+		return nil, errors.New("driver: transactions require a TSO address")
+	}
 	ts, err := d.tsCli.TS()
 	if err != nil {
 		return nil, err
@@ -57,9 +67,12 @@ func (d *Driver) Get(ctx context.Context, key string) (string, error) {
 }
 
 func (d *Driver) Set(ctx context.Context, key, value string) error {
-	ts, err := d.tsCli.TS()
-	if err != nil {
-		return err
+	var ts int64
+	if d.tsCli != nil {
+		var err error
+		if ts, err = d.tsCli.TS(); err != nil {
+			return err
+		}
 	}
 	if _, err := d.dbCli.Set(ctx, &pbv.SetRequest{
 		Signature: d.signature,
