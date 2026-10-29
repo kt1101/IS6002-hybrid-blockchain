@@ -18,4 +18,5 @@ RUN go build -o /out/veritas-kafka ./cmd/veritas \
  && go build -o /out/veritas-tm ./cmd/veritastm \
  && go build -o /out/veritas-tso ./cmd/tso \
  && go build -o /out/ycsbbench ./veritas/benchmark/ycsbbench \
- && go build -o /out/hbdbprobe ./cmd/hbdbprobe
+ && go build -o /out/hbdbprobe ./cmd/hbdbprobe \
+ && go build -o /out/auditor ./cmd/auditor
