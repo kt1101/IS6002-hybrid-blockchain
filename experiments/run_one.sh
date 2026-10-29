@@ -41,8 +41,19 @@
 # SETTLE_TIMEOUT + WARMUP + DURATION + 120 s (exit 3), in case a call that
 # ignores its deadline (e.g. a hung TSO request) keeps it from exiting.
 #
+# Lock: only one run_one.sh at a time may use compose project hbdb. It takes
+# the directory results/raw/.hbdb.lock (mkdir is atomic; file `owner` holds
+# "pid EXP tag") and releases it on every exit path. If the lock is held by a
+# live pid the run exits 1 without touching the cluster; a lock whose pid is
+# dead is taken over.
+# Logs: on failure (or KEEP_LOGS=1) container logs, compose.json, the bench
+# log and docker-events.log (`docker events` of project hbdb during the run)
+# go to results/raw/<EXP>/logs/<tag>.<UTC start time>/, so repeated attempts
+# of one configuration never overwrite each other.
+#
 # Exit: 0 ok, 1 bad input or harness error (this includes a Kafka broker that
-#       never becomes healthy: `docker compose up` in up.sh then fails),
+#       never becomes healthy: `docker compose up` in up.sh then fails, and a
+#       cluster lock held by another live run_one.sh),
 #       2 cluster not healthy (no CSV row),
 #       3 benchmark failed, was killed by the watchdog, or a cluster container
 #       died or was OOM-killed during it (checked with docker inspect: status,
@@ -152,7 +163,10 @@ bench_log="$exp_dir/$tag.bench.log"
 samples="$exp_dir/.$tag.cpu"
 sampler_stop="$exp_dir/.$tag.cpu.stop"
 watchdog_fired="$exp_dir/.$tag.watchdog"
-log_dir="$exp_dir/logs/$tag"
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+log_dir="$exp_dir/logs/$tag.$stamp"   # one directory per attempt
+events_file="$exp_dir/.$tag.events"
+lock_dir="$HBDB_RESULTS_RAW/.hbdb.lock"
 mkdir -p "$exp_dir"
 
 if [ -s "$csv" ]; then
@@ -169,6 +183,46 @@ tags="ts=$ts,commit=$commit,exp=$EXP,backend=$BACKEND,n=$N,f=$F,clients=$CLIENTS
 bench_pid=""
 sampler_pid=""
 watchdog_pid=""
+events_pid=""
+lock_held=0
+
+# acquire_lock: one run at a time on compose project hbdb (see header).
+acquire_lock() {
+  local pid="" k=0
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    # The owner file is written right after mkdir: give a racing writer 3 s.
+    while [ "$k" -lt 3 ]; do
+      pid="$(cut -d' ' -f1 "$lock_dir/owner" 2>/dev/null || true)"
+      [ -n "$pid" ] && break
+      k=$((k + 1))
+      sleep 1
+    done
+    [ -n "$pid" ] || die "$lock_dir exists without owner info; if no run_one.sh is running, remove it"
+    if kill -0 "$pid" 2>/dev/null; then
+      die "another run_one.sh holds $lock_dir ($(cat "$lock_dir/owner" 2>/dev/null)): only one run at a time may use compose project $HBDB_PROJECT"
+    fi
+    log "stale lock $lock_dir (pid $pid is not running): taking it over"
+    rm -rf "$lock_dir"
+    mkdir "$lock_dir" 2>/dev/null || die "could not take over $lock_dir"
+  fi
+  lock_held=1
+  echo "$$ $EXP $tag" >"$lock_dir/owner"
+}
+
+release_lock() {
+  if [ "$lock_held" = 1 ]; then
+    rm -rf "$lock_dir"
+    lock_held=0
+  fi
+}
+
+stop_events() {
+  if [ -n "$events_pid" ]; then
+    kill "$events_pid" 2>/dev/null || true
+    wait "$events_pid" 2>/dev/null || true
+    events_pid=""
+  fi
+}
 
 # Ask the sampler loop to stop (it finishes its current sample), kill it if it
 # has not stopped after ~5 s.
@@ -232,14 +286,21 @@ save_logs() {
   done
   cp "$HBDB_COMPOSE_FILE" "$log_dir/compose.json" 2>/dev/null || true
   [ -f "$bench_log" ] && cp "$bench_log" "$log_dir/" || true
+  [ -f "$events_file" ] && cp "$events_file" "$log_dir/docker-events.log" || true
 }
 
 cleanup() {
   local rc=$?
   set +e
   trap - EXIT INT TERM
+  if [ "$lock_held" != 1 ]; then
+    # Never got the lock (bad input or another run is active): the cluster and
+    # the tag's temp files belong to someone else, touch nothing.
+    exit "$rc"
+  fi
   stop_watchdog
   stop_sampler
+  stop_events
   if [ -n "$bench_pid" ]; then
     kill "$bench_pid" 2>/dev/null
     wait "$bench_pid" 2>/dev/null
@@ -248,7 +309,8 @@ cleanup() {
     save_logs
   fi
   "$HBDB_CLUSTER_DIR/down.sh"
-  rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired"
+  rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$events_file"
+  release_lock
   if [ "$rc" -eq 0 ]; then
     log "done: $EXP/$tag"
   else
@@ -261,8 +323,13 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ---- cluster ----
+acquire_lock
 log "run $EXP/$tag (duration $DURATION, warmup $WARMUP, load threads $LOAD_THREADS, load timeout $LOAD_TIMEOUT, load op timeout $LOAD_OP_TIMEOUT, settle timeout $SETTLE_TIMEOUT, watchdog ${watchdog_secs}s)"
 "$HBDB_CLUSTER_DIR/down.sh" || exit 1
+# Record the project's container events (die, kill, oom, ...) for the whole
+# run; saved with the logs only if they are saved.
+docker events --filter "label=com.docker.compose.project=$HBDB_PROJECT" >"$events_file" 2>&1 &
+events_pid=$!
 "$HBDB_CLUSTER_DIR/up.sh" || exit 1
 if ! "$HBDB_CLUSTER_DIR/health.sh"; then
   log "health check failed; no CSV row written"
