@@ -1,10 +1,8 @@
 # Build image: compiles the linux/arm64 binaries into /out and doubles as the Go test runner (WORKDIR /src).
 FROM golang:1.20-bullseye
 
+# The golang image already ships gcc, libc6-dev, make and pkg-config, which cgo (confluent-kafka-go) needs.
 ENV CGO_ENABLED=1
-RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential \
- && rm -rf /var/lib/apt/lists/*
 
 # Module download is cached in this layer; source changes below do not invalidate it.
 WORKDIR /src

@@ -9,7 +9,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"github.com/golang/protobuf/proto"
-	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
+	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 
 	pbv "hybrid/proto/veritas"
 	"hybrid/veritas/keylocker"

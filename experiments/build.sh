@@ -7,7 +7,7 @@ cd "$ROOT"
 
 docker build -f experiments/docker/Dockerfile.build -t hbdb-build .
 
-mkdir -p bin
+rm -rf bin && mkdir -p bin
 cid="$(docker create hbdb-build)"
 trap 'docker rm "$cid" >/dev/null' EXIT
 docker cp "$cid:/out/." bin/

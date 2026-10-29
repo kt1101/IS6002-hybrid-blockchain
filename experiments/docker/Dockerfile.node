@@ -1,9 +1,12 @@
-# Runtime image for every Veritas node (Redis, Tendermint, tc/iptables for fault injection, our binaries).
-FROM debian:bullseye-slim
+# Runtime image for every Veritas node (Redis 6.2, Tendermint, tc/iptables for fault injection, our binaries).
+FROM redis:6.2-bookworm
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends redis-server iproute2 iptables ca-certificates \
+ && apt-get install -y --no-install-recommends iproute2 iptables ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Explicit names so stale or host-built (non-linux) files left in bin/ never reach the image.
-COPY bin/veritas-kafka bin/veritas-tm bin/veritas-tso bin/ycsbbench bin/tendermint /usr/local/bin/
+COPY bin/ /usr/local/bin/
+
+# Do not auto-start redis as the main process; later tasks start redis-server and veritas explicitly.
+ENTRYPOINT []
+CMD ["sleep", "infinity"]

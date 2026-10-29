@@ -1,7 +1,7 @@
 package kafkarole
 
 import (
-	"gopkg.in/confluentinc/confluent-kafka-go.v1/kafka"
+	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
 func NewProducer(serverAddr, topic string) (*kafka.Producer, error) {
