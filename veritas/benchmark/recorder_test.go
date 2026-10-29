@@ -2,6 +2,7 @@ package benchmark
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,75 @@ func TestTimelineBucketsPerSecond(t *testing.T) {
 	}
 	if tl[13] != 0 {
 		t.Fatalf("Timeline[13]=%d want 0", tl[13])
+	}
+}
+
+func TestErrorKindsCapAndOther(t *testing.T) {
+	s0 := time.Unix(0, 0)
+	r := NewRecorder(10*time.Second, 60*time.Second, s0)
+	in := s0.Add(11 * time.Second)
+	r.Observe(s0.Add(5*time.Second), time.Millisecond, errors.New("warmup only")) // not counted
+	// 25 distinct messages; message i occurs i+1 times.
+	total := int64(0)
+	for i := 0; i < 25; i++ {
+		for j := 0; j <= i; j++ {
+			r.Observe(in, time.Millisecond, fmt.Errorf("err-%02d", i))
+			total++
+		}
+	}
+	// A message seen before the cap was reached keeps being counted by name.
+	r.Observe(in, time.Millisecond, errors.New("err-00"))
+	total++
+	// Two more distinct (long) messages arrive after the cap: they go to other.
+	long := strings.Repeat("x", 1000)
+	r.Observe(in, time.Millisecond, errors.New(long+"a"))
+	r.Observe(in, time.Millisecond, errors.New(long+"b"))
+	total += 2
+
+	kinds := r.ErrorKinds()
+	if len(kinds) != MaxErrorKinds+1 {
+		t.Fatalf("got %d kinds, want %d named + other: %+v", len(kinds), MaxErrorKinds, kinds)
+	}
+	other := kinds[len(kinds)-1]
+	if other.Msg != ErrorKindOther {
+		t.Fatalf("last kind=%q want %q", other.Msg, ErrorKindOther)
+	}
+	// Messages err-20..err-24 (21+22+23+24+25 = 115) and the two long ones overflow.
+	if other.Count != 115+2 {
+		t.Fatalf("other=%d want 117", other.Count)
+	}
+	sum := int64(0)
+	byMsg := map[string]int64{}
+	for i, k := range kinds {
+		sum += k.Count
+		byMsg[k.Msg] = k.Count
+		if i > 0 && i < MaxErrorKinds && kinds[i-1].Count < k.Count {
+			t.Fatalf("kinds not sorted by count: %+v", kinds)
+		}
+	}
+	if sum != total || sum != r.Summary().Errors {
+		t.Fatalf("sum of kinds=%d, total=%d, Summary.Errors=%d", sum, total, r.Summary().Errors)
+	}
+	if byMsg["err-00"] != 2 || byMsg["err-19"] != 20 {
+		t.Fatalf("err-00=%d (want 2) err-19=%d (want 20)", byMsg["err-00"], byMsg["err-19"])
+	}
+	if _, ok := byMsg["warmup only"]; ok {
+		t.Fatal("warmup error must not be counted")
+	}
+	if kinds[0].Msg != "err-19" {
+		t.Fatalf("most frequent kind=%q want err-19", kinds[0].Msg)
+	}
+}
+
+func TestErrorKindsTruncatesLongMessages(t *testing.T) {
+	s0 := time.Unix(0, 0)
+	r := NewRecorder(0, 60*time.Second, s0)
+	long := strings.Repeat("y", 1000)
+	r.Observe(s0.Add(time.Second), time.Millisecond, errors.New(long+"a"))
+	r.Observe(s0.Add(time.Second), time.Millisecond, errors.New(long+"b"))
+	kinds := r.ErrorKinds()
+	if len(kinds) != 1 || kinds[0].Count != 2 || len(kinds[0].Msg) != maxErrorMsgLen {
+		t.Fatalf("kinds=%d first count=%d len=%d", len(kinds), kinds[0].Count, len(kinds[0].Msg))
 	}
 }
 

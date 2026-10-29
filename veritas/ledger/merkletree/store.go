@@ -6,6 +6,8 @@ import (
 	"runtime"
 
 	"github.com/dgraph-io/badger/v3"
+
+	"hybrid/veritas/ledger/badgeropt"
 )
 
 type KVStore interface {
@@ -56,7 +58,7 @@ type BadgerStore struct {
 
 // NewBadgerStore creates a new empty BadgerStore.
 func NewBadgerStore(path string) (*BadgerStore, error) {
-	db, err := badger.Open(badger.DefaultOptions(path))
+	db, err := badger.Open(badgeropt.Options(path))
 	if err != nil {
 		return nil, err
 	}

@@ -38,7 +38,9 @@ type Recorder struct {
 	lats      []time.Duration // successful ops inside the window
 	errors    int64
 	wrongGets int64
-	timeline  []int64 // successful ops per second since start, incl. warmup
+	errKinds  map[string]int64 // in-window errors by message, at most MaxErrorKinds keys
+	errOther  int64            // in-window errors whose message did not fit in errKinds
+	timeline  []int64          // successful ops per second since start, incl. warmup
 }
 
 // NewRecorder creates a Recorder for a run that began at start.
@@ -80,6 +82,7 @@ func (r *Recorder) observe(at time.Time, lat time.Duration, err error, wrong boo
 	if err != nil {
 		if inWindow {
 			r.errors++
+			r.countErrorKind(err.Error())
 		}
 		return
 	}
@@ -92,6 +95,59 @@ func (r *Recorder) observe(at time.Time, lat time.Duration, err error, wrong boo
 			r.wrongGets++
 		}
 	}
+}
+
+// MaxErrorKinds is the number of distinct error messages a Recorder keeps;
+// further distinct messages are counted under ErrorKindOther.
+const MaxErrorKinds = 20
+
+// ErrorKindOther is the Msg of the bucket for messages beyond MaxErrorKinds.
+const ErrorKindOther = "(other)"
+
+// maxErrorMsgLen bounds the length of a kept error message.
+const maxErrorMsgLen = 300
+
+// ErrorKind is the number of in-window errors with one message.
+type ErrorKind struct {
+	Msg   string
+	Count int64
+}
+
+// countErrorKind must be called with r.mu held.
+func (r *Recorder) countErrorKind(msg string) {
+	if len(msg) > maxErrorMsgLen {
+		msg = msg[:maxErrorMsgLen]
+	}
+	if r.errKinds == nil {
+		r.errKinds = make(map[string]int64)
+	}
+	if _, ok := r.errKinds[msg]; ok || len(r.errKinds) < MaxErrorKinds {
+		r.errKinds[msg]++
+		return
+	}
+	r.errOther++
+}
+
+// ErrorKinds returns the in-window errors grouped by message, most frequent
+// first (ties by message), followed by an ErrorKindOther entry if any error
+// did not fit into the first MaxErrorKinds distinct messages.
+func (r *Recorder) ErrorKinds() []ErrorKind {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]ErrorKind, 0, len(r.errKinds)+1)
+	for m, c := range r.errKinds {
+		out = append(out, ErrorKind{Msg: m, Count: c})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Msg < out[j].Msg
+	})
+	if r.errOther > 0 {
+		out = append(out, ErrorKind{Msg: ErrorKindOther, Count: r.errOther})
+	}
+	return out
 }
 
 // Summary aggregates the observations recorded so far.

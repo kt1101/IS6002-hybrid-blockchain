@@ -8,6 +8,7 @@ import (
 
 	"github.com/dgraph-io/badger/v3"
 
+	"hybrid/veritas/ledger/badgeropt"
 	"hybrid/veritas/ledger/merkletree"
 )
 
@@ -28,7 +29,8 @@ func CompositePrefix(prefix, key []byte) []byte {
 }
 
 func NewLedger(ledgerPath string, withMerkleTree bool) (*LogLedger, error) {
-	db, err := badger.Open(badger.DefaultOptions(ledgerPath))
+	// Low-memory badger options: each node runs under a 768 MB cap (see badgeropt).
+	db, err := badger.Open(badgeropt.Options(ledgerPath))
 	if err != nil {
 		return nil, err
 	}

@@ -24,3 +24,4 @@ results/raw/
 experiments/cluster/generated/
 __pycache__/
 .superpowers/
+results/ycsb/
