@@ -14,14 +14,16 @@ import (
 	hraft "github.com/hashicorp/raft"
 )
 
-// fastTimeouts shortens raft's timers so elections take well under a second
-// (the defaults, 1 s heartbeat / election, would still fit in the test
-// budgets, but slowly).
-func fastTimeouts(c *hraft.Config) {
-	c.HeartbeatTimeout = 500 * time.Millisecond
-	c.ElectionTimeout = 500 * time.Millisecond
-	c.LeaderLeaseTimeout = 250 * time.Millisecond
-	c.CommitTimeout = 10 * time.Millisecond
+// testTimeouts sets raft's timers for the tests: raft's defaults (1 s
+// heartbeat and election, a 500 ms lease below the heartbeat as
+// ValidateConfig requires), so that a slow -race run does not cause
+// spurious elections (which may lose or duplicate accepted blocks), and
+// quieter logs.
+func testTimeouts(c *hraft.Config) {
+	c.HeartbeatTimeout = time.Second
+	c.ElectionTimeout = time.Second
+	c.LeaderLeaseTimeout = 500 * time.Millisecond
+	c.CommitTimeout = 50 * time.Millisecond
 	c.LogLevel = "WARN"
 }
 
@@ -38,9 +40,17 @@ func freeAddr(t *testing.T) string {
 }
 
 // startCluster starts n nodes over connected in-memory transports, each with
-// a localhost forward address and a bolt store in a temp dir. node1 (index 0)
+// a localhost forward address and in-memory raft stores (DataDir ""; see
+// raft_bolt_test.go for why bolt is not used here). node1 (index 0)
 // bootstraps the full peer set. All nodes are closed at the end of the test.
 func startCluster(t *testing.T, n int) []*Raft {
+	t.Helper()
+	return startClusterStores(t, n, false)
+}
+
+// startClusterStores is startCluster; with bolt each node keeps its raft
+// log in a bolt store (and its snapshots in a file store) in a temp dir.
+func startClusterStores(t *testing.T, n int, bolt bool) []*Raft {
 	t.Helper()
 	addrs := make([]hraft.ServerAddress, n)
 	trans := make([]*hraft.InmemTransport, n)
@@ -60,13 +70,17 @@ func startCluster(t *testing.T, n int) []*Raft {
 	}
 	nodes := make([]*Raft, n)
 	for i := range nodes {
+		dir := ""
+		if bolt {
+			dir = t.TempDir()
+		}
 		r, err := New(Config{
 			ID:         peers[i].ID,
-			DataDir:    t.TempDir(),
+			DataDir:    dir,
 			Peers:      peers,
 			Bootstrap:  i == 0,
 			Transport:  trans[i],
-			raftConfig: fastTimeouts,
+			raftConfig: testTimeouts,
 		})
 		if err != nil {
 			t.Fatalf("New(%s): %v", peers[i].ID, err)
@@ -359,6 +373,80 @@ func TestRaftCloseIsIdempotentAndSubmitAfterCloseFails(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Errorf("%s: Deliver not closed after Close", r.self.ID)
 		}
+	}
+}
+
+// TestRaftCloseWithFullDeliver: nobody reads Deliver, so every node's FSM
+// ends up blocked on the full channel; Close must still return promptly
+// (closeCh releases the blocked FSM Apply) and close Deliver.
+func TestRaftCloseWithFullDeliver(t *testing.T) {
+	nodes := startCluster(t, 3)
+	li := waitLeader(t, nodes, -1)
+	const extra = 20
+	for k := 0; k < DeliverBuffer+extra; k++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := nodes[li].Submit(ctx, []byte(fmt.Sprintf("full-%d", k)))
+		cancel()
+		if err != nil {
+			t.Fatalf("Submit %d on leader node%d: %v", k, li+1, err)
+		}
+	}
+	// Wait until every node's Deliver is full (its FSM is then blocked).
+	deadline := time.Now().Add(10 * time.Second)
+	for _, r := range nodes {
+		for len(r.Deliver()) < DeliverBuffer {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: Deliver holds %d blocks after 10s, want %d", r.self.ID, len(r.Deliver()), DeliverBuffer)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	for _, r := range nodes {
+		done := make(chan error, 1)
+		go func(r *Raft) { done <- r.Close() }(r)
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Logf("%s Close: %v", r.self.ID, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: Close with a full Deliver did not return within 5s", r.self.ID)
+		}
+		n := 0
+		for range r.Deliver() { // returns once Deliver is closed
+			n++
+		}
+		if n != DeliverBuffer {
+			t.Errorf("%s: read %d buffered blocks after Close, want %d", r.self.ID, n, DeliverBuffer)
+		}
+	}
+}
+
+// TestRaftSubmitHonoursCtxWithoutQuorum: with the leader and one follower
+// closed, the last node can neither reach a leader nor elect one; Submit
+// must give up at its ctx deadline instead of waiting for a leader.
+func TestRaftSubmitHonoursCtxWithoutQuorum(t *testing.T) {
+	nodes := startCluster(t, 3)
+	li := waitLeader(t, nodes, -1)
+	si := (li + 1) % len(nodes) // a follower: it never leads again alone
+	for i, r := range nodes {
+		if i != si {
+			r.Close()
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	err := nodes[si].Submit(ctx, []byte("no-quorum"))
+	took := time.Since(start)
+	if err == nil {
+		t.Fatalf("Submit without quorum on node%d succeeded", si+1)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Submit without quorum = %v, want a context.DeadlineExceeded error", err)
+	}
+	if took > 2*time.Second {
+		t.Errorf("Submit without quorum took %v, want about 1s (its ctx)", took)
 	}
 }
 

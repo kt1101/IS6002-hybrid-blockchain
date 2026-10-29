@@ -17,12 +17,17 @@
 // be lost (leader change before commit) or, after a retry, delivered twice;
 // the core tolerates both.
 //
-// Snapshots are no-ops: the core keeps its state in redis and the ledger, not
-// in the FSM, so a snapshot persists nothing and Restore discards its input.
-// Consequence: a node that falls behind the leader's compacted log (more than
-// TrailingLogs entries) and gets an InstallSnapshot skips the blocks in the
-// snapshot. The defaults (snapshot every 8192 entries, 10240 trailing logs
-// kept) make that need a follower more than 10k blocks behind.
+// Snapshots and log compaction are switched off for experiment runs
+// (SnapshotThreshold and TrailingLogs = noCompaction, about 1e9 entries), so
+// every follower, however far behind, catches up from the log and delivers
+// every block. The FSM snapshot is empty anyway (the core keeps its state in
+// redis and the ledger, not in the FSM): should raft ever restore one (a
+// snapshot taken by hand, or InstallSnapshot), Restore logs loudly that the
+// blocks covered by the snapshot are skipped on this node.
+//
+// The leader's raft.Apply enqueue timeout is applyTimeout (10 s), shortened
+// to the Submit ctx's deadline (on a forward, to the follower's remaining
+// time, sent in the submitTimeoutHeader).
 package raft
 
 import (
@@ -36,6 +41,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,6 +77,12 @@ const (
 	maxBlockBytes = 64 << 20
 	// submitPath is the forward endpoint.
 	submitPath = "/submit"
+	// submitTimeoutHeader carries the forwarding follower's remaining Submit
+	// time in milliseconds; the leader bounds its Apply timeout by it.
+	submitTimeoutHeader = "X-Submit-Timeout-Ms"
+	// noCompaction is the SnapshotThreshold and TrailingLogs of every node:
+	// high enough that no snapshot or log compaction happens during a run.
+	noCompaction = 1 << 30
 )
 
 // ErrClosed is returned by Submit once Close has been called.
@@ -138,7 +150,7 @@ func New(cfg Config) (*Raft, error) {
 	}
 
 	closeCh := make(chan struct{})
-	f := &fsm{deliver: make(chan []byte, DeliverBuffer), closeCh: closeCh}
+	f := &fsm{id: cfg.ID, deliver: make(chan []byte, DeliverBuffer), closeCh: closeCh}
 	r := &Raft{
 		self:    self,
 		byAddr:  byAddr,
@@ -160,6 +172,8 @@ func New(cfg Config) (*Raft, error) {
 	conf.LocalID = hraft.ServerID(cfg.ID)
 	conf.LogOutput = os.Stderr
 	conf.LogLevel = "INFO"
+	conf.SnapshotThreshold = noCompaction
+	conf.TrailingLogs = noCompaction
 	if cfg.raftConfig != nil {
 		cfg.raftConfig(conf)
 	}
@@ -311,7 +325,12 @@ func (r *Raft) Submit(ctx context.Context, blk []byte) error {
 			continue
 		}
 		if leader == "" { // this node is the leader
-			r.apply(data)
+			if err := r.apply(ctx, data); err != nil {
+				if stop := r.stopErr(ctx); stop != nil {
+					err = stop // ErrClosed rather than the derived ctx's Canceled
+				}
+				return r.wrapStop(err, lastErr)
+			}
 			if r.isClosed() {
 				// Close raced with Apply: raft may have refused the entry.
 				return ErrClosed
@@ -334,14 +353,30 @@ func (r *Raft) Submit(ctx context.Context, blk []byte) error {
 }
 
 // apply hands data to raft (this node believes it is the leader) and returns
-// without waiting for the commit; a goroutine logs a failed future.
-func (r *Raft) apply(data []byte) {
-	fut := r.raft.Apply(data, applyTimeout)
+// without waiting for the commit; a goroutine logs a failed future. The
+// enqueue timeout is applyTimeout, shortened to ctx's deadline. With no time
+// left it returns ctx's error without calling Apply, since raft treats a
+// timeout <= 0 as "wait forever".
+func (r *Raft) apply(ctx context.Context, data []byte) error {
+	timeout := applyTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		if left := time.Until(dl); left < timeout {
+			timeout = left
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if timeout <= 0 {
+		return context.DeadlineExceeded
+	}
+	fut := r.raft.Apply(data, timeout)
 	go func() {
 		if err := fut.Error(); err != nil && !r.isClosed() {
 			log.Printf("raft consensus: %s: accepted block not committed: %v", r.self.ID, err)
 		}
 	}()
+	return nil
 }
 
 // waitLeader waits until a leader is known. It returns "" when this node is
@@ -395,6 +430,13 @@ func (r *Raft) forward(ctx context.Context, p Peer, data []byte) error {
 		return fmt.Errorf("raft consensus: forward to %s: %w", p.ID, err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+	if dl, ok := ctx.Deadline(); ok {
+		left := time.Until(dl).Milliseconds()
+		if left <= 0 {
+			return fmt.Errorf("raft consensus: forward to %s: %w", p.ID, context.DeadlineExceeded)
+		}
+		req.Header.Set(submitTimeoutHeader, strconv.FormatInt(left, 10))
+	}
 	resp, err := r.httpCli.Do(req)
 	if err != nil {
 		return fmt.Errorf("raft consensus: forward to %s: %w", p.ID, err)
@@ -409,7 +451,8 @@ func (r *Raft) forward(ctx context.Context, p Peer, data []byte) error {
 
 // handleSubmit is the forward endpoint: on the leader it calls Apply with
 // the request body and answers 200 once Apply returned (not on commit);
-// anywhere else it answers 503.
+// anywhere else it answers 503. The Apply timeout is bounded by the request
+// context and by the follower's remaining time (submitTimeoutHeader).
 func (r *Raft) handleSubmit(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -428,7 +471,21 @@ func (r *Raft) handleSubmit(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, errNotLeader.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	r.apply(data)
+	ctx := req.Context()
+	if v := req.Header.Get(submitTimeoutHeader); v != "" {
+		ms, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || ms <= 0 {
+			http.Error(w, "bad "+submitTimeoutHeader+": "+v, http.StatusBadRequest)
+			return
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(ms)*time.Millisecond)
+		defer cancel()
+	}
+	if err := r.apply(ctx, data); err != nil {
+		http.Error(w, "apply: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	atomic.AddInt64(&r.forwardsServed, 1)
 	w.WriteHeader(http.StatusOK)
 }
@@ -506,6 +563,7 @@ func (r *Raft) wrapStop(stop, last error) error {
 // fsm delivers every committed command entry. Its state lives outside raft
 // (redis + ledger, applied by the core), so snapshots are empty.
 type fsm struct {
+	id      string // this node's ID, for logs
 	deliver chan []byte
 	closeCh chan struct{} // the backend's; closed first by Close
 
@@ -545,9 +603,14 @@ func (f *fsm) close() {
 
 func (f *fsm) Snapshot() (hraft.FSMSnapshot, error) { return emptySnapshot{}, nil }
 
-// Restore discards the (empty) snapshot.
+// Restore discards the (empty) snapshot. Raft restores one only when this
+// node starts from a snapshot or the leader sends one (InstallSnapshot);
+// with noCompaction neither should happen. If it does, the blocks covered by
+// the snapshot are never delivered on this node: say so loudly.
 func (f *fsm) Restore(rc io.ReadCloser) error {
 	defer rc.Close()
+	log.Printf("raft consensus: %s: WARNING: restoring a raft snapshot; the FSM snapshot is empty, "+
+		"so every block up to the snapshot index is SKIPPED on this node (it will diverge from the others)", f.id)
 	_, err := io.Copy(io.Discard, rc)
 	return err
 }
