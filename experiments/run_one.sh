@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run one benchmark configuration on a fresh cluster and append one CSV row to
-# results/raw/<EXP>.csv (timeline: results/raw/<EXP>/<tag>.timeline).
+# results/raw/<EXP>.csv (timeline: results/raw/<EXP>/<tag>.timeline; per-node
+# core breakdown JSON, when the backend writes one: results/raw/<EXP>/<tag>.breakdown/).
 #
 #   EXP=smoke BACKEND=kafka-orig N=4 CLIENTS=16 DURATION=20s experiments/run_one.sh
 #
@@ -275,6 +276,19 @@ check_containers() {
   return 0
 }
 
+# Core-based nodes write results/raw/breakdown-node<i>.json when stopped
+# (down.sh). Move them into directory $1 so the next run cannot overwrite them; an
+# attempt that is retried replaces its files. No-op when there are none
+# (original backends).
+collect_breakdown() {
+  local f found=0
+  for f in "$HBDB_RESULTS_RAW"/breakdown-node*.json; do
+    [ -e "$f" ] || continue
+    [ "$found" = 1 ] || { mkdir -p "$1" || return 0; found=1; }
+    mv -f "$f" "$1/" || true
+  done
+}
+
 save_logs() {
   [ -f "$HBDB_COMPOSE_FILE" ] || return 0
   mkdir -p "$log_dir"
@@ -309,6 +323,7 @@ cleanup() {
     save_logs
   fi
   "$HBDB_CLUSTER_DIR/down.sh"
+  collect_breakdown "$exp_dir/$tag.breakdown"
   rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$events_file"
   release_lock
   if [ "$rc" -eq 0 ]; then
@@ -346,6 +361,8 @@ acquire_lock
 host_state start
 log "run $EXP/$tag (duration $DURATION, warmup $WARMUP, load threads $LOAD_THREADS, load timeout $LOAD_TIMEOUT, load op timeout $LOAD_OP_TIMEOUT, settle timeout $SETTLE_TIMEOUT, watchdog ${watchdog_secs}s)"
 "$HBDB_CLUSTER_DIR/down.sh" || exit 1
+# Files left by an earlier cluster (e.g. check_consistency.sh) are not this run's.
+collect_breakdown "$HBDB_RESULTS_RAW/breakdown-stale.$(date -u +%Y%m%dT%H%M%SZ)"
 # Record the project's container events (die, kill, oom, ...) for the whole
 # run; saved with the logs only if they are saved.
 docker events --filter "label=com.docker.compose.project=$HBDB_PROJECT" >"$events_file" 2>&1 &

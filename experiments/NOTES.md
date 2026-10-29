@@ -94,3 +94,25 @@ Nhận xét:
 ## Quyết định về N tối đa
 
 Ruling: **N <= 8 trên máy này** cho các thí nghiệm sau (thay cho N <= 16 / N <= 13 trong kế hoạch). Lý do: không phải bão hòa CPU (`saturated = 0` ở mọi điểm, CPU host <= 59%) mà là RAM: 16 node kafka-orig cần ~11 GB, trong khi Docker VM chỉ có 7,65 GiB (`mem 768m` x 16 node + Kafka/ZooKeeper). Muốn đo N=16 cần nâng RAM Docker VM lên >= 12 GiB rồi chạy `EXP=p0 PART=b NS_B="16" experiments/exp/p0_baseline.sh` (các dòng N=4/8 đã có sẽ được bỏ qua).
+
+## Kiểm tra P1 (core + backend `kafka` mới, commit `75b15cd`)
+
+- **Nhất quán**: `experiments/check_consistency.sh kafka` (N=4, sync, 16 client, 30 s) -> `CONSISTENT` (root digest giống nhau trên 4 node). 1 request `Aborted` (version cũ), được tính vào `errors`, không vào tps.
+- **Hồi quy (theo kế hoạch: async, N=4, YCSB-A, block 100, 3 lần; `results/raw/p1reg.csv`)**:
+
+| CLIENTS | kafka mới (async) | kafka-orig P0 | chênh |
+|---|---|---|---|
+| 64 | 16.957,5 (832,5) | 7.446,0 (914,1) | +128% |
+| 256 | 20.590,0 (802,1) | 12.790,5 (1.143,2) | +61% |
+
+  **Vượt ngưỡng ±10%** (theo chiều tăng). Nguyên nhân (chẩn đoán bằng `Breakdown`, `results/raw/p1reg/breakdown/`): ở chế độ async cả hai hệ thống trả lời client ngay khi tx vào hàng đợi, không có cơ chế chặn (backpressure): kafka-orig đẩy vào kênh đệm 10.000 phần tử rồi `Produce` bất đồng bộ; core mới trả lời khi tx vào batcher. Vì vậy tps async chỉ đo tốc độ nhận request của front-end (gRPC + hàng đợi), không đo tốc độ commit; đường `Set` của core mới không khóa theo key như bản gốc (`s.locker.Lock(key)`), đây là lý do có thể khiến nó nhận nhanh hơn (chưa đo riêng). Bằng chứng: ở async c256 mỗi node flush ~1.850–2.060 block nhưng toàn cụm chỉ apply 295 block trong cả lần chạy (consensus trung bình 8–25 s/block do tồn đọng, 105 block của node1 bị abort). Phần lớn request được "ack" ở async chưa bao giờ được commit trước khi cụm dừng.
+- **Đo bổ sung ở chế độ sync** (chế độ dùng cho E1–E6; `results/raw/p1diag.csv`, 1 lần mỗi mức):
+
+| CLIENTS | tps | lat_mean (ms) | lat_p99 (ms) | errors | consensus/block | execute+ledger/block | batch/block |
+|---|---|---|---|---|---|---|---|
+| 64 | 126,9 | 504,2 | 1.013,9 | 0 | 30–46 ms | 11–13 ms | 426–966 ms |
+| 256 | 507,6 | 499,9 | 1.232,0 | 160 (Aborted) | 29–46 ms | 25–28 ms | 406–922 ms |
+
+  Ở sync không có tồn đọng (consensus 30–46 ms/block, gần như không block bị drop). Thông lượng bị chặn bởi **bộ hẹn giờ flush 1 s của batcher** (giữ như code gốc): mỗi node chỉ có ~CLIENTS/N/2 lệnh `Set` đang chờ (YCSB-A có 50% đọc), ít hơn kích thước block 100, nên block chỉ được gửi khi hết 1 s; tps ~ CLIENTS / 0,5 s. Giống tm-orig, đây là chế độ bị giới hạn bởi độ trễ.
+- **Quyết định (Ruling)**: tiêu chí ±10% ở async không đo được điều nó định kiểm tra (tính đúng của phần tái cấu trúc), vì cả hai bên đều không chặn ở async. P1 được chấp nhận dựa trên: kiểm tra nhất quán `CONSISTENT`, test đơn vị/race của core và backend, và phép đo sync ở trên (đường commit không tồn đọng). Kết quả async được ghi lại như một khác biệt đã giải thích, không dùng trong các so sánh sau. Cần chú ý cho E1: với block 100 và flush 1 s, các backend ở sync sẽ bị giới hạn bởi bộ hẹn giờ trừ khi số client đủ lớn để làm đầy block (>= ~2 x 100 x N); khác biệt giữa các backend chỉ hiện rõ khi thời gian consensus đáng kể so với thời gian chờ batch.
+- Từ commit này, `run_one.sh` chuyển file breakdown của mỗi lần chạy vào `results/raw/<EXP>/<tag>.breakdown/` (trước đây file nằm ở `results/raw/` và bị lần chạy sau ghi đè).
