@@ -15,6 +15,15 @@
 #               not synchronized: a Verify racing with a commit could crash it.
 #   tm-orig:    phase 2 only: Set+Get on every node (veritastm Verify returns
 #               nil,nil, a gRPC marshal error, so it cannot be used).
+#   kafka:      phase 1  Verify("health") on every node (core.Server Verify
+#                        takes root and proof under the executor lock, so it
+#                        is safe at any time; it is what the auditor calls);
+#               phase 2  Set+Get through EVERY node + TSO (client versions):
+#                        each Set is a block proposed by that node, so this
+#                        checks every node's producer, consumer and vote path
+#                        (a block needs every node's approve read back from the
+#                        topic) and, in sync mode, that Set returns only once
+#                        the block is applied on the serving node.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
@@ -78,7 +87,7 @@ fail() {
 
 log "probing $BACKEND cluster (N=$N, timeout ${HEALTH_TIMEOUT}s)"
 
-if [ "$BACKEND" = kafka-orig ]; then
+if [ "$BACKEND" = kafka-orig ] || [ "$BACKEND" = kafka ]; then
   t="$(remaining)"
   i=1
   while [ "$i" -le "$N" ]; do
@@ -98,6 +107,13 @@ case "$BACKEND" in
     i=1
     while [ "$i" -le "$N" ]; do
       probe "node$i-setget" "$t" --addr="$(hbdb_node_ip "$i"):$HBDB_VERITAS_PORT" --mode=setget
+      i=$((i + 1))
+    done
+    ;;
+  kafka)
+    i=1
+    while [ "$i" -le "$N" ]; do
+      probe "node$i-setget" "$t" --addr="$(hbdb_node_ip "$i"):$HBDB_VERITAS_PORT" --mode=setget --tso-addr="$HBDB_TSO_ADDR"
       i=$((i + 1))
     done
     ;;

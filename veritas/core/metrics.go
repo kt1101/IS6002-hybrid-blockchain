@@ -44,6 +44,9 @@ import (
 //	    Count: Blocks. Execute + Ledger = decode + Apply wall time.
 //	  - Blocks: number of blocks applied successfully on this node (all
 //	    proposers; blocks that fail to decode are not counted).
+//	  - Dropped: number of THIS node's blocks that the consensus backend
+//	    reported as dropped (never delivered, e.g. a Kafka Abort vote), via
+//	    AbortBlock (drop.go). Counted in both commit modes.
 //
 // Not measured: waking waiters after Apply and the gRPC round trip.
 type Breakdown struct {
@@ -57,6 +60,8 @@ type Breakdown struct {
 	BatchBlocks     int64 `json:"batch_blocks"`
 	ConsensusBlocks int64 `json:"consensus_blocks"`
 	QueueBlocks     int64 `json:"queue_blocks"`
+
+	Dropped int64 `json:"dropped_blocks"`
 }
 
 const (

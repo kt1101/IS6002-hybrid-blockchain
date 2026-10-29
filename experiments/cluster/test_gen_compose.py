@@ -58,7 +58,7 @@ def test_tendermint_compose_has_no_kafka_or_tso():
 
 
 def test_volumes_are_per_node_and_named():  # để down -v xóa sạch
-    for backend in ("kafka-orig", "tm-orig"):
+    for backend in ("kafka-orig", "tm-orig", "kafka"):
         c = gen(backend=backend, n=5, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
         declared = c["volumes"]
         seen = set()
@@ -90,7 +90,7 @@ def test_every_service_has_init_and_short_grace():
 
 
 def test_unimplemented_backends_are_rejected(capsys):
-    for backend in ("kafka", "raft", "tendermint", "bft2"):
+    for backend in ("raft", "tendermint", "bft2"):
         with pytest.raises(NotImplementedError):
             gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
         assert main(["--backend", backend, "--n", "4"]) != 0
@@ -144,6 +144,7 @@ def test_node_exits_when_any_long_lived_process_dies():
     expect = {
         "kafka-orig": ("redis-server ", "veritas-kafka "),
         "tm-orig": ("redis-server ", "veritas-tm ", "tendermint start "),
+        "kafka": ("redis-server ", "veritas-kafka "),
     }
     for backend, procs in expect.items():
         c = gen(backend=backend, n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
@@ -156,3 +157,72 @@ def test_node_exits_when_any_long_lived_process_dies():
             for proc in procs:
                 started = [l for l in lines if proc in l and not l.startswith(("until", "#", "echo"))]
                 assert len(started) == 1 and started[0].endswith(" &"), (backend, k, proc, started)
+
+
+def test_kafka_backend_runs_core_server_with_kafka_orig_wiring():
+    c = gen(backend="kafka", n=4, block_size=50, commit_mode="sync", cpus=0.5, mem="768m",
+            results_dir="/res")
+    # Same broker and TSO services as kafka-orig.
+    assert "kafka" in c["services"] and "tso" in c["services"]
+    assert _ip(c, "kafka") == "172.28.0.2" and _ip(c, "tso") == "172.28.0.3"
+    assert _nodes(c) == ["node1", "node2", "node3", "node4"]
+    sigs = set()
+    for i, k in enumerate(_nodes(c), start=1):
+        s = c["services"][k]
+        assert s["depends_on"] == {"kafka": {"condition": "service_healthy"}}
+        assert s["volumes"] == ["node%d-data:/data" % i, "/res:/results"]
+        cmd = s["command"][-1]
+        assert ("GOMEMLIMIT=537MiB veritas-kafka --consensus=kafka --commit-mode=sync"
+                " --version-mode=client --node-id=%d --signature=node%d " % (i, i)) in cmd
+        assert "--parties=node1,node2,node3,node4 --blk-size=50 --addr=:1990" in cmd
+        assert "--kafka-addr=172.28.0.2:9092 --kafka-topic=shared-log" in cmd
+        # One consumer group per node = its signature (no shared --kafka-group).
+        assert "--kafka-group" not in cmd
+        assert "--redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d" % i in cmd
+        assert "--breakdown-out=/results/breakdown-node%d.json &" % i in cmd
+        sigs.add(cmd.split("--signature=")[1].split()[0])
+    assert len(sigs) == 4, "signatures must be distinct"
+
+
+def test_kafka_backend_passes_commit_mode():
+    for mode in ("sync", "async"):
+        c = gen(backend="kafka", n=2, block_size=100, commit_mode=mode, cpus=0.5, mem="768m")
+        for k in _nodes(c):
+            assert "--commit-mode=%s " % mode in c["services"][k]["command"][-1]
+
+
+def test_kafka_backend_forwards_sigterm_to_veritas():
+    # tini signals only bash; bash must pass SIGTERM on so the server can
+    # write its breakdown before the stop grace period ends.
+    c = gen(backend="kafka", n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    for k in _nodes(c):
+        lines = c["services"][k]["command"][-1].rstrip("\n").split("\n")
+        start = [j for j, l in enumerate(lines) if l.startswith("GOMEMLIMIT=") and "veritas-kafka " in l]
+        assert len(start) == 1
+        j = start[0]
+        # The trap is installed BEFORE veritas starts (no unprotected window)
+        # and tolerates an unset pid; the pid is recorded right after.
+        assert lines[j - 2] == "veritas_pid="
+        trap = lines[j - 1]
+        assert trap.startswith("trap 'if [ -n \"$$veritas_pid\" ]; then kill -TERM \"$$veritas_pid\"")
+        assert "wait \"$$veritas_pid\"" in trap
+        assert trap.endswith("exit 143' TERM INT")
+        assert lines[j + 1] == "veritas_pid=$$!"
+        assert lines[-3] == "wait -n || true"
+
+
+def test_original_backends_unchanged_by_kafka():
+    c = gen(backend="kafka-orig", n=2, block_size=100, commit_mode="async", cpus=0.5, mem="768m")
+    for k in _nodes(c):
+        cmd = c["services"][k]["command"][-1]
+        assert "--consensus" not in cmd and "trap " not in cmd
+        assert "--kafka-group=%s " % k[4:] in cmd
+        assert not any(v.endswith(":/results") for v in c["services"][k]["volumes"])
+
+
+def test_cli_accepts_kafka(tmp_path):
+    out = tmp_path / "compose.json"
+    assert main(["--backend", "kafka", "--n", "3", "--commit-mode", "async", "--out", str(out)]) == 0
+    c = json.loads(out.read_text())
+    assert _nodes(c) == ["node1", "node2", "node3"]
+    assert "--commit-mode=async" in c["services"]["node1"]["command"][-1]

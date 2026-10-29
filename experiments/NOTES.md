@@ -33,6 +33,7 @@
 - **Client Kafka: `confluent-kafka-go/v2` v2.1.1** thay cho v1.7.0. Lý do: v1.7.0 (và v1.9.2) chỉ đóng gói librdkafka x86-64, không link được trên arm64; v2.1.1 đóng gói linux/arm64 (glibc), cùng API `kafka`, vẫn là librdkafka như bài gốc.
 - **Giữ nguyên phiên bản**: Kafka 2.7.0 (kèm ZooKeeper), Tendermint v0.35.0, Redis 6.2 (ảnh `redis:6.2-bookworm` cho arm64 thay cho bullseye vì kho bảo mật Debian 11 đã ngừng).
 - **Chế độ commit theo bản gốc**: kafka-orig `async`, tm-orig `sync`; `p0_baseline.sh` không truyền `COMMIT_MODE`.
+- **Backend `kafka` mới: lỗi khi kiểm tra (validate) thì bỏ phiếu Abort.** Lỗi đọc redis hay lỗi giải mã khối trong lúc validate làm node bỏ phiếu `Abort`, nên khối bị loại trên toàn cụm (client `sync` nhận `ErrAborted`). Bản gốc (`veritas/server.go`) gọi `log.Fatalf` (node dừng hẳn).
 - **Số dòng kỳ vọng**: kế hoạch ghi 2 x (4+3) x 3 = 42 dòng, nhưng điểm N=4 ở CLIENTS tốt nhất của phần (b) trùng với một dòng phần (a); CSV không có cột "phần" nên dòng phần (a) được dùng lại, không chạy lại. Vậy có 2 x (4+2) x 3 = **36 dòng** riêng biệt (42 chỉ khi dùng `BEST_CLIENTS_*` ngoài {4,16,64,256}). Cộng thêm tối đa 2 dòng cho mỗi cấu hình vượt ngưỡng nhiễu (CV > 10%). Lưu ý: bước kiểm tra đủ dữ liệu trước phần (b) chỉ đòi đủ REPS lần chạy cơ bản; nếu một lần chạy thêm (rep 4–5) của phần (a) bị thiếu, CLIENTS tốt nhất có thể đổi khi chạy bù — khi đó xóa các dòng N=8/16 ứng với CLIENTS cũ trước khi chốt `results/p0-baseline.csv`.
 
 ## Chẩn đoán CPU của tm-orig

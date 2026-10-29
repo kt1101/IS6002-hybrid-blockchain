@@ -10,8 +10,12 @@ is needed. Layout (network ``hbdb``, subnet 172.28.0.0/16):
     node$i  172.28.0.(10+i) redis + veritas server (+ tendermint for tm-orig)
 
 Implemented backends: kafka-orig, tm-orig (the original Veritas code, started
-with the same flags as scripts/start_veritas_{kafka,tendermint}.sh). The other
-names are accepted by the CLI but rejected until their task adds them.
+with the same flags as scripts/start_veritas_{kafka,tendermint}.sh) and kafka
+(the same veritas-kafka binary with --consensus=kafka: core.Server over the
+deterministic consensus/kafka backend, with the kafka-orig Kafka/TSO/redis
+wiring; its nodes also mount the results dir on /results for the breakdown
+JSON written at shutdown). The other names are accepted by the CLI but
+rejected until their task adds them.
 
 The veritas server of every node runs with GOMEMLIMIT = 70% of the node's
 memory cap (768m -> 537MiB), so the Go GC works harder before the cap is hit
@@ -31,7 +35,7 @@ import re
 import sys
 
 ALL_BACKENDS = ("kafka-orig", "tm-orig", "kafka", "raft", "tendermint", "bft2")
-IMPLEMENTED = ("kafka-orig", "tm-orig")
+IMPLEMENTED = ("kafka-orig", "tm-orig", "kafka")
 COMMIT_MODES = ("sync", "async")
 
 PROJECT = "hbdb"
@@ -75,11 +79,13 @@ def node_ip(i):
 
 
 def uses_kafka(backend):
-    return backend in ("kafka-orig",)
+    return backend in ("kafka-orig", "kafka")
 
 
 def uses_tso(backend):
-    return backend in ("kafka-orig",)
+    # kafka runs --version-mode=client: Set versions come from the TSO, as in
+    # kafka-orig (without a TSO every write would carry version 0 and abort).
+    return backend in ("kafka-orig", "kafka")
 
 
 def gomemlimit(mem):
@@ -154,6 +160,37 @@ def _kafka_orig_node(i, n, block_size, memlimit):
     ] + _exit_when_any_exits(["redis-server", "veritas-kafka"])
 
 
+def _kafka_node(i, n, block_size, commit_mode, memlimit):
+    """Node of the deterministic Kafka backend (consensus/kafka + core.Server).
+
+    Same Kafka/TSO/redis wiring as kafka-orig; the signature node<i> is the
+    node's consumer group (one group per node, every node reads the whole
+    topic). The breakdown JSON goes to /results (the results dir is mounted).
+
+    tini (init: true) forwards SIGTERM only to bash, so bash traps it and
+    passes it on to veritas-kafka, which then closes the server and writes
+    its breakdown before the 5 s stop grace period ends.
+    """
+    parties = ",".join("node%d" % j for j in range(1, n + 1))
+    return [
+        "set -eu",
+    ] + REDIS_START + [
+        # Trap first, so no SIGTERM can arrive between the start and the
+        # trap; until veritas runs the trap only exits.
+        "veritas_pid=",
+        "trap 'if [ -n \"$veritas_pid\" ]; then kill -TERM \"$veritas_pid\" 2>/dev/null || true;"
+        " wait \"$veritas_pid\" || true; fi; exit 143' TERM INT",
+        "GOMEMLIMIT=%s veritas-kafka --consensus=kafka --commit-mode=%s --version-mode=client --node-id=%d"
+        " --signature=node%d --parties=%s --blk-size=%d --addr=:%d"
+        " --kafka-addr=%s:%d --kafka-topic=%s"
+        " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
+        " --breakdown-out=/results/breakdown-node%d.json &"
+        % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT, KAFKA_IP, KAFKA_PORT,
+           KAFKA_TOPIC, i, i),
+        "veritas_pid=$!",
+    ] + _exit_when_any_exits(["redis-server", "veritas-kafka"])
+
+
 def _tm_orig_node(i, n, block_size, memlimit):
     parties = ",".join("node%d" % j for j in range(1, n + 1))
     return [
@@ -207,7 +244,8 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
     """Return the compose document (a dict) for one cluster.
 
     commit_mode is accepted for every backend; the original backends have a
-    fixed behaviour (kafka-orig async, tm-orig sync) and ignore it.
+    fixed behaviour (kafka-orig async, tm-orig sync) and ignore it; the new
+    backends pass it to the server as --commit-mode.
     tm_dir is the `tendermint testnet` output (node0..node{n-1}), mounted
     read-only into node1..nodeN (tm-orig only).
     """
@@ -252,6 +290,10 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
         if backend == "kafka-orig":
             s["command"] = _bash(_kafka_orig_node(i, n, block_size, memlimit))
             s["depends_on"] = {"kafka": {"condition": "service_healthy"}}
+        elif backend == "kafka":
+            s["command"] = _bash(_kafka_node(i, n, block_size, commit_mode, memlimit))
+            s["depends_on"] = {"kafka": {"condition": "service_healthy"}}
+            s["volumes"].append("%s:/results" % results_dir)
         elif backend == "tm-orig":
             s["command"] = _bash(_tm_orig_node(i, n, block_size, memlimit))
             s["volumes"].append("%s:/tmcfg:ro" % os.path.join(tm_dir, "node%d" % (i - 1)))

@@ -5,7 +5,7 @@
 #   EXP=smoke BACKEND=kafka-orig N=4 CLIENTS=16 DURATION=20s experiments/run_one.sh
 #
 # Env (defaults):
-#   EXP (required, [A-Za-z0-9._-]+)   BACKEND (required: kafka-orig | tm-orig)
+#   EXP (required, [A-Za-z0-9._-]+)   BACKEND (required: kafka-orig | tm-orig | kafka)
 #   N=4  F=0  CLIENTS=16  BLOCK_SIZE=100  WORKLOAD=a  RTT_MS=0  FAULT=none  REP=1
 #   COMMIT_MODE: kafka-orig is always async, tm-orig always sync (the original
 #                code has no switch); default = the backend's mode, a mismatch
@@ -18,7 +18,11 @@
 #                 threads only deepen the backlog at ~60-70 tx/s and make
 #                 broadcast_tx_commit calls time out; tm_config.py raises rpc
 #                 max-subscription-clients to 2000 and caps blocks at 225000
-#                 bytes, ~220 txs)
+#                 bytes, ~220 txs); the new backends (kafka, raft,
+#                 tendermint, bft2) default to 256: they run sync commit by
+#                 default, so each load Set waits for its block and 10
+#                 threads would leave blocks of ~1-10 txs and a very slow
+#                 load (default from hbdb_default_load_threads in lib.sh)
 #   LOAD_TIMEOUT=20m: ycsbbench --load-timeout; a load that does not finish in
 #                 time, or any failed load Set, fails the run (exit 3)
 #   LOAD_OP_TIMEOUT=30s: ycsbbench --load-op-timeout, the deadline of one load
@@ -139,11 +143,7 @@ case "$COMMIT_MODE" in
   *) die "COMMIT_MODE must be sync or async, got '$COMMIT_MODE'" ;;
 esac
 
-if [ "$BACKEND" = tm-orig ]; then
-  LOAD_THREADS="${LOAD_THREADS:-64}"
-else
-  LOAD_THREADS="${LOAD_THREADS:-10}"
-fi
+LOAD_THREADS="${LOAD_THREADS:-$(hbdb_default_load_threads "$BACKEND")}"
 hbdb_require_uint LOAD_THREADS "$LOAD_THREADS"
 [ "$LOAD_THREADS" -ge 1 ] || die "LOAD_THREADS must be >= 1"
 

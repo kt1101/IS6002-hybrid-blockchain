@@ -16,7 +16,9 @@
 #   WAIT_SECS=5 (pause between the end of the bench and the audit),
 #   BLOCK_SIZE=100, COMMIT_MODE=sync, CPUS=0.5, MEM=768m, HEALTH_TIMEOUT=60,
 #   CLIENTS=16, WORKLOAD=a (needs $YCSB_DIR/<w>.load.dat and .run.dat, made by
-#   experiments/ycsb/gen.sh), KEEP_LOGS=0.
+#   experiments/ycsb/gen.sh), KEEP_LOGS=0, LOAD_THREADS (ycsbbench --load-threads;
+#   default from hbdb_default_load_threads in lib.sh, 256 for the new backends,
+#   as in run_one.sh).
 #
 # DURATION and WARMUP accept only the suffixes s and m (30s, 2m), unlike run_one.sh.
 #
@@ -57,6 +59,7 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
 CLIENTS="${CLIENTS:-16}"
 WORKLOAD="${WORKLOAD:-a}"
 KEEP_LOGS="${KEEP_LOGS:-0}"
+LOAD_THREADS="${LOAD_THREADS:-$(hbdb_default_load_threads "$BACKEND")}"
 LOAD_TIMEOUT_S=1200 # ycsbbench --load-timeout 20m
 SETTLE_TIMEOUT_S=600 # ycsbbench --settle-timeout 10m
 
@@ -65,6 +68,8 @@ hbdb_require_uint WAIT_SECS "$WAIT_SECS"
 hbdb_require_uint BLOCK_SIZE "$BLOCK_SIZE"
 hbdb_require_uint HEALTH_TIMEOUT "$HEALTH_TIMEOUT"
 hbdb_require_uint CLIENTS "$CLIENTS"
+hbdb_require_uint LOAD_THREADS "$LOAD_THREADS"
+[ "$LOAD_THREADS" -ge 1 ] || die "LOAD_THREADS must be >= 1"
 [ "$CLIENTS" -ge 1 ] || die "CLIENTS must be >= 1"
 case "$COMMIT_MODE" in
   sync | async) ;;
@@ -210,7 +215,7 @@ fi
 log "starting ycsbbench: $CLIENTS clients over $N nodes, workload $WORKLOAD, mode $(hbdb_bench_mode "$BACKEND")"
 hbdb_compose exec -T client ycsbbench \
   --load-path="/ycsb/$WORKLOAD.load.dat" --run-path="/ycsb/$WORKLOAD.run.dat" \
-  --ndrivers="$CLIENTS" --nthreads=1 \
+  --ndrivers="$CLIENTS" --nthreads=1 --load-threads="$LOAD_THREADS" \
   --veritas-addrs="$addrs" "$tso_arg" --mode="$(hbdb_bench_mode "$BACKEND")" \
   --warmup="$WARMUP" --duration="$DURATION" >"$bench_log" 2>&1 &
 bench_pid=$!
