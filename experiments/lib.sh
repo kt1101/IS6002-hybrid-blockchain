@@ -20,7 +20,7 @@ esac
 HBDB_VERITAS_PORT=1990
 HBDB_TSO_ADDR=172.28.0.3:7070
 HBDB_ALL_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
-HBDB_IMPLEMENTED_BACKENDS="kafka-orig tm-orig kafka"
+HBDB_IMPLEMENTED_BACKENDS="kafka-orig tm-orig kafka raft"
 
 # Must match csvColumns in veritas/benchmark/recorder.go.
 HBDB_CSV_HEADER="ts,commit,exp,backend,n,f,clients,block_size,workload,rtt_ms,fault,rep,commit_mode,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,wrong_gets,host_cpu_max_pct,saturated,net_bytes_per_block"
@@ -55,16 +55,16 @@ hbdb_in_list() {
 
 hbdb_backend_uses_tso() {
   case "$1" in
-    kafka-orig | kafka) return 0 ;;
+    kafka-orig | kafka | raft) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 # ycsbbench --mode for a backend: kafka = versions from the TSO (backends run
-# with client versions), tm = no TSO.
+# with client versions: kafka-orig, kafka, raft), tm = no TSO.
 hbdb_bench_mode() {
   case "$1" in
-    kafka-orig | kafka) echo kafka ;;
+    kafka-orig | kafka | raft) echo kafka ;;
     *) echo tm ;;
   esac
 }

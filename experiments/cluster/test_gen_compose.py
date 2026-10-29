@@ -58,7 +58,7 @@ def test_tendermint_compose_has_no_kafka_or_tso():
 
 
 def test_volumes_are_per_node_and_named():  # để down -v xóa sạch
-    for backend in ("kafka-orig", "tm-orig", "kafka"):
+    for backend in ("kafka-orig", "tm-orig", "kafka", "raft"):
         c = gen(backend=backend, n=5, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
         declared = c["volumes"]
         seen = set()
@@ -90,7 +90,7 @@ def test_every_service_has_init_and_short_grace():
 
 
 def test_unimplemented_backends_are_rejected(capsys):
-    for backend in ("raft", "tendermint", "bft2"):
+    for backend in ("tendermint", "bft2"):
         with pytest.raises(NotImplementedError):
             gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
         assert main(["--backend", backend, "--n", "4"]) != 0
@@ -145,6 +145,7 @@ def test_node_exits_when_any_long_lived_process_dies():
         "kafka-orig": ("redis-server ", "veritas-kafka "),
         "tm-orig": ("redis-server ", "veritas-tm ", "tendermint start "),
         "kafka": ("redis-server ", "veritas-kafka "),
+        "raft": ("redis-server ", "veritas-kafka "),
     }
     for backend, procs in expect.items():
         c = gen(backend=backend, n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
@@ -191,10 +192,11 @@ def test_kafka_backend_passes_commit_mode():
             assert "--commit-mode=%s " % mode in c["services"][k]["command"][-1]
 
 
-def test_kafka_backend_forwards_sigterm_to_veritas():
+@pytest.mark.parametrize("backend", ["kafka", "raft"])
+def test_core_backend_forwards_sigterm_to_veritas(backend):
     # tini signals only bash; bash must pass SIGTERM on so the server can
     # write its breakdown before the stop grace period ends.
-    c = gen(backend="kafka", n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    c = gen(backend=backend, n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
     for k in _nodes(c):
         lines = c["services"][k]["command"][-1].rstrip("\n").split("\n")
         start = [j for j, l in enumerate(lines) if l.startswith("GOMEMLIMIT=") and "veritas-kafka " in l]
@@ -226,3 +228,61 @@ def test_cli_accepts_kafka(tmp_path):
     c = json.loads(out.read_text())
     assert _nodes(c) == ["node1", "node2", "node3"]
     assert "--commit-mode=async" in c["services"]["node1"]["command"][-1]
+
+
+RAFT_PEERS_4 = ("node1=172.28.0.11:7100/172.28.0.11:7101,node2=172.28.0.12:7100/172.28.0.12:7101,"
+                "node3=172.28.0.13:7100/172.28.0.13:7101,node4=172.28.0.14:7100/172.28.0.14:7101")
+
+
+def test_raft_backend_runs_core_server_with_tso_and_no_kafka():
+    c = gen(backend="raft", n=4, block_size=50, commit_mode="sync", cpus=0.5, mem="768m",
+            results_dir="/res")
+    assert "kafka" not in c["services"]
+    assert "tso" in c["services"] and _ip(c, "tso") == "172.28.0.3"
+    assert _nodes(c) == ["node1", "node2", "node3", "node4"]
+    for i, k in enumerate(_nodes(c), start=1):
+        s = c["services"][k]
+        assert "depends_on" not in s
+        assert s["cap_add"] == ["NET_ADMIN"]
+        assert s["volumes"] == ["node%d-data:/data" % i, "/res:/results"]
+        cmd = s["command"][-1]
+        assert ("GOMEMLIMIT=537MiB veritas-kafka --consensus=raft --commit-mode=sync"
+                " --version-mode=client --node-id=%d --signature=node%d " % (i, i)) in cmd
+        assert "--parties=node1,node2,node3,node4 --blk-size=50 --addr=:1990" in cmd
+        # Every node gets the same full static peer set, raft state in its volume.
+        assert " --raft-peers=%s " % RAFT_PEERS_4 in cmd
+        assert " --raft-bind=0.0.0.0:7100 --raft-dir=/data/raft" in cmd
+        assert "--redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d" % i in cmd
+        assert "--breakdown-out=/results/breakdown-node%d.json &" % i in cmd
+        assert "kafka-addr" not in cmd and "kafka-topic" not in cmd and "kafka-group" not in cmd
+
+
+def test_raft_only_node1_bootstraps():
+    c = gen(backend="raft", n=5, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    boot = [k for k in _nodes(c) if "--raft-bootstrap" in c["services"][k]["command"][-1]]
+    assert boot == ["node1"]
+    assert c["services"]["node1"]["command"][-1].count("--raft-bootstrap") == 1
+
+
+def test_raft_backend_passes_commit_mode():
+    for mode in ("sync", "async"):
+        c = gen(backend="raft", n=2, block_size=100, commit_mode=mode, cpus=0.5, mem="768m")
+        for k in _nodes(c):
+            assert "--consensus=raft --commit-mode=%s " % mode in c["services"][k]["command"][-1]
+
+
+def test_raft_peers_follow_node_ips():
+    c = gen(backend="raft", n=12, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    cmd = c["services"]["node12"]["command"][-1]
+    peers = cmd.split("--raft-peers=")[1].split()[0].split(",")
+    assert len(peers) == 12
+    assert peers[11] == "node12=172.28.0.22:7100/172.28.0.22:7101"
+    assert [p.split("=")[0] for p in peers] == ["node%d" % i for i in range(1, 13)]
+
+
+def test_cli_accepts_raft(tmp_path):
+    out = tmp_path / "compose.json"
+    assert main(["--backend", "raft", "--n", "3", "--commit-mode", "async", "--out", str(out)]) == 0
+    c = json.loads(out.read_text())
+    assert _nodes(c) == ["node1", "node2", "node3"]
+    assert "--consensus=raft --commit-mode=async" in c["services"]["node1"]["command"][-1]

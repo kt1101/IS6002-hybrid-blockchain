@@ -14,8 +14,12 @@ with the same flags as scripts/start_veritas_{kafka,tendermint}.sh) and kafka
 (the same veritas-kafka binary with --consensus=kafka: core.Server over the
 deterministic consensus/kafka backend, with the kafka-orig Kafka/TSO/redis
 wiring; its nodes also mount the results dir on /results for the breakdown
-JSON written at shutdown). The other names are accepted by the CLI but
-rejected until their task adds them.
+JSON written at shutdown). raft is the same binary with --consensus=raft
+(consensus/raft): no Kafka, a TSO like kafka, and on every node besides redis
+and veritas the raft transport on RAFT_PORT and the submit-forwarding HTTP
+endpoint on RAFT_FORWARD_PORT (node$i: 172.28.0.(10+i):7100 and :7101); node1
+bootstraps the full static peer set, the others wait to be contacted. The
+other names are accepted by the CLI but rejected until their task adds them.
 
 The veritas server of every node runs with GOMEMLIMIT = 70% of the node's
 memory cap (768m -> 537MiB), so the Go GC works harder before the cap is hit
@@ -35,7 +39,7 @@ import re
 import sys
 
 ALL_BACKENDS = ("kafka-orig", "tm-orig", "kafka", "raft", "tendermint", "bft2")
-IMPLEMENTED = ("kafka-orig", "tm-orig", "kafka")
+IMPLEMENTED = ("kafka-orig", "tm-orig", "kafka", "raft")
 COMMIT_MODES = ("sync", "async")
 
 PROJECT = "hbdb"
@@ -53,6 +57,10 @@ TSO_PORT = 7070
 KAFKA_PORT = 9092
 KAFKA_TOPIC = "shared-log"
 TM_P2P_PORT = 26656
+# raft backend: raft transport (hashicorp/raft TCP) and the forward endpoint
+# (POST /submit: a follower hands a block to the leader), on every node.
+RAFT_PORT = 7100
+RAFT_FORWARD_PORT = 7101
 # Same sockets as scripts/start_veritas_tendermint.sh (TMSOCK1 / TMSOCK2).
 TM_ABCI_LISTEN = "tcp://0.0.0.0:26658"  # veritas-tm ABCI server
 TM_ABCI_DIAL = "tcp://127.0.0.1:26658"  # what tendermint connects to
@@ -83,9 +91,10 @@ def uses_kafka(backend):
 
 
 def uses_tso(backend):
-    # kafka runs --version-mode=client: Set versions come from the TSO, as in
-    # kafka-orig (without a TSO every write would carry version 0 and abort).
-    return backend in ("kafka-orig", "kafka")
+    # kafka and raft run --version-mode=client: Set versions come from the
+    # TSO, as in kafka-orig (without a TSO every write would carry version 0
+    # and abort).
+    return backend in ("kafka-orig", "kafka", "raft")
 
 
 def gomemlimit(mem):
@@ -174,21 +183,67 @@ def _kafka_node(i, n, block_size, commit_mode, memlimit):
     parties = ",".join("node%d" % j for j in range(1, n + 1))
     return [
         "set -eu",
-    ] + REDIS_START + [
-        # Trap first, so no SIGTERM can arrive between the start and the
-        # trap; until veritas runs the trap only exits.
-        "veritas_pid=",
-        "trap 'if [ -n \"$veritas_pid\" ]; then kill -TERM \"$veritas_pid\" 2>/dev/null || true;"
-        " wait \"$veritas_pid\" || true; fi; exit 143' TERM INT",
+    ] + REDIS_START + _forward_sigterm(
         "GOMEMLIMIT=%s veritas-kafka --consensus=kafka --commit-mode=%s --version-mode=client --node-id=%d"
         " --signature=node%d --parties=%s --blk-size=%d --addr=:%d"
         " --kafka-addr=%s:%d --kafka-topic=%s"
         " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
         " --breakdown-out=/results/breakdown-node%d.json &"
         % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT, KAFKA_IP, KAFKA_PORT,
-           KAFKA_TOPIC, i, i),
+           KAFKA_TOPIC, i, i)
+    ) + _exit_when_any_exits(["redis-server", "veritas-kafka"])
+
+
+def _forward_sigterm(start):
+    """Lines that start veritas (start ends with ' &') so that SIGTERM/SIGINT
+    reaching bash is passed on to it and bash waits for it (core backends:
+    the server writes its breakdown on SIGTERM).
+
+    The trap comes first, so no SIGTERM can arrive between the start and the
+    trap; until veritas runs the trap only exits.
+    """
+    return [
+        "veritas_pid=",
+        "trap 'if [ -n \"$veritas_pid\" ]; then kill -TERM \"$veritas_pid\" 2>/dev/null || true;"
+        " wait \"$veritas_pid\" || true; fi; exit 143' TERM INT",
+        start,
         "veritas_pid=$!",
-    ] + _exit_when_any_exits(["redis-server", "veritas-kafka"])
+    ]
+
+
+def raft_peers(n):
+    """--raft-peers of an n-node raft cluster: node<i>=RAFTADDR/FORWARDADDR.
+
+    >>> raft_peers(2)
+    'node1=172.28.0.11:7100/172.28.0.11:7101,node2=172.28.0.12:7100/172.28.0.12:7101'
+    """
+    return ",".join(
+        "node%d=%s:%d/%s:%d" % (j, node_ip(j), RAFT_PORT, node_ip(j), RAFT_FORWARD_PORT)
+        for j in range(1, n + 1))
+
+
+def _raft_node(i, n, block_size, commit_mode, memlimit):
+    """Node of the Raft backend (consensus/raft + core.Server).
+
+    Same binary, TSO and redis wiring as kafka, no Kafka. The raft server ID
+    is the signature node<i>; the raft log and snapshots live in /data/raft
+    (the node's named volume). node1 alone gets --raft-bootstrap (it
+    bootstraps the full static peer set; the others wait to be contacted).
+    The raft transport binds to all interfaces and advertises the node IP.
+    SIGTERM is forwarded as for kafka, so the breakdown reaches /results.
+    """
+    parties = ",".join("node%d" % j for j in range(1, n + 1))
+    return [
+        "set -eu",
+    ] + REDIS_START + _forward_sigterm(
+        "GOMEMLIMIT=%s veritas-kafka --consensus=raft --commit-mode=%s --version-mode=client --node-id=%d"
+        " --signature=node%d --parties=%s --blk-size=%d --addr=:%d"
+        " --raft-peers=%s --raft-bind=0.0.0.0:%d --raft-dir=/data/raft%s"
+        " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
+        " --breakdown-out=/results/breakdown-node%d.json &"
+        % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT,
+           raft_peers(n), RAFT_PORT, " --raft-bootstrap" if i == 1 else "", i, i)
+    ) + _exit_when_any_exits(["redis-server", "veritas-kafka"])
 
 
 def _tm_orig_node(i, n, block_size, memlimit):
@@ -293,6 +348,9 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
         elif backend == "kafka":
             s["command"] = _bash(_kafka_node(i, n, block_size, commit_mode, memlimit))
             s["depends_on"] = {"kafka": {"condition": "service_healthy"}}
+            s["volumes"].append("%s:/results" % results_dir)
+        elif backend == "raft":
+            s["command"] = _bash(_raft_node(i, n, block_size, commit_mode, memlimit))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "tm-orig":
             s["command"] = _bash(_tm_orig_node(i, n, block_size, memlimit))

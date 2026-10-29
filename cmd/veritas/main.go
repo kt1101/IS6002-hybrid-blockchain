@@ -5,10 +5,11 @@
 // so the kafka-orig baseline keeps using this binary (veritas-kafka).
 //
 // With --consensus=<backend> it runs the shared core: core.Executor +
-// core.Server over the chosen consensus backend. Only "kafka"
-// (consensus/kafka) exists so far; raft, tendermint and bft2 exit with a
-// "not implemented yet" error (Tasks 10-12). On SIGTERM/SIGINT the core path
-// closes the server, writes its time breakdown to --breakdown-out and exits.
+// core.Server over the chosen consensus backend: "kafka" (consensus/kafka)
+// or "raft" (consensus/raft, configured with the --raft-* flags);
+// tendermint and bft2 exit with a "not implemented yet" error (Tasks 11-12).
+// On SIGTERM/SIGINT the core path closes the server, writes its time
+// breakdown to --breakdown-out and exits.
 package main
 
 import (
@@ -28,6 +29,7 @@ import (
 
 	"hybrid/consensus"
 	kafkacons "hybrid/consensus/kafka"
+	raftcons "hybrid/consensus/raft"
 	"hybrid/dbconn"
 	"hybrid/kafkarole"
 	pbv "hybrid/proto/veritas"
@@ -55,6 +57,12 @@ var (
 	versionMode   = kingpin.Flag("version-mode", "core: client (client versions, stale writes abort) or ordered (versions from the consensus order)").Default("client").String()
 	nodeID        = kingpin.Flag("node-id", "core: node id in [0, 2^23), unique per deployment (high bits of every SharedLog seq)").Default("-1").Int()
 	breakdownOut  = kingpin.Flag("breakdown-out", "core: breakdown JSON written on SIGTERM/SIGINT (default /results/breakdown-node<node-id>.json)").Default("").String()
+
+	// --consensus=raft only. The raft server ID is --signature.
+	raftPeers     = kingpin.Flag("raft-peers", "raft: the full static cluster, ID=RAFTADDR/FORWARDADDR,... (ID = a node's signature; RAFTADDR its raft transport address, FORWARDADDR its submit-forwarding HTTP address)").Default("").String()
+	raftBind      = kingpin.Flag("raft-bind", "raft: listen address of the raft transport (default: this node's RAFTADDR)").Default("").String()
+	raftDir       = kingpin.Flag("raft-dir", "raft: data dir (bolt log store and snapshots)").Default("").String()
+	raftBootstrap = kingpin.Flag("raft-bootstrap", "raft: bootstrap the cluster with all of --raft-peers (exactly one node, node1)").Bool()
 )
 
 func check(err error) {
@@ -152,6 +160,7 @@ func runCore() {
 	if *nodeID < 0 || *nodeID >= 1<<23 {
 		kingpin.Fatalf("--node-id is required with --consensus and must be in [0, 2^23), got %d", *nodeID)
 	}
+	var peers []raftcons.Peer
 	switch *consensusName {
 	case "kafka":
 		requireFlag("kafka-addr", *kafkaAddr)
@@ -159,7 +168,14 @@ func runCore() {
 		if *kafkaGroup != "" && *kafkaGroup != *signature {
 			kingpin.Fatalf("--consensus=kafka: every node needs its own consumer group, which is its signature; drop --kafka-group or set it to %q", *signature)
 		}
-	case "raft", "tendermint", "bft2":
+	case "raft":
+		requireFlag("raft-peers", *raftPeers)
+		requireFlag("raft-dir", *raftDir)
+		var err error
+		if peers, err = parseRaftPeers(*raftPeers); err != nil {
+			kingpin.Fatalf("%v", err)
+		}
+	case "tendermint", "bft2":
 		fmt.Fprintf(os.Stderr, "veritas: --consensus=%s: not implemented yet\n", *consensusName)
 		os.Exit(2)
 	default:
@@ -199,6 +215,20 @@ func runCore() {
 		})
 		if err != nil {
 			log.Fatalf("kafka consensus: %v", err)
+		}
+	case "raft":
+		// No drop callback: raft reports no lost blocks. A block accepted
+		// but lost before commit (leader change) times out its sync
+		// waiters (core.DefaultSyncTimeout).
+		cons, err = raftcons.New(raftcons.Config{
+			ID:        *signature,
+			Bind:      *raftBind,
+			DataDir:   *raftDir,
+			Peers:     peers,
+			Bootstrap: *raftBootstrap,
+		})
+		if err != nil {
+			log.Fatalf("raft consensus: %v", err)
 		}
 	}
 
@@ -250,6 +280,29 @@ func runCore() {
 		log.Printf("redis close: %v", err)
 	}
 	log.Printf("bye")
+}
+
+// parseRaftPeers parses --raft-peers: comma-separated ID=RAFTADDR/FORWARDADDR
+// entries (empty entries are skipped). Duplicates and the presence of this
+// node are checked by raftcons.New.
+func parseRaftPeers(s string) ([]raftcons.Peer, error) {
+	var peers []raftcons.Peer
+	for _, item := range strings.Split(s, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		eq := strings.Index(item, "=")
+		addrs := strings.Split(item[eq+1:], "/")
+		if eq <= 0 || len(addrs) != 2 || addrs[0] == "" || addrs[1] == "" {
+			return nil, fmt.Errorf("--raft-peers entry %q: want ID=RAFTADDR/FORWARDADDR", item)
+		}
+		peers = append(peers, raftcons.Peer{ID: item[:eq], RaftAddr: addrs[0], ForwardAddr: addrs[1]})
+	}
+	if len(peers) == 0 {
+		return nil, fmt.Errorf("--raft-peers %q: no peers", s)
+	}
+	return peers, nil
 }
 
 // dropper forwards a backend's drop callback to a function set later

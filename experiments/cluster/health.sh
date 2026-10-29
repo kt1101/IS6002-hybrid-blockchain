@@ -24,6 +24,10 @@
 #                        (a block needs every node's approve read back from the
 #                        topic) and, in sync mode, that Set returns only once
 #                        the block is applied on the serving node.
+#   raft:       as kafka: phase 1 Verify on every node, phase 2 Set+Get
+#               through EVERY node + TSO; a follower's Set is forwarded to
+#               the leader, so this also waits for a leader election and
+#               checks every node's forward path and raft apply.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
@@ -87,7 +91,7 @@ fail() {
 
 log "probing $BACKEND cluster (N=$N, timeout ${HEALTH_TIMEOUT}s)"
 
-if [ "$BACKEND" = kafka-orig ] || [ "$BACKEND" = kafka ]; then
+if [ "$BACKEND" = kafka-orig ] || [ "$BACKEND" = kafka ] || [ "$BACKEND" = raft ]; then
   t="$(remaining)"
   i=1
   while [ "$i" -le "$N" ]; do
@@ -110,7 +114,7 @@ case "$BACKEND" in
       i=$((i + 1))
     done
     ;;
-  kafka)
+  kafka | raft)
     i=1
     while [ "$i" -le "$N" ]; do
       probe "node$i-setget" "$t" --addr="$(hbdb_node_ip "$i"):$HBDB_VERITAS_PORT" --mode=setget --tso-addr="$HBDB_TSO_ADDR"
