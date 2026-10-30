@@ -1,5 +1,6 @@
 // Package node runs one HotStuff replica (github.com/relab/hotstuff v0.5.0,
-// chained HotStuff, ECDSA, round-robin leaders) for the bft2 backend.
+// chained HotStuff, ECDSA; leaders in a per-epoch shuffled round robin, see
+// leader.go) for the bft2 backend.
 //
 // The module stack is the one the library's own orchestration worker builds
 // (internal/orchestration/worker.go createReplica), assembled here directly
@@ -19,11 +20,14 @@ package node
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/relab/gorums"
@@ -34,7 +38,6 @@ import (
 	"github.com/relab/hotstuff/crypto"
 	hsecdsa "github.com/relab/hotstuff/crypto/ecdsa"
 	"github.com/relab/hotstuff/eventloop"
-	"github.com/relab/hotstuff/leaderrotation"
 	"github.com/relab/hotstuff/logging"
 	"github.com/relab/hotstuff/modules"
 	"github.com/relab/hotstuff/synchronizer"
@@ -156,8 +159,8 @@ func (c *Config) setDefaults() {
 	}
 }
 
-// validatePeers checks that the IDs are exactly 1..N (round-robin leader
-// rotation assumes it), N >= 2 (gorums needs at least one other node), every
+// validatePeers checks that the IDs are exactly 1..N (the leader rotation
+// assumes it), N >= 2 (gorums needs at least one other node), every
 // address is set, and id is one of them. It returns the peers sorted by ID.
 func validatePeers(id hotstuff.ID, peers []Peer) ([]Peer, error) {
 	if len(peers) < 2 {
@@ -193,11 +196,15 @@ type Node struct {
 	peers []Peer // sorted by ID
 	infos []backend.ReplicaInfo
 
-	core   *modules.Core
-	hscfg  *backend.Config
-	server *backend.Server
-	queue  *cmdQueue
-	log    *CommitLog
+	core    *modules.Core
+	hscfg   *backend.Config
+	server  *backend.Server
+	queue   *cmdQueue
+	log     *CommitLog
+	adapter *adapter
+
+	view     atomic.Uint64 // current view (from the synchronizer's view-change events)
+	timeouts atomic.Uint64 // views ended by a timeout certificate
 
 	mu        sync.Mutex
 	started   bool
@@ -272,6 +279,8 @@ func New(cfg Config) (*Node, error) {
 		)),
 	)
 
+	n.adapter = &adapter{id: cfg.ID, queue: n.queue, log: n.log, idle: cfg.IdleWait}
+
 	ms := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 	viewDuration := boundedViewDuration{
 		inner: synchronizer.NewViewDuration(uint64(cfg.DurationSamples),
@@ -289,15 +298,27 @@ func New(cfg Config) (*Node, error) {
 		consensus.New(chainedhotstuff.New()),
 		consensus.NewVotingMachine(),
 		crypto.NewCache(hsecdsa.New(), verifiedCryptoCacheSize),
-		leaderrotation.NewRoundRobin(),
+		newShuffledRoundRobin(len(peers), leaderSeed(cfg.KeySeed)),
 		synchronizer.New(viewDuration),
 		newBlockChain(hotstuff.View(cfg.RetainViews)),
 		logging.New(fmt.Sprintf("hs%d", cfg.ID)),
 		n.hscfg,
 		n.server,
-		&adapter{id: cfg.ID, queue: n.queue, log: n.log, idle: cfg.IdleWait},
+		n.adapter,
 	)
 	n.core = builder.Build()
+
+	// Stats only: follow the view on the event loop (the synchronizer's
+	// own View() is not safe to read from other goroutines).
+	var eventLoop *eventloop.EventLoop
+	n.core.Get(&eventLoop)
+	eventLoop.RegisterHandler(synchronizer.ViewChangeEvent{}, func(event any) {
+		e := event.(synchronizer.ViewChangeEvent)
+		n.view.Store(uint64(e.View))
+		if e.Timeout {
+			n.timeouts.Add(1)
+		}
+	})
 	n.server.StartOnListener(lis)
 	return n, nil
 }
@@ -387,6 +408,13 @@ func waitTCP(ctx context.Context, addr string) error {
 	}
 }
 
+// leaderSeed derives the leader schedule's seed from the key seed, so every
+// replica of a deployment uses the same schedule.
+func leaderSeed(keySeed string) int64 {
+	h := sha256.Sum256([]byte("hbdb-bft2-leaders\x00" + keySeed))
+	return int64(binary.BigEndian.Uint64(h[:8]) >> 1)
+}
+
 // Submit queues cmd (copied) for proposal in this replica's next views as
 // leader. A nil error means accepted, not committed: the command may still
 // be lost (e.g. this replica crashes before proposing it) or, very rarely,
@@ -400,6 +428,33 @@ func (n *Node) Submit(cmd []byte) error {
 		return ErrTooLarge
 	}
 	return n.queue.push(hotstuff.Command(cmd))
+}
+
+// Stats is a snapshot of a replica's progress (for logs and tests).
+type Stats struct {
+	View      uint64 // current view
+	Timeouts  uint64 // views ended by a timeout certificate
+	Committed uint64 // committed non-empty commands (= Veritas blocks)
+	Proposed  uint64 // non-empty commands this replica proposed (re-proposals included)
+	Requeued  uint64 // own forked commands put back in the queue
+	Queued    int    // commands waiting for proposal
+}
+
+func (s Stats) String() string {
+	return fmt.Sprintf("view=%d timeouts=%d committed=%d proposed=%d requeued=%d queued=%d",
+		s.View, s.Timeouts, s.Committed, s.Proposed, s.Requeued, s.Queued)
+}
+
+// Stats returns a snapshot of the replica's progress.
+func (n *Node) Stats() Stats {
+	return Stats{
+		View:      n.view.Load(),
+		Timeouts:  n.timeouts.Load(),
+		Committed: n.adapter.committed.Load(),
+		Proposed:  n.adapter.proposed.Load(),
+		Requeued:  n.adapter.requeued.Load(),
+		Queued:    n.queue.len(),
+	}
 }
 
 // Log returns the commit log: every committed command, in commit order.

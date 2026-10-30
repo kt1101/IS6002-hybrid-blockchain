@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/relab/hotstuff"
@@ -17,6 +18,10 @@ type adapter struct {
 	queue *cmdQueue
 	log   *CommitLog
 	idle  time.Duration // how long the leader waits for a command before proposing a filler block
+
+	committed atomic.Uint64 // non-empty commands executed
+	proposed  atomic.Uint64 // non-empty commands returned by Get
+	requeued  atomic.Uint64 // own forked commands re-queued
 }
 
 var (
@@ -37,6 +42,7 @@ var (
 // ended or the node stopped.
 func (a *adapter) Get(ctx context.Context) (hotstuff.Command, bool) {
 	if cmd, ok := a.queue.pop(ctx, a.idle); ok {
+		a.proposed.Add(1)
 		return cmd, true
 	}
 	if ctx.Err() != nil || a.queue.isClosed() {
@@ -62,6 +68,7 @@ func (a *adapter) Exec(b *hotstuff.Block) {
 	if cmd == "" {
 		return
 	}
+	a.committed.Add(1)
 	a.log.Add([]byte(cmd))
 }
 
@@ -73,5 +80,6 @@ func (a *adapter) Fork(b *hotstuff.Block) {
 	if b.Proposer() != a.id || b.Command() == "" {
 		return
 	}
+	a.requeued.Add(1)
 	a.queue.pushFront(b.Command())
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -14,14 +15,54 @@ import (
 	"github.com/relab/hotstuff/logging"
 )
 
-var quietOnce sync.Once
+var logOnce sync.Once
+
+// testLogLevel is the hotstuff library's log level in the tests: env
+// BFT2_TEST_LOG (debug|info|warn|error), default error. With it set, the
+// cluster tests also log every replica's Stats once a second.
+func testLogLevel() (level string, verbose bool) {
+	if l := os.Getenv("BFT2_TEST_LOG"); l != "" {
+		return l, true
+	}
+	return "error", false
+}
+
+// logStats logs every node's Stats every interval until the test ends
+// (registered as a cleanup, so it stops before the nodes do).
+func logStats(t *testing.T, nodes []*Node, interval time.Duration) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tk := time.NewTicker(interval)
+		defer tk.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tk.C:
+				for i, nd := range nodes {
+					t.Logf("replica %d: %v", i+1, nd.Stats())
+				}
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		close(stop)
+		<-done
+		for i, nd := range nodes {
+			t.Logf("final replica %d: %v", i+1, nd.Stats())
+		}
+	})
+}
 
 // testCluster starts n replicas (IDs 1..n) on 127.0.0.1 ports, in this
 // process, with short view timeouts (generous enough for -race). Every node
 // is stopped at the end of the test.
 func testCluster(t *testing.T, n int) []*Node {
 	t.Helper()
-	quietOnce.Do(func() { logging.SetLogLevel("error") })
+	level, verbose := testLogLevel()
+	logOnce.Do(func() { logging.SetLogLevel(level) })
 	lis := make([]net.Listener, n)
 	peers := make([]Peer, n)
 	for i := range lis {
@@ -63,6 +104,11 @@ func testCluster(t *testing.T, n int) []*Node {
 			t.Fatalf("Start(%d): %v", i+1, err)
 		}
 	}
+	interval := 5 * time.Second
+	if verbose {
+		interval = time.Second
+	}
+	logStats(t, nodes, interval)
 	return nodes
 }
 

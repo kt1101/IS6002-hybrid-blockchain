@@ -107,6 +107,12 @@ func (q *cmdQueue) pop(ctx context.Context, idle time.Duration) (cmd hotstuff.Co
 	}
 }
 
+func (q *cmdQueue) len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items)
+}
+
 func (q *cmdQueue) isClosed() bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()

@@ -57,6 +57,7 @@ func main() {
 		maxBacklog = flag.Int64("max-backlog-bytes", node.DefaultMaxBacklogBytes, "max committed bytes not yet streamed to veritas (the replica then waits)")
 		maxCmd     = flag.Int("max-command-bytes", node.DefaultMaxCommandBytes, "largest command (Veritas block) accepted")
 		logLevel   = flag.String("log-level", "warn", "hotstuff library log level: debug|info|warn|error")
+		statsEvery = flag.Duration("stats-interval", 10*time.Second, "log view/commit counters this often (0: never)")
 	)
 	flag.Parse()
 	logging.SetLogLevel(*logLevel)
@@ -116,6 +117,13 @@ func main() {
 			log.Fatalf("%v", err)
 		}
 		log.Printf("bft2-node %d: connected, running", *id)
+		if *statsEvery > 0 {
+			go func() {
+				for range time.Tick(*statsEvery) {
+					log.Printf("bft2-node %d: %v", *id, n.Stats())
+				}
+			}()
+		}
 	case s := <-sig:
 		log.Printf("bft2-node %d: %v before start, stopping", *id, s)
 		srv.Close()
@@ -123,7 +131,7 @@ func main() {
 		return
 	}
 	s := <-sig
-	log.Printf("bft2-node %d: %v, stopping", *id, s)
+	log.Printf("bft2-node %d: %v, stopping (%v)", *id, s, n.Stats())
 	srv.Close() // ends the /deliver stream
 	n.Stop()
 }
