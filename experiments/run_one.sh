@@ -431,12 +431,16 @@ if ! "$HBDB_CLUSTER_DIR/health.sh"; then
 fi
 
 # ---- network delay (E5) and fault scheduling setup (faults.sh globals) ----
+# Stale fault files of an earlier attempt go BEFORE the RTT netem is logged
+# (a later rm would delete the netem_rtt line).
+rm -f "$faults_file" "$fault_stopped" "$fault_stop"
 FAULT_LOG=""
 if [ "$RTT_MS" -gt 0 ] || [ "$FAULT" != none ]; then
   FAULT_LOG="$faults_file"
 fi
 FAULT_STOPPED="$fault_stopped"
 FAULT_STOP="$fault_stop"
+FAULT_PARENT_PID=$$ # the injector aborts if this run_one.sh is gone
 FAULT_WARMUP_MS="$(dur_ms "$WARMUP")"
 FAULT_T0_MS=""
 if [ "$RTT_MS" -gt 0 ]; then
@@ -461,8 +465,7 @@ if hbdb_backend_uses_tso "$BACKEND"; then
   tso_arg="--tso-addr=$HBDB_TSO_ADDR"
 fi
 
-rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$exp_dir/$tag.timeline" \
-  "$faults_file" "$fault_stopped" "$fault_stop"
+rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$exp_dir/$tag.timeline"
 : >"$bench_log"
 : >"$samples"
 

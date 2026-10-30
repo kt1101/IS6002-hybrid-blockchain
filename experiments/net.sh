@@ -17,13 +17,17 @@
 #                        only the nodes are delayed.
 #   net_delay NODE MS    set NODE's egress delay to MS ms (replace: works with
 #                        or without an earlier qdisc, so it is idempotent);
-#                        MS=0 removes the qdisc.
+#                        MS=0 removes the qdisc. The queue limit is
+#                        NET_LIMIT_PKTS (100000) instead of netem's default
+#                        1000 packets, which a 200 ms delay overflows above
+#                        ~5000 pkt/s and turns "slow" into "slow + lossy".
 #
 # NET_BASE_DELAY_MS: the delay net_set_rtt put on every node (0 = none);
 # fault_slow (faults.sh) adds its delay on top of it.
 
 NET_DEV="${HBDB_NET_DEV:-eth0}"
 NET_BASE_DELAY_MS="${NET_BASE_DELAY_MS:-0}"
+NET_LIMIT_PKTS="${NET_LIMIT_PKTS:-100000}"
 
 # net_half_ms RTT_MS: RTT_MS / 2 in ms, as tc accepts it (10, 10.5).
 net_half_ms() {
@@ -44,7 +48,7 @@ net_delay() {
     # No delay: drop our qdisc if there is one (none is fine).
     hbdb_compose exec -T "$node" sh -c "tc qdisc del dev $NET_DEV root 2>/dev/null || true"
   else
-    hbdb_compose exec -T "$node" tc qdisc replace dev "$NET_DEV" root netem delay "${ms}ms"
+    hbdb_compose exec -T "$node" tc qdisc replace dev "$NET_DEV" root netem delay "${ms}ms" limit "$NET_LIMIT_PKTS"
   fi
 }
 

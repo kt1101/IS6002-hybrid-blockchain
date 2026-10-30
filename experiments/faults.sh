@@ -38,6 +38,9 @@
 #   FAULT_STOPPED    file: one service name per line for every node F1 stopped
 #                    on purpose (run_one.sh's container check skips them)
 #   FAULT_STOP       file whose existence aborts a pending wait ("" = none)
+#   FAULT_PARENT_PID a pending wait aborts once this pid is gone ("" = no
+#                    check), so an injector orphaned by a SIGKILLed
+#                    run_one.sh can never act on a later run's cluster
 #   FAULT_WARMUP_MS  warmup in ms
 #   FAULT_T0_MS      epoch ms of t=0 (set by fault_wait_marker; when empty a
 #                    fault_* call counts AT from the moment it is called)
@@ -52,6 +55,7 @@ fi
 FAULT_LOG="${FAULT_LOG:-}"
 FAULT_STOPPED="${FAULT_STOPPED:-}"
 FAULT_STOP="${FAULT_STOP:-}"
+FAULT_PARENT_PID="${FAULT_PARENT_PID:-}"
 FAULT_WARMUP_MS="${FAULT_WARMUP_MS:-0}"
 FAULT_T0_MS="${FAULT_T0_MS:-}"
 FAULT_SLOW_MS="${FAULT_SLOW_MS:-200}"
@@ -151,15 +155,27 @@ fault_log() {
   echo "$utc,$now,$t_s,$tl_s,$(echo "$FAULT_SPEC" | tr ',' '+'),$1,$2,$(echo "$3" | tr ',' ';')" >>"$FAULT_LOG"
 }
 
+# fault_should_abort: true when FAULT_STOP exists or FAULT_PARENT_PID is gone.
+fault_should_abort() {
+  if [ -n "$FAULT_STOP" ] && [ -e "$FAULT_STOP" ]; then
+    return 0
+  fi
+  if [ -n "$FAULT_PARENT_PID" ] && ! kill -0 "$FAULT_PARENT_PID" 2>/dev/null; then
+    log "fault injector: parent pid $FAULT_PARENT_PID is gone, aborting"
+    return 0
+  fi
+  return 1
+}
+
 # fault_wait_until AT: return 0 once FAULT_T0_MS + AT s is reached, 1 if
-# FAULT_STOP appears first. Without FAULT_T0_MS, t=0 is now.
+# fault_should_abort first. Without FAULT_T0_MS, t=0 is now.
 fault_wait_until() {
   local target now d
   hbdb_require_uint AT "$1"
   [ -n "$FAULT_T0_MS" ] || FAULT_T0_MS="$(hbdb_epoch_ms)"
   target=$((FAULT_T0_MS + 10#$1 * 1000))
   while :; do
-    if [ -n "$FAULT_STOP" ] && [ -e "$FAULT_STOP" ]; then
+    if fault_should_abort; then
       return 1
     fi
     now="$(hbdb_epoch_ms)"
@@ -172,11 +188,11 @@ fault_wait_until() {
 
 # fault_wait_marker BENCH_LOG: wait until ycsbbench logged the start of its
 # run phase, then set FAULT_T0_MS = that moment + FAULT_WARMUP_MS. Return 1
-# if FAULT_STOP appears first.
+# if fault_should_abort first.
 fault_wait_marker() {
   local run0
   while ! grep -q "$FAULT_RUN_MARKER" "$1" 2>/dev/null; do
-    if [ -n "$FAULT_STOP" ] && [ -e "$FAULT_STOP" ]; then
+    if fault_should_abort; then
       return 1
     fi
     sleep 0.1
@@ -188,13 +204,14 @@ fault_wait_marker() {
 
 # fault_crash NODES AT (F1): at second AT `docker stop` every node of NODES
 # (comma- or space-separated) in one call (docker stops them in parallel).
-# Each node is added to FAULT_STOPPED before the stop. Return 0 ok, 1 error,
-# 2 aborted by FAULT_STOP.
+# The container ids are looked up BEFORE the wait (each `docker compose ps`
+# takes a few hundred ms), so the stop is issued right at AT. Each node is
+# added to FAULT_STOPPED before the stop. Return 0 ok, 1 error, 2 aborted
+# (fault_should_abort).
 fault_crash() {
-  local nodes node id ids=""
+  local nodes node id ids="" names=""
   nodes="$(echo "$1" | tr ',+' '  ')"
   [ -n "$nodes" ] || die "fault_crash: no nodes"
-  fault_wait_until "$2" || return 2
   for node in $nodes; do
     id="$(hbdb_compose ps -q "$node" 2>/dev/null)"
     if [ -z "$id" ]; then
@@ -202,10 +219,14 @@ fault_crash() {
       fault_log docker_stop_failed "$node" "no running container"
       return 1
     fi
-    [ -z "$FAULT_STOPPED" ] || echo "$node" >>"$FAULT_STOPPED"
-    fault_log docker_stop "$node" "container $id"
     ids="$ids $id"
+    names="$names $node=$id"
   done
+  fault_wait_until "$2" || return 2
+  for node in $nodes; do
+    [ -z "$FAULT_STOPPED" ] || echo "$node" >>"$FAULT_STOPPED"
+  done
+  fault_log docker_stop "$(echo $nodes | tr ' ' '+')" "containers$names"
   log "fault F1: docker stop$(printf ' %s' $nodes)"
   # shellcheck disable=SC2086
   if ! docker stop $ids >/dev/null; then
@@ -229,6 +250,7 @@ fault_slow() {
     fault_log netem_delay_failed "$node" "tc failed"
     return 1
   fi
+  fault_log netem_applied "$node" "tc returned"
   return 0
 }
 
@@ -263,6 +285,7 @@ fault_silent_net() {
     fault_log iptables_drop_failed "$node" "iptables failed"
     return 1
   fi
+  fault_log iptables_applied "$node" "iptables returned"
   return 0
 }
 

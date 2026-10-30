@@ -12,7 +12,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/faults.sh"
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/test_faults.XXXXXX")"
-trap 'rm -rf "$TMP_ROOT"' EXIT
+[ -n "${KEEP_TMP:-}" ] || trap 'rm -rf "$TMP_ROOT"' EXIT # KEEP_TMP=1: keep it for debugging
 CALLS="$TMP_ROOT/calls"
 : >"$CALLS"
 pass=0
@@ -51,8 +51,10 @@ sleep() {
   SLEPT_MS=$((SLEPT_MS + ms))
 }
 DOCKER_STOP_RC=0
+TIMES="$TMP_ROOT/times" # "<call> <fake epoch ms>" per stubbed docker call
 docker() {
   echo "docker $*" >>"$CALLS"
+  echo "docker_$1 $FAKE_NOW" >>"$TIMES"
   case "$1" in
     stop) return "$DOCKER_STOP_RC" ;;
   esac
@@ -61,6 +63,7 @@ docker() {
 COMPOSE_EXEC_RC=0
 hbdb_compose() {
   echo "compose $*" >>"$CALLS"
+  echo "compose_$1 $FAKE_NOW" >>"$TIMES"
   case "$1" in
     ps) [ "$3" = node9 ] || echo "cid_$3" ;;
     exec)
@@ -84,7 +87,9 @@ reset() {
   NET_BASE_DELAY_MS=0
   DOCKER_STOP_RC=0
   COMPOSE_EXEC_RC=0
+  FAULT_PARENT_PID=""
   rm -f "$FAULT_LOG" "$FAULT_STOPPED" "$FAULT_STOP" "$TMP_ROOT/last_script"
+  : >"$TIMES"
 }
 
 # parse_rc SPEC BACKEND N DUR: run fault_parse in a subshell (die exits);
@@ -181,7 +186,7 @@ net_set_rtt 20 2>/dev/null
 eq "rtt base" "$NET_BASE_DELAY_MS" 10
 eq "rtt exec count" "$(grep -c 'tc qdisc replace dev eth0 root netem delay 10ms' "$CALLS")" 4
 for i in 1 2 3 4; do
-  grep -q "^compose exec -T node$i tc qdisc replace dev eth0 root netem delay 10ms$" "$CALLS" && ok || bad "rtt node$i"
+  grep -q "^compose exec -T node$i tc qdisc replace dev eth0 root netem delay 10ms limit 100000$" "$CALLS" && ok || bad "rtt node$i"
 done
 reset
 N=4
@@ -226,11 +231,15 @@ eq "F1 stopped file" "$(tr '\n' ' ' <"$FAULT_STOPPED")" "node3 node4 "
 eq "faults header" "$(head -n 1 "$FAULT_LOG")" "$FAULT_LOG_HEADER"
 line="$(grep ',run_phase_start,' "$FAULT_LOG")"
 eq "run_phase_start offsets" "$(echo "$line" | cut -d, -f3,4)" "-10.000,0.000"
-line="$(grep ',docker_stop,node4,' "$FAULT_LOG")"
+line="$(grep ',docker_stop,node3+node4,' "$FAULT_LOG")"
 eq "F1 log offsets" "$(echo "$line" | cut -d, -f2,3,4,5)" "1030000,20.000,30.000,F1:node3+node4@20"
 echo "$line" | cut -d, -f1 | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' && ok || bad "F1 log utc: $line"
 eq "faults log fields" "$(awk -F, '{ print NF }' "$FAULT_LOG" | sort -u)" 8
 grep -q ',stopped,node3+node4,' "$FAULT_LOG" && ok || bad "F1 stopped line"
+
+# The container ids are looked up before the wait, the stop is issued at AT.
+eq "F1 ids resolved before the wait" "$(grep '^compose_ps ' "$TIMES" | awk '{ print $2 }' | sort -u)" 1000000
+eq "F1 docker stop at exactly t0+AT" "$(grep '^docker_stop ' "$TIMES" | awk '{ print $2 }')" 1030000
 
 # docker stop fails -> rc 1
 reset
@@ -260,18 +269,47 @@ fault_parse F1:node4@20 raft 4 40
 fault_run "$TMP_ROOT/empty.log"; rc=$?
 eq "fault_run without marker" "$rc" 2
 
+# orphan guard: the parent run_one.sh is gone -> abort, nothing injected
+reset
+true &
+dead_pid=$!
+wait "$dead_pid"
+FAULT_PARENT_PID="$dead_pid"
+FAULT_T0_MS="$FAKE_NOW"
+fault_crash node4 5 2>/dev/null; rc=$?
+eq "orphan: F1 aborted" "$rc" 2
+grep -q '^docker stop' "$CALLS" && bad "orphan injector stopped a container" || ok
+reset
+FAULT_PARENT_PID="$dead_pid"
+printf 'ycsbbench: run phase started\n' >"$TMP_ROOT/m.log"
+fault_parse F3:node1@1 raft 4 40
+fault_run "$TMP_ROOT/m.log" 2>/dev/null; rc=$?
+eq "orphan: fault_run aborted" "$rc" 2
+grep -q 'tc qdisc' "$CALLS" && bad "orphan injector ran tc" || ok
+reset
+: >"$TMP_ROOT/empty2.log"
+FAULT_PARENT_PID="$dead_pid"
+fault_wait_marker "$TMP_ROOT/empty2.log" 2>/dev/null; rc=$?
+eq "orphan: marker wait aborted" "$rc" 1
+reset
+FAULT_PARENT_PID=$$ # alive: no abort
+FAULT_T0_MS="$FAKE_NOW"
+fault_wait_until 1; rc=$?
+eq "live parent: wait completes" "$rc" 0
+
 # ---- F3 slow ----
 reset
 FAULT_T0_MS="$FAKE_NOW"
 fault_slow node1 3 200 2>/dev/null; rc=$?
 eq "F3 rc" "$rc" 0
-grep -q '^compose exec -T node1 tc qdisc replace dev eth0 root netem delay 200ms$' "$CALLS" && ok || bad "F3 tc call: $(cat "$CALLS")"
+grep -q '^compose exec -T node1 tc qdisc replace dev eth0 root netem delay 200ms limit 100000$' "$CALLS" && ok || bad "F3 tc call: $(cat "$CALLS")"
 eq "F3 at AT" "$FAKE_NOW" 1003000
+grep -q ',netem_applied,node1,tc returned$' "$FAULT_LOG" && ok || bad "F3 applied line: $(cat "$FAULT_LOG")"
 reset
 FAULT_T0_MS="$FAKE_NOW"
 NET_BASE_DELAY_MS=30 # RTT_MS=60
 fault_slow node1 0 200 2>/dev/null
-grep -q 'netem delay 230ms$' "$CALLS" && ok || bad "F3 on top of RTT: $(cat "$CALLS")"
+grep -q 'netem delay 230ms limit 100000$' "$CALLS" && ok || bad "F3 on top of RTT: $(cat "$CALLS")"
 grep -q ',netem_delay,node1,delay 230ms = slow 200ms + base 30ms on eth0$' "$FAULT_LOG" && ok || bad "F3 log: $(cat "$FAULT_LOG")"
 reset
 FAULT_T0_MS="$FAKE_NOW"
@@ -284,6 +322,7 @@ reset
 FAULT_T0_MS="$FAKE_NOW"
 fault_silent_net node4 1 "$(hbdb_consensus_ports raft)" 2>/dev/null; rc=$?
 eq "F2 rc" "$rc" 0
+grep -q ',iptables_applied,node4,iptables returned$' "$FAULT_LOG" && ok || bad "F2 applied line: $(cat "$FAULT_LOG")"
 grep -q '^compose exec -T node4 sh -c ' "$CALLS" && ok || bad "F2 exec call: $(cat "$CALLS")"
 grep -q ',iptables_drop,node4,tcp OUTPUT --dport/--sport 7100 7101$' "$FAULT_LOG" && ok || bad "F2 log: $(cat "$FAULT_LOG")"
 # Run the generated script with a stub iptables: the first time every rule is
@@ -395,6 +434,144 @@ contains "run_one AT >= DURATION" "$r" "must be < DURATION"
 r="$(run_validate BACKEND=raft FAULT='F1:node4;x@1')"
 contains "run_one bad chars" "$r" "FAULT must match"
 eq "run_one validation touched no docker" "$(cat "$TMP_ROOT/real_docker_calls")" ""
+
+# ---- run_one.sh end to end with Docker and the cluster scripts stubbed ----
+# A copy of the harness in a sandbox repo whose cluster/{down,up,health}.sh
+# are no-ops and whose `docker` (first on PATH) fakes compose, stats,
+# inspect, stop and a ycsbbench that prints the run-phase marker, sleeps
+# STUB_BENCH_SECS and writes its row and timeline. This covers the wiring:
+# RTT netem logging order, the scheduler, stop_faults / fault_rc -> exit 3,
+# the check_containers exemption, the CSV-safe fault column and cleanup.
+SB="$TMP_ROOT/sb"
+mkdir -p "$SB/experiments/cluster" "$SB/bin" "$SB/ycsb" "$SB/state"
+cp "$HERE/run_one.sh" "$HERE/lib.sh" "$HERE/net.sh" "$HERE/faults.sh" "$SB/experiments/"
+for s in down up health; do
+  printf '#!/bin/sh\necho %s >>"$STUB_STATE/cluster.log"\nexit 0\n' "$s" >"$SB/experiments/cluster/$s.sh"
+  chmod +x "$SB/experiments/cluster/$s.sh"
+done
+echo "READ k1" >"$SB/ycsb/a.load.dat"
+echo "READ k1" >"$SB/ycsb/a.run.dat"
+cat >"$SB/bin/docker" <<'EOF'
+#!/bin/sh
+# Fake docker for test_faults.sh. State in $STUB_STATE.
+echo "docker $*" >>"$STUB_STATE/calls"
+svc_of() { case "$1" in ck) echo client ;; c*) echo "node${1#c}" ;; esac; }
+case "$1" in
+  events) exec sleep 600 ;;
+  info) echo 4; exit 0 ;;
+  stats) for a; do case "$a" in c*) echo "1.00%" ;; esac; done; sleep 0.2; exit 0 ;;
+  ps) printf 'c1\nc2\nc3\nc4\nck\n'; exit 0 ;;
+  inspect)
+    for id; do :; done
+    if [ -e "$STUB_STATE/stopped_$id" ]; then echo "$(svc_of "$id") exited false 0"
+    elif [ "$id" = "${STUB_DEAD:-}" ]; then echo "$(svc_of "$id") exited false 137"
+    else echo "$(svc_of "$id") running false 0"; fi
+    exit 0 ;;
+  stop)
+    shift
+    [ "${STUB_STOP_RC:-0}" = 0 ] || exit "$STUB_STOP_RC"
+    for id; do : >"$STUB_STATE/stopped_$id"; done
+    exit 0 ;;
+  compose)
+    shift 5 # compose -p hbdb -f FILE
+    case "$1" in
+      ps) if [ -n "${3:-}" ]; then echo "c${3#node}"; else printf 'c1\nc2\nc3\nc4\nck\n'; fi; exit 0 ;;
+      exec)
+        shift 2 # exec -T
+        svc="$1"
+        shift
+        if [ "$svc" != client ]; then exit "${STUB_EXEC_RC:-0}"; fi
+        out="" tl="" tags=""
+        for a; do
+          case "$a" in
+            --out=*) out="$STUB_RESULTS${a#--out=/results}" ;;
+            --timeline=*) tl="$STUB_RESULTS${a#--timeline=/results}" ;;
+            --tags=*) tags="${a#--tags=}" ;;
+          esac
+        done
+        echo "ycsbbench: loaded 1 records"
+        echo "ycsbbench: run phase started (warmup x, duration y)"
+        sleep "${STUB_BENCH_SECS:-1}"
+        printf '5\n5\n5\n' >"$tl"
+        vals="$(echo "$tags" | tr ',' '\n' | sed 's/^[^=]*=//' | tr '\n' ',' | sed 's/,$//')"
+        printf '%s\n%s,100.0,1.0,1.0,2.0,0,0,,,\n' "$STUB_HEADER" "$vals" >"$out"
+        exit "${STUB_BENCH_RC:-0}" ;;
+      *) exit 0 ;;
+    esac ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$SB/bin/docker"
+# run_one.sh's host_state reads vm.loadavg; some sandboxes forbid sysctl.
+printf '#!/bin/sh\necho "{ 1.00 1.00 1.00 }"\n' >"$SB/bin/sysctl"
+chmod +x "$SB/bin/sysctl"
+SB_RAW="$SB/results/raw"
+# itest NAME ENV...: run the sandboxed run_one.sh; sets it_rc, it_err.
+itest() {
+  local name="$1"
+  shift
+  rm -rf "$SB/state"
+  mkdir -p "$SB/state"
+  it_err="$(env PATH="$SB/bin:$PATH" STUB_STATE="$SB/state" STUB_RESULTS="$SB_RAW" STUB_HEADER="$HBDB_CSV_HEADER" \
+    YCSB_DIR="$SB/ycsb" BACKEND=raft N=4 WARMUP=0s "$@" "$SB/experiments/run_one.sh" 2>&1 >/dev/null)"
+  it_rc=$?
+}
+raw_tag() { # raw_tag EXP: the single .faults file of the experiment
+  ls "$SB_RAW/$1"/*.faults 2>/dev/null
+}
+
+# A: RTT only -> .faults keeps the netem_rtt record; netem with limit.
+itest rtt EXP=it_rtt RTT_MS=20 DURATION=2s STUB_BENCH_SECS=0.3
+eq "itest rtt rc" "$it_rc" 0
+f="$(raw_tag it_rtt)"
+[ -n "$f" ] && ok || bad "itest rtt: no .faults file: $it_err"
+grep -q ',netem_rtt,node1-node4,egress delay 10ms on every node (RTT_MS=20)$' "$f" 2>/dev/null && ok || bad "itest rtt: no netem_rtt line"
+eq "itest rtt tc calls" "$(grep -c 'exec -T node[1-4] tc qdisc replace dev eth0 root netem delay 10ms limit 100000$' "$SB/state/calls")" 4
+eq "itest rtt row" "$(tail -n 1 "$SB_RAW/it_rtt.csv" | cut -d, -f10,11)" "20,none"
+eq "itest rtt lock released" "$(ls -d "$SB_RAW/.hbdb.lock" 2>/dev/null)" ""
+
+# B: RTT + F1 on two nodes with a warmup: injected at marker + WARMUP + AT,
+# the stopped nodes do not fail the run, the fault column is CSV-safe.
+itest f1 EXP=it_f1 RTT_MS=20 FAULT=F1:node3,node4@1 WARMUP=1s DURATION=2s STUB_BENCH_SECS=3
+eq "itest f1 rc" "$it_rc" 0
+f="$(raw_tag it_f1)"
+grep -q ',netem_rtt,' "$f" 2>/dev/null && ok || bad "itest f1: netem_rtt line lost"
+line="$(grep ',docker_stop,node3+node4,' "$f" 2>/dev/null)"
+t_s="$(echo "$line" | cut -d, -f3)"
+tl_s="$(echo "$line" | cut -d, -f4)"
+awk -v t="$t_s" -v l="$tl_s" 'BEGIN { exit !(t >= 1.0 && t < 1.6 && l >= 2.0 && l < 2.6) }' && ok ||
+  bad "itest f1 offsets t_s=$t_s timeline_s=$tl_s (want ~1 / ~2): $(cat "$f" 2>/dev/null)"
+grep -q '^docker stop c3 c4$' "$SB/state/calls" && ok || bad "itest f1 docker stop: $(grep stop "$SB/state/calls")"
+contains "itest f1 exemption logged" "$it_err" "container node3 is exited (exit code 0): stopped on purpose by FAULT=F1:node3,node4@1"
+row="$(tail -n 1 "$SB_RAW/it_f1.csv")"
+eq "itest f1 row fields" "$(echo "$row" | awk -F, '{ print NF }')" 22
+eq "itest f1 fault column" "$(echo "$row" | cut -d, -f11)" "F1:node3+node4@1"
+eq "itest f1 temp files removed" "$(ls -a "$SB_RAW/it_f1" | grep -c -e '\.stopped$' -e '\.fault\.stop$')" 0
+
+# C: docker stop fails -> exit 3, no row.
+itest stopfail EXP=it_stopfail FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1 STUB_STOP_RC=1
+eq "itest stop failure rc" "$it_rc" 3
+contains "itest stop failure msg" "$it_err" "fault injection F1:node4@0 failed"
+[ -e "$SB_RAW/it_stopfail.csv" ] && bad "itest stop failure wrote a CSV row" || ok
+
+# D: the benchmark ends before AT -> never injected -> exit 3, no row.
+itest early EXP=it_early FAULT=F1:node4@2 DURATION=3s STUB_BENCH_SECS=0.3
+eq "itest early end rc" "$it_rc" 3
+contains "itest early end msg" "$it_err" "was never injected"
+grep -q '^docker stop' "$SB/state/calls" && bad "itest early end: a container was stopped" || ok
+[ -e "$SB_RAW/it_early.csv" ] && bad "itest early end wrote a CSV row" || ok
+
+# E: an unexpected death next to an F1 stop still fails the run.
+itest dead EXP=it_dead FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1 STUB_DEAD=c2
+eq "itest unexpected death rc" "$it_rc" 3
+contains "itest unexpected death msg" "$it_err" "node2(status=exited,oom_killed=false,exit_code=137)"
+
+# F: F3 through run_one: the slow node gets slow + base delay.
+itest f3 EXP=it_f3 RTT_MS=60 FAULT=F3:node1@0 DURATION=2s STUB_BENCH_SECS=1
+eq "itest f3 rc" "$it_rc" 0
+grep -q 'exec -T node1 tc qdisc replace dev eth0 root netem delay 230ms limit 100000$' "$SB/state/calls" && ok || bad "itest f3 tc"
+f="$(raw_tag it_f3)"
+eq "itest f3 log actions" "$(cut -d, -f6 "$f" 2>/dev/null | tr '\n' ' ')" "action netem_rtt run_phase_start netem_delay netem_applied "
 
 # The recorded fault value must be CSV/--tags safe and the tag file-name safe.
 grep -q 'fault_rec="$(echo "$FAULT" | tr '"','"' '"'+'"')"' "$HERE/run_one.sh" && ok || bad "run_one fault_rec"
