@@ -70,6 +70,8 @@ RAFT_FORWARD_PORT = 7101
 TM_ABCI_LISTEN = "tcp://0.0.0.0:26658"  # veritas-tm ABCI server
 TM_ABCI_DIAL = "tcp://127.0.0.1:26658"  # what tendermint connects to
 TM_RPC = "tcp://127.0.0.1:26657"  # tendermint RPC used by veritas-tm
+# tendermint backend: polls (0.2 s apart) of the ABCI socket before giving up.
+ABCI_WAIT_TRIES = 300  # 60 s
 
 # Resource caps of the non-node services (caps, not reservations).
 # Kafka: broker heap 512 MB + zookeeper heap 256 MB + topic tool 128 MB.
@@ -275,8 +277,16 @@ def _tendermint_node(i, n, block_size, commit_mode, memlimit):
         % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT,
            TM_ABCI_LISTEN, TM_RPC, i, i)
     ) + [
-        # tendermint exits if the ABCI app is not listening yet.
-        "until (echo > /dev/tcp/127.0.0.1/26658) 2>/dev/null; do sleep 0.2; done",
+        # tendermint exits if the ABCI app is not listening yet. The wait is
+        # bounded (ABCI_WAIT_TRIES x 0.2 s) and stops early if the server
+        # died, so a server that never listens shows up as an exited
+        # container (health.sh fails fast) instead of a node that hangs.
+        "abci_wait=0",
+        "until (echo > /dev/tcp/127.0.0.1/26658) 2>/dev/null; do"
+        " kill -0 \"$veritas_pid\" 2>/dev/null || { echo 'hbdb: veritas server exited before its ABCI socket listened' >&2; exit 1; };"
+        " abci_wait=$((abci_wait + 1));"
+        " if [ \"$abci_wait\" -ge %d ]; then echo 'hbdb: ABCI socket 127.0.0.1:26658 not listening after %ds' >&2; exit 1; fi;"
+        " sleep 0.2; done" % (ABCI_WAIT_TRIES, ABCI_WAIT_TRIES // 5),
         "tendermint start --home /data/tm --proxy-app=%s &" % TM_ABCI_DIAL,
     ] + _exit_when_any_exits(["redis-server", "veritas-kafka", "tendermint"])
 

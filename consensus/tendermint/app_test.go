@@ -46,6 +46,18 @@ func TestDeliverTxForwardsBlockBytes(t *testing.T) {
 	}
 }
 
+// Every tx wants exactly one unit of gas, so genesis block.max_gas caps the
+// txs per Tendermint block (below the socket ABCI client's 256-request queue).
+func TestCheckTxWantsOneGas(t *testing.T) {
+	app := NewApp()
+	defer app.Close()
+	for _, tx := range [][]byte{nil, []byte("x"), bytes.Repeat([]byte{1}, 1<<20)} {
+		if res := app.CheckTx(abcitypes.RequestCheckTx{Tx: tx}); res.GasWanted != 1 {
+			t.Fatalf("CheckTx(%d bytes).GasWanted = %d, want 1", len(tx), res.GasWanted)
+		}
+	}
+}
+
 func TestCheckTxAcceptsAll(t *testing.T) {
 	app := NewApp()
 	defer app.Close()

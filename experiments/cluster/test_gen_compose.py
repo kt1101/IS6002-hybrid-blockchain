@@ -316,9 +316,22 @@ def test_tendermint_starts_after_abci_socket_listens():
     lines = c["services"]["node2"]["command"][-1].rstrip("\n").split("\n")
     assert lines[1] == "mkdir -p /data/tm && cp -R /tmcfg/. /data/tm/"
     v = [j for j, l in enumerate(lines) if "--consensus=tendermint" in l][0]
-    wait = lines.index("until (echo > /dev/tcp/127.0.0.1/26658) 2>/dev/null; do sleep 0.2; done")
+    wait = [j for j, l in enumerate(lines) if l.startswith("until (echo > /dev/tcp/127.0.0.1/26658) 2>/dev/null; do")]
     tm = lines.index("tendermint start --home /data/tm --proxy-app=tcp://127.0.0.1:26658 &")
-    assert v < wait < tm
+    assert len(wait) == 1 and v < wait[0] < tm
+    assert lines[wait[0] - 1] == "abci_wait=0"
+
+
+def test_tendermint_abci_wait_is_bounded():
+    # A server that never listens must end the node script (exit 1) instead
+    # of hanging: give up after 300 polls (60 s) or as soon as it died.
+    c = gen(backend="tendermint", n=1, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    lines = c["services"]["node1"]["command"][-1].rstrip("\n").split("\n")
+    wait = [l for l in lines if l.startswith("until (echo > /dev/tcp/127.0.0.1/26658)")][0]
+    assert 'kill -0 "$$veritas_pid" 2>/dev/null || {' in wait
+    assert 'if [ "$$abci_wait" -ge 300 ]; then' in wait
+    assert wait.count("exit 1") == 2
+    assert wait.endswith(" sleep 0.2; done")
 
 
 def test_tendermint_backend_passes_commit_mode():
@@ -333,6 +346,9 @@ def test_tm_orig_unchanged_by_tendermint():
             tm_dir="/gen/tm")
     for k in _nodes(c):
         cmd = c["services"][k]["command"][-1]
+        # tm-orig keeps its original (unbounded) wait for the ABCI socket.
+        assert "\nuntil (echo > /dev/tcp/127.0.0.1/26658) 2>/dev/null; do sleep 0.2; done\n" in cmd
+        assert "abci_wait" not in cmd
         assert "--consensus" not in cmd and "trap " not in cmd
         assert not any(v.endswith(":/results") for v in c["services"][k]["volumes"])
 

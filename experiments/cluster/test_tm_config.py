@@ -29,6 +29,7 @@ recheck = true
 size = 5000
 cache-size = 10000
 max-tx-bytes = 1048576
+max-txs-bytes = 1073741824
 """
 
 GENESIS = {
@@ -158,6 +159,7 @@ def test_tm_orig_keeps_default_tx_and_body_limits(tmp_path):
     assert main(["--dir", str(tmp_path), "--n", "2", "--backend", "tm-orig"]) == 0
     t = (tmp_path / "node0" / "config" / "config.toml").read_text()
     assert "max-tx-bytes = 1048576" in _section(t, "mempool")
+    assert "max-txs-bytes = 1073741824" in _section(t, "mempool")
     assert "max-body-bytes = 1000000" in _section(t, "rpc")
 
 
@@ -169,6 +171,8 @@ def test_tendermint_backend_raises_tx_and_body_limits(tmp_path):
         mempool, rpc = _section(t, "mempool"), _section(t, "rpc")
         # One ABCI tx is a whole Veritas block (up to ~1 MB at block size 1000).
         assert "max-tx-bytes = 4194304" in mempool
+        # The mempool must fit the 768m node next to the server's 537 MiB GOMEMLIMIT.
+        assert "max-txs-bytes = 134217728" in mempool
         # broadcast_tx_sync sends the tx base64 in JSON: > 4/3 * max-tx-bytes.
         assert "max-body-bytes = 8388608" in rpc
         assert 8388608 > 4194304 * 4 // 3 + 1024
@@ -204,7 +208,7 @@ def test_tendermint_caps_small_evidence_limit_only_when_larger(tmp_path):
 
 
 def test_tendermint_fails_without_tx_or_body_limit_keys(tmp_path):
-    for key in ("max-tx-bytes = 1048576\n", "max-body-bytes = 1000000\n"):
+    for key in ("max-tx-bytes = 1048576\n", "max-txs-bytes = 1073741824\n", "max-body-bytes = 1000000\n"):
         d = tmp_path / key.split()[0]
         d.mkdir()
         _testnet(d, 2, toml=TOML.replace(key, ""))
@@ -217,3 +221,49 @@ def test_unknown_backend_is_rejected(tmp_path):
     _testnet(tmp_path, 2)
     with pytest.raises(SystemExit):
         main(["--dir", str(tmp_path), "--n", "2", "--backend", "kafka"])
+
+
+def test_tendermint_genesis_caps_txs_per_block_by_gas(tmp_path):
+    # Each tx wants 1 gas (consensus/tendermint CheckTx), so max_gas is the
+    # tx count per TM block; it must stay below the socket ABCI client's 256
+    # queued async requests (one DeliverTxAsync per tx).
+    _testnet(tmp_path, 3)
+    assert main(["--dir", str(tmp_path), "--n", "3", "--backend", "tendermint"]) == 0
+    raw = [(tmp_path / ("node%d" % j) / "config" / "genesis.json").read_bytes() for j in range(3)]
+    assert raw[0] == raw[1] == raw[2]
+    block = json.loads(raw[0])["consensus_params"]["block"]
+    assert block["max_gas"] == "200"  # v0.35 writes int64 as a JSON string; type kept
+    assert 0 < int(block["max_gas"]) < 256
+
+
+def test_tendermint_max_gas_keeps_number_type(tmp_path):
+    g = json.loads(json.dumps(GENESIS))
+    g["consensus_params"]["block"]["max_gas"] = -1
+    _testnet(tmp_path, 2, genesis=g)
+    assert main(["--dir", str(tmp_path), "--n", "2", "--backend", "tendermint"]) == 0
+    out = json.loads((tmp_path / "node0" / "config" / "genesis.json").read_text())
+    assert out["consensus_params"]["block"]["max_gas"] == 200
+
+
+def test_tm_orig_keeps_max_gas(tmp_path):
+    _testnet(tmp_path, 2)
+    assert main(["--dir", str(tmp_path), "--n", "2"]) == 0
+    block = json.loads((tmp_path / "node0" / "config" / "genesis.json").read_text())["consensus_params"]["block"]
+    assert block["max_gas"] == "-1"
+    g = json.loads(json.dumps(GENESIS))
+    del g["consensus_params"]["block"]["max_gas"]
+    d = tmp_path / "nogas"
+    d.mkdir()
+    _testnet(d, 2, genesis=g)
+    assert main(["--dir", str(d), "--n", "2", "--backend", "tm-orig"]) == 0
+    block = json.loads((d / "node0" / "config" / "genesis.json").read_text())["consensus_params"]["block"]
+    assert "max_gas" not in block
+
+
+def test_tendermint_genesis_without_max_gas_is_fatal(tmp_path):
+    g = json.loads(json.dumps(GENESIS))
+    del g["consensus_params"]["block"]["max_gas"]
+    _testnet(tmp_path, 2, genesis=g)
+    with pytest.raises(SystemExit) as e:
+        main(["--dir", str(tmp_path), "--n", "2", "--backend", "tendermint"])
+    assert "max_gas" in str(e.value)
