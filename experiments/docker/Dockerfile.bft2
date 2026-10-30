@@ -1,0 +1,14 @@
+# Build image of the bft2node module (bft2-node, the HotStuff sidecar of the bft2 backend).
+# github.com/relab/hotstuff v0.5.0 needs Go >= 1.23.4, so it is a separate module built here;
+# the main module keeps hbdb-build (golang:1.20) and its go.mod. Host-native linux/arm64 like
+# Dockerfile.build. Doubles as the module's test runner (WORKDIR /src/bft2node, gcc for -race).
+FROM golang:1.23-bookworm
+
+# Module download is cached in this layer; source changes below do not invalidate it.
+WORKDIR /src/bft2node
+COPY bft2node/go.mod bft2node/go.sum ./
+RUN go mod download
+
+COPY bft2node/ ./
+# Pure Go: a static binary that runs in the redis:6.2-bookworm based hbdb-node image.
+RUN mkdir -p /out && CGO_ENABLED=0 go build -trimpath -o /out/bft2-node .

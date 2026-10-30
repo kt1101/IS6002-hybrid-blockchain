@@ -10,7 +10,9 @@
 # server's Merkle tree is not synchronized, the auditor must never be pointed
 # at it), tm-orig because its Verify returns nil,nil (a gRPC marshal error).
 # A backend that is known but not implemented yet is refused by
-# hbdb_check_backend ("not implemented yet").
+# hbdb_check_backend ("not implemented yet"). bft2 runs a HotStuff sidecar
+# (bft2-node, in the hbdb-node image via experiments/build.sh) on every node;
+# it has no tendermint-style limits on CLIENTS/LOAD_THREADS.
 #
 # Env (defaults): N=4 (fixed, not overridable), DURATION=30s, WARMUP=10s,
 #   WAIT_SECS=5 (pause between the end of the bench and the audit),

@@ -58,7 +58,7 @@ def test_tendermint_compose_has_no_kafka_or_tso():
 
 
 def test_volumes_are_per_node_and_named():  # để down -v xóa sạch
-    for backend in ("kafka-orig", "tm-orig", "kafka", "raft", "tendermint"):
+    for backend in ("kafka-orig", "tm-orig", "kafka", "raft", "tendermint", "bft2"):
         c = gen(backend=backend, n=5, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
         declared = c["volumes"]
         seen = set()
@@ -89,12 +89,11 @@ def test_every_service_has_init_and_short_grace():
         assert s["stop_grace_period"] == "5s", name
 
 
-def test_unimplemented_backends_are_rejected(capsys):
-    for backend in ("bft2",):
-        with pytest.raises(NotImplementedError):
-            gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
-        assert main(["--backend", backend, "--n", "4"]) != 0
-        assert "backend %s not implemented yet" % backend in capsys.readouterr().err
+def test_every_known_backend_is_implemented(capsys):
+    for backend in ("kafka-orig", "tm-orig", "kafka", "raft", "tendermint", "bft2"):
+        gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    with pytest.raises(ValueError):
+        gen(backend="nope", n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
 
 
 def test_cli_writes_json(tmp_path):
@@ -147,6 +146,7 @@ def test_node_exits_when_any_long_lived_process_dies():
         "kafka": ("redis-server ", "veritas-kafka "),
         "raft": ("redis-server ", "veritas-kafka "),
         "tendermint": ("redis-server ", "veritas-kafka ", "tendermint start "),
+        "bft2": ("redis-server ", "bft2-node ", "veritas-kafka "),
     }
     for backend, procs in expect.items():
         c = gen(backend=backend, n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
@@ -193,7 +193,7 @@ def test_kafka_backend_passes_commit_mode():
             assert "--commit-mode=%s " % mode in c["services"][k]["command"][-1]
 
 
-@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint"])
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint", "bft2"])
 def test_core_backend_forwards_sigterm_to_veritas(backend):
     # tini signals only bash; bash must pass SIGTERM on so the server can
     # write its breakdown before the stop grace period ends.
@@ -359,3 +359,70 @@ def test_cli_accepts_tendermint(tmp_path):
     c = json.loads(out.read_text())
     assert _nodes(c) == ["node1", "node2", "node3"]
     assert "--consensus=tendermint --commit-mode=async" in c["services"]["node1"]["command"][-1]
+
+
+BFT2_PEERS_4 = "1=172.28.0.11:7200,2=172.28.0.12:7200,3=172.28.0.13:7200,4=172.28.0.14:7200"
+
+
+def test_bft2_backend_runs_sidecar_and_core_server_without_kafka_or_tso():
+    c = gen(backend="bft2", n=4, block_size=50, commit_mode="sync", cpus=0.5, mem="768m",
+            results_dir="/res")
+    assert "kafka" not in c["services"] and "tso" not in c["services"]
+    assert _nodes(c) == ["node1", "node2", "node3", "node4"]
+    for i, k in enumerate(_nodes(c), start=1):
+        s = c["services"][k]
+        assert "depends_on" not in s
+        assert s["cap_add"] == ["NET_ADMIN"]
+        assert s["volumes"] == ["node%d-data:/data" % i, "/res:/results"]
+        cmd = s["command"][-1]
+        # Replica i of the static set 1..4, every node gets the same peers.
+        assert ("bft2-node --id=%d --peers=%s --listen=0.0.0.0:7200 --api=127.0.0.1:7201 &"
+                % (i, BFT2_PEERS_4)) in cmd
+        assert ("GOMEMLIMIT=537MiB veritas-kafka --consensus=bft2 --commit-mode=sync"
+                " --version-mode=ordered --node-id=%d --signature=node%d " % (i, i)) in cmd
+        assert "--parties=node1,node2,node3,node4 --blk-size=50 --addr=:1990" in cmd
+        assert " --bft2-api=127.0.0.1:7201 " in cmd
+        assert "--redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d" % i in cmd
+        assert "--breakdown-out=/results/breakdown-node%d.json &" % i in cmd
+        assert "kafka-addr" not in cmd and "tso" not in cmd
+        assert cmd.count("GOMEMLIMIT") == 1  # the sidecar is not limited
+
+
+def test_bft2_veritas_starts_after_local_api_listens_with_bounded_wait():
+    c = gen(backend="bft2", n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    lines = c["services"]["node2"]["command"][-1].rstrip("\n").split("\n")
+    side = [j for j, l in enumerate(lines) if l.startswith("bft2-node ")]
+    wait = [j for j, l in enumerate(lines) if l.startswith("until (echo > /dev/tcp/127.0.0.1/7201) 2>/dev/null; do")]
+    v = [j for j, l in enumerate(lines) if "--consensus=bft2" in l]
+    assert len(side) == 1 and len(wait) == 1 and len(v) == 1
+    assert side[0] < wait[0] < v[0]
+    assert lines[side[0] + 1] == "bft2_pid=$$!"
+    assert lines[wait[0] - 1] == "api_wait=0"
+    w = lines[wait[0]]
+    assert 'kill -0 "$$bft2_pid" 2>/dev/null || {' in w
+    assert 'if [ "$$api_wait" -ge 300 ]; then' in w
+    assert w.count("exit 1") == 2
+    assert w.endswith(" sleep 0.2; done")
+
+
+def test_bft2_peers_follow_node_ips():
+    c = gen(backend="bft2", n=7, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    cmd = c["services"]["node7"]["command"][-1]
+    peers = cmd.split("--peers=")[1].split()[0].split(",")
+    assert peers == ["%d=172.28.0.%d:7200" % (j, 10 + j) for j in range(1, 8)]
+    assert "bft2-node --id=7 " in cmd
+
+
+def test_bft2_backend_passes_commit_mode():
+    for mode in ("sync", "async"):
+        c = gen(backend="bft2", n=2, block_size=100, commit_mode=mode, cpus=0.5, mem="768m")
+        for k in _nodes(c):
+            assert "--consensus=bft2 --commit-mode=%s " % mode in c["services"][k]["command"][-1]
+
+
+def test_cli_accepts_bft2(tmp_path):
+    out = tmp_path / "compose.json"
+    assert main(["--backend", "bft2", "--n", "4", "--out", str(out)]) == 0
+    c = json.loads(out.read_text())
+    assert _nodes(c) == ["node1", "node2", "node3", "node4"]
+    assert "--consensus=bft2 --commit-mode=sync" in c["services"]["node1"]["command"][-1]

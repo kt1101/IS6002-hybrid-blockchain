@@ -1,0 +1,437 @@
+// Package node runs one HotStuff replica (github.com/relab/hotstuff v0.5.0,
+// chained HotStuff, ECDSA, round-robin leaders) for the bft2 backend.
+//
+// The module stack is the one the library's own orchestration worker builds
+// (internal/orchestration/worker.go createReplica), assembled here directly
+// instead of through replica.New, because replica.New registers the
+// library's gRPC client server as the command queue and executor. Ours is
+// the adapter (adapter.go): Submit queues a command (one Veritas block, exact
+// bytes), the leader proposes one command per view (an empty filler block
+// when its queue stays empty for IdleWait), and every committed non-empty
+// command is appended, in commit order, to the commit log read by the local
+// API (package api). The blockchain module is a copy of the library's that
+// also evicts old blocks (blockchain.go).
+//
+// Membership is static: replicas 1..N, all known up front, keys derived
+// from a shared seed (keys.go). Replicas talk over the library's gorums/gRPC
+// transport, without TLS.
+package node
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/relab/gorums"
+	"github.com/relab/hotstuff"
+	"github.com/relab/hotstuff/backend"
+	"github.com/relab/hotstuff/consensus"
+	"github.com/relab/hotstuff/consensus/chainedhotstuff"
+	"github.com/relab/hotstuff/crypto"
+	hsecdsa "github.com/relab/hotstuff/crypto/ecdsa"
+	"github.com/relab/hotstuff/eventloop"
+	"github.com/relab/hotstuff/leaderrotation"
+	"github.com/relab/hotstuff/logging"
+	"github.com/relab/hotstuff/modules"
+	"github.com/relab/hotstuff/synchronizer"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
+)
+
+// Defaults of the Config fields left zero.
+const (
+	DefaultKeySeed          = "hbdb-bft2"
+	DefaultViewTimeout      = 500 * time.Millisecond
+	DefaultMinViewTimeout   = 100 * time.Millisecond
+	DefaultMaxViewTimeout   = 2 * time.Second
+	DefaultTimeoutMult      = 1.2
+	DefaultDurationSamples  = 1000
+	DefaultIdleWait         = 20 * time.Millisecond
+	DefaultConnectTimeout   = 120 * time.Second
+	DefaultDialTimeout      = 10 * time.Second
+	DefaultRetainViews      = 256
+	DefaultEventQueue       = 1000
+	DefaultMaxQueue         = 1024
+	DefaultMaxQueueBytes    = 128 << 20
+	DefaultMaxBacklogBytes  = 64 << 20
+	DefaultMaxCommandBytes  = 4 << 20
+	grpcMaxMsgBytes         = 4*DefaultMaxCommandBytes + 1<<20
+	peerProbeInterval       = 200 * time.Millisecond
+	peerProbeTimeout        = time.Second
+	verifiedCryptoCacheSize = 100
+)
+
+// Peer is one replica of the static configuration.
+type Peer struct {
+	ID   hotstuff.ID
+	Addr string // host:port of its replica (gorums) server
+}
+
+// Config configures one replica. Zero fields take the defaults above.
+type Config struct {
+	ID    hotstuff.ID
+	Peers []Peer // every replica, this one included; IDs exactly 1..N, N >= 2
+	// Listen is the replica server's listen address (default: this
+	// replica's Peers address). Listener, if set, is used instead (tests).
+	Listen   string
+	Listener net.Listener
+	KeySeed  string
+
+	// View timeout: starts at ViewTimeout, adapts to the observed view
+	// durations (library), clamped to [MinViewTimeout, MaxViewTimeout],
+	// multiplied by TimeoutMultiplier after each timeout.
+	ViewTimeout       time.Duration
+	MinViewTimeout    time.Duration
+	MaxViewTimeout    time.Duration
+	TimeoutMultiplier float64
+	DurationSamples   int
+
+	// IdleWait: how long a leader with an empty queue waits for a command
+	// before it proposes an empty filler block.
+	IdleWait time.Duration
+	// ConnectTimeout bounds Start's wait for every peer's server.
+	ConnectTimeout time.Duration
+	// RetainViews: blocks of views older than this below the last committed
+	// height are evicted from memory (a replica lagging further cannot
+	// fetch them any more).
+	RetainViews int
+	// EventQueue: capacity of the library's event loop (it drops the oldest
+	// event when full).
+	EventQueue int
+	// MaxQueue, MaxQueueBytes bound the proposal queue (Submit fails with
+	// ErrQueueFull); MaxBacklogBytes bounds the commit log (the executor
+	// waits); MaxCommandBytes bounds one command (ErrTooLarge).
+	MaxQueue        int
+	MaxQueueBytes   int64
+	MaxBacklogBytes int64
+	MaxCommandBytes int
+}
+
+func (c *Config) setDefaults() {
+	if c.KeySeed == "" {
+		c.KeySeed = DefaultKeySeed
+	}
+	if c.ViewTimeout <= 0 {
+		c.ViewTimeout = DefaultViewTimeout
+	}
+	if c.MinViewTimeout <= 0 {
+		c.MinViewTimeout = DefaultMinViewTimeout
+	}
+	if c.MaxViewTimeout <= 0 {
+		c.MaxViewTimeout = DefaultMaxViewTimeout
+	}
+	if c.TimeoutMultiplier <= 1 {
+		c.TimeoutMultiplier = DefaultTimeoutMult
+	}
+	if c.DurationSamples <= 0 {
+		c.DurationSamples = DefaultDurationSamples
+	}
+	if c.IdleWait <= 0 {
+		c.IdleWait = DefaultIdleWait
+	}
+	if c.ConnectTimeout <= 0 {
+		c.ConnectTimeout = DefaultConnectTimeout
+	}
+	if c.RetainViews <= 0 {
+		c.RetainViews = DefaultRetainViews
+	}
+	if c.EventQueue <= 0 {
+		c.EventQueue = DefaultEventQueue
+	}
+	if c.MaxQueue <= 0 {
+		c.MaxQueue = DefaultMaxQueue
+	}
+	if c.MaxQueueBytes <= 0 {
+		c.MaxQueueBytes = DefaultMaxQueueBytes
+	}
+	if c.MaxBacklogBytes <= 0 {
+		c.MaxBacklogBytes = DefaultMaxBacklogBytes
+	}
+	if c.MaxCommandBytes <= 0 {
+		c.MaxCommandBytes = DefaultMaxCommandBytes
+	}
+}
+
+// validatePeers checks that the IDs are exactly 1..N (round-robin leader
+// rotation assumes it), N >= 2 (gorums needs at least one other node), every
+// address is set, and id is one of them. It returns the peers sorted by ID.
+func validatePeers(id hotstuff.ID, peers []Peer) ([]Peer, error) {
+	if len(peers) < 2 {
+		return nil, fmt.Errorf("bft2-node: need at least 2 replicas, got %d", len(peers))
+	}
+	sorted := append([]Peer(nil), peers...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	for i, p := range sorted {
+		if p.ID != hotstuff.ID(i+1) {
+			return nil, fmt.Errorf("bft2-node: replica IDs must be exactly 1..%d (got %v)", len(sorted), idsOf(sorted))
+		}
+		if p.Addr == "" {
+			return nil, fmt.Errorf("bft2-node: replica %d has no address", p.ID)
+		}
+	}
+	if id < 1 || int(id) > len(sorted) {
+		return nil, fmt.Errorf("bft2-node: own ID %d is not in the replica set 1..%d", id, len(sorted))
+	}
+	return sorted, nil
+}
+
+func idsOf(peers []Peer) []hotstuff.ID {
+	ids := make([]hotstuff.ID, len(peers))
+	for i, p := range peers {
+		ids[i] = p.ID
+	}
+	return ids
+}
+
+// Node is one running HotStuff replica.
+type Node struct {
+	cfg   Config
+	peers []Peer // sorted by ID
+	infos []backend.ReplicaInfo
+
+	core   *modules.Core
+	hscfg  *backend.Config
+	server *backend.Server
+	queue  *cmdQueue
+	log    *CommitLog
+
+	mu        sync.Mutex
+	started   bool
+	connected bool
+	stopped   bool
+	cancel    context.CancelFunc
+	done      chan struct{} // closed when the event loop has ended
+	stopCh    chan struct{} // closed by Stop (ends Start's wait for peers)
+}
+
+// New builds the replica and starts its replica server (it accepts peer
+// connections from now on, so peers can connect before this node's Start).
+// Submit works from now on (commands wait in the queue); call Start to join
+// the protocol.
+func New(cfg Config) (*Node, error) {
+	cfg.setDefaults()
+	peers, err := validatePeers(cfg.ID, cfg.Peers)
+	if err != nil {
+		return nil, err
+	}
+	priv, err := DeriveKey(cfg.KeySeed, cfg.ID)
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]backend.ReplicaInfo, len(peers))
+	for i, p := range peers {
+		k, err := DeriveKey(cfg.KeySeed, p.ID)
+		if err != nil {
+			return nil, err
+		}
+		infos[i] = backend.ReplicaInfo{ID: p.ID, Address: p.Addr, PubKey: &k.PublicKey}
+	}
+
+	lis := cfg.Listener
+	if lis == nil {
+		addr := cfg.Listen
+		if addr == "" {
+			addr = peers[cfg.ID-1].Addr
+		}
+		if lis, err = net.Listen("tcp", addr); err != nil {
+			return nil, fmt.Errorf("bft2-node: listen %s: %w", addr, err)
+		}
+	}
+
+	n := &Node{
+		cfg:    cfg,
+		peers:  peers,
+		infos:  infos,
+		queue:  newCmdQueue(cfg.MaxQueue, cfg.MaxQueueBytes),
+		log:    NewCommitLog(cfg.MaxBacklogBytes),
+		done:   make(chan struct{}),
+		stopCh: make(chan struct{}),
+	}
+
+	// Transport: gorums over gRPC, no TLS (backend.NewConfig uses insecure
+	// credentials for nil). The message limits fit the largest command plus
+	// the QC; reconnects to a crashed peer back off at most 2 s (the gRPC
+	// default goes up to 120 s).
+	n.hscfg = backend.NewConfig(nil,
+		gorums.WithDialTimeout(DefaultDialTimeout),
+		gorums.WithBackoff(backoff.Config{BaseDelay: 100 * time.Millisecond, Multiplier: 1.6, Jitter: 0.2, MaxDelay: 2 * time.Second}),
+		gorums.WithGrpcDialOptions(grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(grpcMaxMsgBytes),
+			grpc.MaxCallSendMsgSize(grpcMaxMsgBytes),
+		)),
+	)
+	n.server = backend.NewServer(
+		backend.WithLatencies(cfg.ID, nil), // as replica.New: no emulated latencies
+		backend.WithGorumsServerOptions(gorums.WithGRPCServerOptions(
+			grpc.MaxRecvMsgSize(grpcMaxMsgBytes),
+			grpc.MaxSendMsgSize(grpcMaxMsgBytes),
+		)),
+	)
+
+	ms := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+	viewDuration := boundedViewDuration{
+		inner: synchronizer.NewViewDuration(uint64(cfg.DurationSamples),
+			ms(cfg.ViewTimeout), ms(cfg.MaxViewTimeout), cfg.TimeoutMultiplier),
+		min: cfg.MinViewTimeout,
+		max: cfg.MaxViewTimeout,
+	}
+
+	builder := modules.NewBuilder(cfg.ID, priv)
+	// Votes are verified on the event loop: the asynchronous path reads
+	// the synchronizer's highQC from another goroutine without a lock.
+	builder.Options().SetShouldVerifyVotesSync()
+	builder.Add(
+		eventloop.New(uint(cfg.EventQueue)),
+		consensus.New(chainedhotstuff.New()),
+		consensus.NewVotingMachine(),
+		crypto.NewCache(hsecdsa.New(), verifiedCryptoCacheSize),
+		leaderrotation.NewRoundRobin(),
+		synchronizer.New(viewDuration),
+		newBlockChain(hotstuff.View(cfg.RetainViews)),
+		logging.New(fmt.Sprintf("hs%d", cfg.ID)),
+		n.hscfg,
+		n.server,
+		&adapter{id: cfg.ID, queue: n.queue, log: n.log, idle: cfg.IdleWait},
+	)
+	n.core = builder.Build()
+	n.server.StartOnListener(lis)
+	return n, nil
+}
+
+// Start waits (bounded by ctx and Config.ConnectTimeout) until every peer's
+// replica server accepts TCP connections, connects to all of them and starts
+// the protocol. It returns once the replica runs. Connecting needs every
+// peer up: gorums fails a connection to a peer that is down, and the
+// library's Config.Connect cannot be retried.
+func (n *Node) Start(ctx context.Context) error {
+	n.mu.Lock()
+	if n.stopped {
+		n.mu.Unlock()
+		return ErrStopped
+	}
+	if n.started {
+		n.mu.Unlock()
+		return errors.New("bft2-node: already started")
+	}
+	n.started = true
+	n.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, n.cfg.ConnectTimeout)
+	defer cancel()
+	go func() {
+		select {
+		case <-n.stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	for _, p := range n.peers {
+		if p.ID == n.cfg.ID {
+			continue
+		}
+		if err := waitTCP(ctx, p.Addr); err != nil {
+			return fmt.Errorf("bft2-node: replica %d (%s) not reachable: %w", p.ID, p.Addr, err)
+		}
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.stopped {
+		return ErrStopped
+	}
+	if err := n.hscfg.Connect(n.infos); err != nil {
+		return fmt.Errorf("bft2-node: connect to replicas: %w", err)
+	}
+	n.connected = true
+
+	var (
+		synchro   modules.Synchronizer
+		eventLoop *eventloop.EventLoop
+	)
+	n.core.Get(&synchro, &eventLoop)
+	runCtx, stop := context.WithCancel(context.Background())
+	n.cancel = stop
+	go func() {
+		defer close(n.done)
+		// As replica.Run, but the synchronizer gets a context that is never
+		// cancelled: on cancellation its Start spawns a goroutine that stops
+		// the view timer, racing (unsynchronized) with the event loop that
+		// replaces it. The timer then fires at most once after Stop, onto a
+		// stopped loop.
+		synchro.Start(context.Background())
+		eventLoop.Run(runCtx)
+	}()
+	return nil
+}
+
+// waitTCP dials addr until it accepts a connection or ctx ends.
+func waitTCP(ctx context.Context, addr string) error {
+	var d net.Dialer
+	for {
+		dctx, cancel := context.WithTimeout(ctx, peerProbeTimeout)
+		c, err := d.DialContext(dctx, "tcp", addr)
+		cancel()
+		if err == nil {
+			c.Close()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%v (last error: %v)", ctx.Err(), err)
+		case <-time.After(peerProbeInterval):
+		}
+	}
+}
+
+// Submit queues cmd (copied) for proposal in this replica's next views as
+// leader. A nil error means accepted, not committed: the command may still
+// be lost (e.g. this replica crashes before proposing it) or, very rarely,
+// committed twice (Fork re-queues blocks proposed here that fell off the
+// committed chain). Errors: ErrEmpty, ErrTooLarge, ErrQueueFull, ErrStopped.
+func (n *Node) Submit(cmd []byte) error {
+	if len(cmd) == 0 {
+		return ErrEmpty
+	}
+	if len(cmd) > n.cfg.MaxCommandBytes {
+		return ErrTooLarge
+	}
+	return n.queue.push(hotstuff.Command(cmd))
+}
+
+// Log returns the commit log: every committed command, in commit order.
+func (n *Node) Log() *CommitLog { return n.log }
+
+// MaxCommandBytes is the largest command Submit accepts.
+func (n *Node) MaxCommandBytes() int { return n.cfg.MaxCommandBytes }
+
+// Stop stops the replica (a crash from the other replicas' point of view):
+// later Submits fail with ErrStopped, the commit log is closed, the event
+// loop ends, connections and the server close. It is idempotent.
+func (n *Node) Stop() {
+	n.mu.Lock()
+	if n.stopped {
+		n.mu.Unlock()
+		return
+	}
+	n.stopped = true
+	close(n.stopCh)
+	cancel, connected := n.cancel, n.connected
+	n.mu.Unlock()
+
+	// First release anything the event loop may be blocked on (a leader's
+	// Get, an Exec waiting for room in the commit log).
+	n.queue.close()
+	n.log.Close()
+	if cancel != nil {
+		cancel()
+		<-n.done
+	}
+	if connected {
+		n.hscfg.Close()
+	}
+	n.server.Stop()
+}

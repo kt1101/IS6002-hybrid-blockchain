@@ -25,7 +25,7 @@ HBDB_RAFT_PORT=7100
 HBDB_RAFT_FORWARD_PORT=7101
 HBDB_TM_P2P_PORT=26656
 HBDB_ALL_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
-HBDB_IMPLEMENTED_BACKENDS="kafka-orig tm-orig kafka raft tendermint"
+HBDB_IMPLEMENTED_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
 
 # Must match csvColumns in veritas/benchmark/recorder.go.
 HBDB_CSV_HEADER="ts,commit,exp,backend,n,f,clients,block_size,workload,rtt_ms,fault,rep,commit_mode,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,wrong_gets,host_cpu_max_pct,saturated,net_bytes_per_block"
@@ -67,11 +67,27 @@ hbdb_backend_uses_tso() {
 
 # ycsbbench --mode for a backend: kafka = versions from the TSO (backends run
 # with client versions: kafka-orig, kafka, raft), tm = no TSO (tm-orig, and
-# tendermint, which runs --version-mode=ordered).
+# tendermint and bft2, which run --version-mode=ordered).
 hbdb_bench_mode() {
   case "$1" in
     kafka-orig | kafka | raft) echo kafka ;;
     *) echo tm ;;
+  esac
+}
+
+# hbdb_consensus_ports BACKEND: print the TCP ports (space-separated) that
+# carry BACKEND's consensus traffic between nodes, for fault injection
+# (silencing a node's consensus network). Must match gen_compose.py:
+# raft 7100 (raft transport) and 7101 (submit forwarding), tendermint 26656
+# (p2p), bft2 7200 (HotStuff replica gorums/gRPC; its local API 7201 is
+# loopback only). kafka-orig, tm-orig, kafka: nothing (the originals are not
+# fault-injected this way; kafka orders through the broker).
+hbdb_consensus_ports() {
+  case "$1" in
+    raft) echo "7100 7101" ;;
+    tendermint) echo "26656" ;;
+    bft2) echo "7200" ;;
+    *) echo "" ;;
   esac
 }
 

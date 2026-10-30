@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Generate the compose file (and, for tm-orig and tendermint, the Tendermint
-# testnet config)
+# testnet config; bft2 needs no generated config: bft2-node derives its keys
+# from a shared seed and the replica ID)
 # and start the cluster in the background.
 #
 # Env: BACKEND (required), N=4, BLOCK_SIZE=100, COMMIT_MODE=sync,

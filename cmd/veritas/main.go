@@ -9,8 +9,9 @@
 // "raft" (consensus/raft, configured with the --raft-* flags) or
 // "tendermint" (consensus/tendermint: an ABCI socket server for a local
 // tendermint process, --tm-abci-socket and --tm-rpc-addr; it requires
-// --version-mode=ordered); bft2 exits with a "not implemented yet" error
-// (Task 12).
+// --version-mode=ordered) or "bft2" (consensus/bft2: a client of the local
+// API of the bft2-node HotStuff sidecar on the same container, --bft2-api;
+// it requires --version-mode=ordered).
 // On SIGTERM/SIGINT the core path closes the server, writes its time
 // breakdown to --breakdown-out and exits.
 package main
@@ -31,6 +32,7 @@ import (
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	"hybrid/consensus"
+	bft2cons "hybrid/consensus/bft2"
 	kafkacons "hybrid/consensus/kafka"
 	raftcons "hybrid/consensus/raft"
 	tmcons "hybrid/consensus/tendermint"
@@ -71,6 +73,9 @@ var (
 	// --consensus=tendermint only (same sockets as scripts/start_veritas_tendermint.sh).
 	tmABCISocket = kingpin.Flag("tm-abci-socket", "tendermint: listen address of the ABCI socket server (tendermint --proxy-app dials it)").Default("tcp://0.0.0.0:26658").String()
 	tmRPCAddr    = kingpin.Flag("tm-rpc-addr", "tendermint: RPC address of the local tendermint node (Submit = broadcast_tx_sync)").Default("tcp://127.0.0.1:26657").String()
+
+	// --consensus=bft2 only.
+	bft2API = kingpin.Flag("bft2-api", "bft2: local API (host:port) of the bft2-node HotStuff sidecar on this container").Default("127.0.0.1:7201").String()
 )
 
 func check(err error) {
@@ -193,8 +198,11 @@ func runCore() {
 			kingpin.Fatalf("--consensus=tendermint requires --version-mode=ordered, got %q", *versionMode)
 		}
 	case "bft2":
-		fmt.Fprintf(os.Stderr, "veritas: --consensus=%s: not implemented yet\n", *consensusName)
-		os.Exit(2)
+		requireFlag("bft2-api", *bft2API)
+		// No TSO, as tendermint: versions come from the consensus order.
+		if vm != core.VersionOrdered {
+			kingpin.Fatalf("--consensus=bft2 requires --version-mode=ordered, got %q", *versionMode)
+		}
 	default:
 		kingpin.Fatalf("unknown --consensus %q (want kafka, raft, tendermint or bft2)", *consensusName)
 	}
@@ -256,6 +264,14 @@ func runCore() {
 		})
 		if err != nil {
 			log.Fatalf("tendermint consensus: %v", err)
+		}
+	case "bft2":
+		// No drop callback: a block accepted by the sidecar but never
+		// committed (e.g. this replica crashed before proposing it) times
+		// out its sync waiters.
+		cons, err = bft2cons.New(bft2cons.Config{APIAddr: *bft2API})
+		if err != nil {
+			log.Fatalf("bft2 consensus: %v", err)
 		}
 	}
 
