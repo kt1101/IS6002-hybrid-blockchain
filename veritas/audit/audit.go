@@ -80,19 +80,38 @@ func CollectRoots(ctx context.Context, addrs []string) (map[string][]byte, error
 
 	roots := make(map[string][]byte, len(addrs))
 	var failed []string
+	var failedNames []string
 	for i, r := range results {
 		name := NodeName(i + 1)
 		if r.err != nil {
 			failed = append(failed, fmt.Sprintf("%s (%s): %v", name, addrs[i], r.err))
+			failedNames = append(failedNames, name)
 			continue
 		}
 		roots[name] = r.root
 	}
 	if len(failed) > 0 {
-		return nil, fmt.Errorf("audit: cannot collect root digest from %s", strings.Join(failed, "; "))
+		return nil, &CollectError{
+			Roots:  roots,
+			Failed: failedNames,
+			msg:    fmt.Sprintf("audit: cannot collect root digest from %s", strings.Join(failed, "; ")),
+		}
 	}
 	return roots, nil
 }
+
+// CollectError is the error CollectRoots returns when at least one node could
+// not be queried. CollectRoots itself still returns a nil map; a caller that
+// can work with a partial answer (the periodic auditor, which must keep
+// ticking while a node is stopped) reads the nodes that did answer from Roots
+// (errors.As). Error() names every failed node and its address.
+type CollectError struct {
+	Roots  map[string][]byte // digest of every node that answered, keyed by node name
+	Failed []string          // names of the nodes that did not, in node order
+	msg    string
+}
+
+func (e *CollectError) Error() string { return e.msg }
 
 // fetchRoot dials addr and returns the root digest of Verify(AuditKey); an
 // empty digest is an error (a node with no digest has not reported anything).

@@ -33,6 +33,11 @@ func TestRun(t *testing.T) {
 		{"missing addrs", []string{"--once"}, fixed(same, nil), 2, "", "--addrs"},
 		{"bad addrs", []string{"--addrs", "a:1,,b:2", "--once"}, fixed(same, nil), 2, "", "--addrs"},
 		{"missing once", []string{"--addrs", "a:1"}, fixed(same, nil), 2, "", "--once"},
+		{"once and interval", []string{"--addrs", "a:1", "--once", "--interval", "1s"}, fixed(same, nil), 2, "", "mutually exclusive"},
+		{"out needs interval", []string{"--addrs", "a:1", "--once", "--out", "x"}, fixed(same, nil), 2, "", "--interval"},
+		{"negative interval", []string{"--addrs", "a:1", "--interval", "-1s"}, fixed(same, nil), 2, "", "--interval"},
+		{"zero node timeout", []string{"--addrs", "a:1", "--interval", "1s", "--node-timeout", "0s"}, fixed(same, nil), 2, "", "--node-timeout"},
+		{"unwritable out", []string{"--addrs", "a:1", "--interval", "1s", "--out", "/nonexistent-dir/x.audit"}, fixed(same, nil), 2, "", "--out"},
 		{"unknown flag", []string{"--bogus"}, fixed(same, nil), 2, "", ""},
 	}
 	for _, c := range cases {

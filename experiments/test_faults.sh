@@ -481,6 +481,22 @@ case "$1" in
         svc="$1"
         shift
         if [ "$svc" != client ]; then exit "${STUB_EXEC_RC:-0}"; fi
+        if [ "$1" = sh ]; then
+          # run_one.sh start_audit: `sh -c SCRIPT sh PIDFILE ADDRS OUT` starts
+          # the periodic auditor, `sh -c 'kill ...' sh PIDFILE` stops it.
+          case "$3" in
+            *auditor*)
+              echo "$$" >"$STUB_RESULTS${5#/results}"
+              echo "$$" >"$STUB_STATE/audit.pid"
+              trap 'echo exited >"$STUB_STATE/audit.exited"; exit 0' TERM
+              while :; do
+                echo "$(date +%s).000," >>"$STUB_RESULTS${7#/results}"
+                sleep 0.2
+              done ;;
+            *kill*) kill -TERM "$(cat "$STUB_RESULTS${5#/results}")"; exit 0 ;;
+          esac
+          exit 0
+        fi
         out="" tl="" tags=""
         for a; do
           case "$a" in
@@ -572,6 +588,36 @@ eq "itest f3 rc" "$it_rc" 0
 grep -q 'exec -T node1 tc qdisc replace dev eth0 root netem delay 230ms limit 100000$' "$SB/state/calls" && ok || bad "itest f3 tc"
 f="$(raw_tag it_f3)"
 eq "itest f3 log actions" "$(cut -d, -f6 "$f" 2>/dev/null | tr '\n' ' ')" "action netem_rtt run_phase_start netem_delay netem_applied "
+
+# G: FAULT != none starts the periodic auditor in the client container and
+# stops it (and removes its pid/stop files) when the bench ends.
+itest audit EXP=it_au FAULT=F1:node4@1 DURATION=2s STUB_BENCH_SECS=2
+eq "itest audit rc" "$it_rc" 0
+a="$(ls "$SB_RAW"/it_au/*.audit 2>/dev/null)"
+[ -n "$a" ] && [ -s "$a" ] && ok || bad "itest audit: no .audit lines: $it_err"
+grep -Eq '^[0-9]+\.000,$' "$a" 2>/dev/null && ok || bad "itest audit line format: $(cat "$a" 2>/dev/null)"
+grep 'exec -T client sh -c .*exec auditor --addrs=.*--interval=1s' "$SB/state/calls" |
+  grep -q ' sh /results/it_au/\..*\.audit\.pid 172\.28\.0\.11:1990,.* /results/it_au/.*\.audit$' && ok ||
+  bad "itest audit start call: $(grep auditor "$SB/state/calls")"
+[ -e "$SB/state/audit.exited" ] && ok || bad "itest audit: the auditor was not terminated"
+kill -0 "$(cat "$SB/state/audit.pid" 2>/dev/null)" 2>/dev/null && bad "itest audit: auditor still running" || ok
+eq "itest audit temp files removed" "$(ls -a "$SB_RAW/it_au" | grep -c -e '\.audit\.pid$' -e '\.audit\.stop$' -e '\.audit\.err$')" 0
+
+# H: a failed bench (exit 3) stops the auditor too.
+itest auditfail EXP=it_aufail FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1 STUB_BENCH_RC=1
+eq "itest audit bench failure rc" "$it_rc" 3
+[ -e "$SB/state/audit.exited" ] && ok || bad "itest audit bench failure: the auditor was not terminated"
+kill -0 "$(cat "$SB/state/audit.pid" 2>/dev/null)" 2>/dev/null && bad "itest audit bench failure: auditor still running" || ok
+
+# I: no fault -> no auditor; original backends are not audited.
+itest noaudit EXP=it_noau DURATION=2s STUB_BENCH_SECS=1
+eq "itest no-fault rc" "$it_rc" 0
+grep -q 'auditor' "$SB/state/calls" && bad "itest no-fault: the auditor was started" || ok
+eq "itest no-fault audit file" "$(ls "$SB_RAW"/it_noau/*.audit 2>/dev/null)" ""
+itest origaudit EXP=it_orig BACKEND=kafka-orig FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1
+eq "itest kafka-orig rc" "$it_rc" 0
+contains "itest kafka-orig audit skipped" "$it_err" "audit skipped"
+grep -q 'auditor' "$SB/state/calls" && bad "itest kafka-orig: the auditor was started" || ok
 
 # The recorded fault value must be CSV/--tags safe and the tag file-name safe.
 grep -q 'fault_rec="$(echo "$FAULT" | tr '"','"' '"'+'"')"' "$HERE/run_one.sh" && ok || bad "run_one fault_rec"

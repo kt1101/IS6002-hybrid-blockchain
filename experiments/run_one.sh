@@ -58,6 +58,17 @@
 # and F4/F5 need Task 15's --fault flag and are rejected for now; tm-orig has
 # no F2. Nodes F1 stopped on purpose do not count as dead containers (exit 3);
 # a failed injection, or one that never ran, is exit 3 (no CSV row).
+# Audit (FAULT != none; backends kafka, raft, tendermint, bft2): in parallel
+# with the bench `auditor --interval=1s` runs in the client container from the
+# run-phase marker on and writes results/raw/<EXP>/<tag>.audit, one line
+# `unix_ts,nodes` per tick (nodes: empty = consistent, '+'-joined nodeK =
+# divergent, down:nodeK = unreachable, e.g. the F1-stopped node; see
+# cmd/auditor). unix_ts is the container clock, the .faults epoch_ms the host
+# clock; experiments/plot/rq3.py reads both. The auditor is stopped (SIGTERM
+# through its pid file, killed if need be) as soon as the bench ends and on
+# every exit path; down.sh removes the client container anyway. kafka-orig and
+# tm-orig are not audited (their Verify races with commits / returns nothing,
+# see check_consistency.sh). A missing or empty .audit file is only a warning.
 #
 # Durations accept the suffixes ms, s, m and h (e.g. 500ms, 30s, 20m, 1h).
 # Watchdog: ycsbbench is killed if it runs longer than LOAD_TIMEOUT +
@@ -201,6 +212,10 @@ events_file="$exp_dir/.$tag.events"
 faults_file="$exp_dir/$tag.faults"     # injection log (kept)
 fault_stopped="$exp_dir/.$tag.stopped" # services F1 stopped on purpose
 fault_stop="$exp_dir/.$tag.fault.stop" # aborts a pending injection
+audit_file="$exp_dir/$tag.audit"         # periodic auditor output (kept)
+audit_pidfile="$exp_dir/.$tag.audit.pid" # pid of the auditor in the client container
+audit_stop="$exp_dir/.$tag.audit.stop"   # asks the audit supervisor to stop the auditor
+audit_err="$exp_dir/.$tag.audit.err"     # stdout/stderr of the audit supervisor
 lock_dir="$HBDB_RESULTS_RAW/.hbdb.lock"
 mkdir -p "$exp_dir"
 
@@ -221,6 +236,8 @@ watchdog_pid=""
 events_pid=""
 fault_pid=""
 fault_rc=0
+audit_pid=""
+audit_started=""
 lock_held=0
 
 # acquire_lock: one run at a time on compose project hbdb (see header).
@@ -291,6 +308,58 @@ stop_faults() {
   fi
 }
 
+# Stop the periodic auditor: tell its supervisor (start_audit) to SIGTERM it,
+# wait up to ~15 s, then kill the supervisor. Safe to call twice.
+stop_audit() {
+  if [ -n "$audit_pid" ]; then
+    : >"$audit_stop"
+    local k=0
+    while kill -0 "$audit_pid" 2>/dev/null && [ "$k" -lt 150 ]; do
+      sleep 0.1
+      k=$((k + 1))
+    done
+    if kill -0 "$audit_pid" 2>/dev/null; then
+      log "warning: the audit supervisor did not stop within 15 s, killing it (down.sh removes the auditor with the client container)"
+      pkill -TERM -P "$audit_pid" 2>/dev/null || true
+      kill "$audit_pid" 2>/dev/null || true
+    fi
+    wait "$audit_pid" 2>/dev/null || true
+    audit_pid=""
+  fi
+}
+
+# start_audit ADDRS: background supervisor (pid in audit_pid) of the periodic
+# auditor. It waits for the run-phase marker in the bench log (the load phase
+# is not audited), starts `auditor --interval=1s` in the client container (the
+# wrapper sh writes its own pid, then execs the auditor, so the pid file holds
+# the auditor's pid) and, once $audit_stop exists or this run_one.sh is gone,
+# sends it SIGTERM through that pid file, retried until the auditor has exited
+# (the stop may come before the pid file exists).
+start_audit() {
+  local addrs="$1" parent=$$
+  (
+    set +e
+    cpid="/results/$EXP/.$tag.audit.pid"
+    while ! grep -q "$FAULT_RUN_MARKER" "$bench_log" 2>/dev/null; do
+      [ ! -e "$audit_stop" ] && kill -0 "$parent" 2>/dev/null || exit 0
+      sleep 0.2
+    done
+    hbdb_compose exec -T client sh -c 'echo $$ >"$1" && exec auditor --addrs="$2" --interval=1s --out="$3"' \
+      sh "$cpid" "$addrs" "/results/$EXP/$tag.audit" &
+    child=$!
+    while kill -0 "$child" 2>/dev/null; do
+      if [ -e "$audit_stop" ] || ! kill -0 "$parent" 2>/dev/null; then
+        if [ -s "$audit_pidfile" ]; then
+          hbdb_compose exec -T client sh -c 'kill -TERM "$(cat "$1")"' sh "$cpid" >/dev/null 2>&1
+        fi
+      fi
+      sleep 0.2
+    done
+    wait "$child"
+  ) >"$audit_err" 2>&1 &
+  audit_pid=$!
+}
+
 stop_watchdog() {
   if [ -n "$watchdog_pid" ]; then
     kill "$watchdog_pid" 2>/dev/null || true
@@ -357,6 +426,7 @@ save_logs() {
   cp "$HBDB_COMPOSE_FILE" "$log_dir/compose.json" 2>/dev/null || true
   [ -f "$bench_log" ] && cp "$bench_log" "$log_dir/" || true
   [ -f "$events_file" ] && cp "$events_file" "$log_dir/docker-events.log" || true
+  [ -s "$audit_err" ] && cp "$audit_err" "$log_dir/audit-supervisor.log" || true
 }
 
 cleanup() {
@@ -371,6 +441,7 @@ cleanup() {
   stop_watchdog
   stop_sampler
   stop_faults
+  stop_audit
   stop_events
   if [ -n "$bench_pid" ]; then
     kill "$bench_pid" 2>/dev/null
@@ -381,7 +452,7 @@ cleanup() {
   fi
   "$HBDB_CLUSTER_DIR/down.sh"
   collect_breakdown "$exp_dir/$tag.breakdown"
-  rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$events_file" "$fault_stopped" "$fault_stop"
+  rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$events_file" "$fault_stopped" "$fault_stop" "$audit_pidfile" "$audit_stop" "$audit_err"
   release_lock
   if [ "$rc" -eq 0 ]; then
     log "done: $EXP/$tag"
@@ -466,6 +537,7 @@ if hbdb_backend_uses_tso "$BACKEND"; then
 fi
 
 rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$exp_dir/$tag.timeline"
+rm -f "$audit_file" "$audit_pidfile" "$audit_stop" "$audit_err"
 : >"$bench_log"
 : >"$samples"
 
@@ -509,6 +581,16 @@ if [ "$FAULT" != none ]; then
     fault_run "$bench_log"
   ) &
   fault_pid=$!
+  case "$BACKEND" in
+    kafka-orig | tm-orig)
+      log "audit skipped: BACKEND=$BACKEND cannot be audited (Verify races with commits / returns nothing)"
+      ;;
+    *)
+      log "audit: auditor --interval=1s from the run phase on, output $audit_file"
+      audit_started=1
+      start_audit "$addrs"
+      ;;
+  esac
 fi
 
 # Sample host CPU use once the run phase (warmup + measurement) has started:
@@ -542,6 +624,7 @@ bench_pid=""
 stop_watchdog
 stop_sampler
 stop_faults
+stop_audit
 sed 's/^/    /' "$bench_log" | tail -n 30 >&2
 containers_ok=1
 check_containers || containers_ok=0
@@ -565,6 +648,9 @@ if [ "$FAULT" != none ] && [ "$fault_rc" -ne 0 ]; then
   exit 3
 fi
 grep -q 'ycsbbench: run phase started' "$bench_log" || log "warning: run-phase marker not found in $bench_log"
+if [ -n "$audit_started" ] && [ ! -s "$audit_file" ]; then
+  log "warning: the auditor wrote no $audit_file (see $audit_err; RQ3 detection latency unavailable)"
+fi
 
 # ---- assemble the final row ----
 [ -s "$row_tmp" ] || die "ycsbbench wrote no row to $row_tmp"

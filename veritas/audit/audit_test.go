@@ -219,3 +219,27 @@ func TestCollectRootsRejectsEmptyDigest(t *testing.T) {
 		t.Errorf("error %q should not name node1", err)
 	}
 }
+
+func TestCollectRootsPartialResultInError(t *testing.T) {
+	a1, stop1 := startFake(t, &fakeNode{root: []byte("r1")})
+	defer stop1()
+	a2, stop2 := startFake(t, &fakeNode{err: errors.New("boom")})
+	defer stop2()
+	a3, stop3 := startFake(t, &fakeNode{root: []byte("r3")})
+	defer stop3()
+	got, err := CollectRoots(context.Background(), []string{a1, a2, a3})
+	if got != nil {
+		t.Errorf("map = %v, want nil on error", got)
+	}
+	var ce *CollectError
+	if !errors.As(err, &ce) {
+		t.Fatalf("error %T %v, want a *CollectError", err, err)
+	}
+	if !reflect.DeepEqual(ce.Failed, []string{"node2"}) {
+		t.Errorf("Failed = %v, want [node2]", ce.Failed)
+	}
+	want := map[string][]byte{"node1": []byte("r1"), "node3": []byte("r3")}
+	if !reflect.DeepEqual(ce.Roots, want) {
+		t.Errorf("Roots = %v, want %v", ce.Roots, want)
+	}
+}
