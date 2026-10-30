@@ -21,7 +21,8 @@ func TestShuffledRoundRobinIsAPermutationPerEpochAndDeterministic(t *testing.T) 
 		}
 	}
 	// Same seed: same schedule, also when queried out of order.
-	for v := hotstuff.View(300); v > 0; v -= 7 {
+	// View is unsigned: stop before v-7 would wrap around.
+	for v := hotstuff.View(300); v >= 7; v -= 7 {
 		if a.GetLeader(v) != b.GetLeader(v) {
 			t.Fatalf("view %d: two rotations with the same seed disagree", v)
 		}
