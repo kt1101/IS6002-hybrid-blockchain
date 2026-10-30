@@ -59,7 +59,7 @@
 # no F2. Nodes F1 stopped on purpose do not count as dead containers (exit 3);
 # a failed injection, or one that never ran, is exit 3 (no CSV row).
 # Audit (FAULT != none; backends kafka, raft, tendermint, bft2): in parallel
-# with the bench `auditor --interval=1s` runs in the client container from the
+# with the bench `auditor --interval=1s --node-timeout=800ms` runs in the client container from the
 # run-phase marker on and writes results/raw/<EXP>/<tag>.audit, one line
 # `unix_ts,nodes` per tick (nodes: empty = consistent, '+'-joined nodeK =
 # divergent, down:nodeK = unreachable, e.g. the F1-stopped node; see
@@ -344,7 +344,7 @@ start_audit() {
       [ ! -e "$audit_stop" ] && kill -0 "$parent" 2>/dev/null || exit 0
       sleep 0.2
     done
-    hbdb_compose exec -T client sh -c 'echo $$ >"$1" && exec auditor --addrs="$2" --interval=1s --out="$3"' \
+    hbdb_compose exec -T client sh -c 'echo $$ >"$1" && exec auditor --addrs="$2" --interval=1s --node-timeout=800ms --out="$3"' \
       sh "$cpid" "$addrs" "/results/$EXP/$tag.audit" &
     child=$!
     while kill -0 "$child" 2>/dev/null; do
@@ -440,8 +440,8 @@ cleanup() {
   fi
   stop_watchdog
   stop_sampler
-  stop_faults
   stop_audit
+  stop_faults
   stop_events
   if [ -n "$bench_pid" ]; then
     kill "$bench_pid" 2>/dev/null
@@ -623,8 +623,8 @@ fi
 bench_pid=""
 stop_watchdog
 stop_sampler
-stop_faults
 stop_audit
+stop_faults
 sed 's/^/    /' "$bench_log" | tail -n 30 >&2
 containers_ok=1
 check_containers || containers_ok=0

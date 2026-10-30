@@ -148,12 +148,141 @@ def test_load_run_without_audit(tmp_path):
     tl, fl, _ = write_run(tmp_path, [10] * 40, F1_ROWS)
     m = rq3.load_run(tl, fl, None)
     assert m["detect_s"] is None and m["unreachable_s"] is None
-    assert m["recovery_s"] == pytest.approx(31 - 30.2)  # index 31 is the first full second after 30.2
+    assert m["detect_status"] == "no_audit" and m["audit_ticks"] is None
+    # throughput never fell: explicit "no dip", not a bogus recovery of ~0 s
+    assert m["recovery_s"] is None and m["recovery_status"] == "no_dip"
+    assert m["dip_start_s"] is None and m["stall_s"] == 0
+    assert m["min_after_fault_tps"] == 10
 
 
 def test_load_run_audit_never_divergent(tmp_path):
     tl, fl, au = write_run(tmp_path, [10] * 40, F1_ROWS, [(1000031.0, ""), (1000032.0, "")])
-    assert rq3.load_run(tl, fl, au)["detect_s"] is None
+    m = rq3.load_run(tl, fl, au)
+    assert m["detect_s"] is None
+    # the auditor stopped 8 s before the end of the run: "undetected" is not proven
+    assert m["detect_status"].startswith("invalid: the auditor stopped")
+    assert m["audit_ticks"] == 2 and m["audit_last_s"] == pytest.approx(32 - 30.2)
+
+
+def test_load_run_undetected_when_auditor_ran_to_the_end(tmp_path):
+    ticks = [(1000000.0 + s, "") for s in range(31, 40)]
+    tl, fl, au = write_run(tmp_path, [10] * 40, F1_ROWS, ticks)
+    m = rq3.load_run(tl, fl, au)
+    assert m["detect_s"] is None and m["detect_status"] == "undetected"
+    assert m["audit_div_pre"] == 0
+
+
+def test_detect_dead_auditor_has_no_post_fault_ticks(tmp_path):
+    ticks = [(1000000.0 + s, "") for s in range(1, 20)]  # died before the fault
+    tl, fl, au = write_run(tmp_path, [10] * 40, F1_ROWS, ticks)
+    m = rq3.load_run(tl, fl, au)
+    assert m["detect_s"] is None
+    assert m["detect_status"].startswith("invalid: no audit tick after the fault")
+    assert m["audit_ticks"] == 19 and m["audit_last_s"] < 0
+
+
+def test_detect_one_tick_lag_blip_is_invalid(tmp_path):
+    ticks = [(1000000.0 + 12, "node2"), (1000000.0 + 20, ""), (1000000.0 + 33, "node3"), (1000000.0 + 34, ""),
+             (1000000.0 + 39, "")]
+    tl, fl, au = write_run(tmp_path, [10] * 40, F1_ROWS, ticks)
+    m = rq3.load_run(tl, fl, au)
+    assert m["audit_div_pre"] == 1
+    assert m["detect_s"] is None
+    assert m["detect_status"].startswith("invalid: one-tick divergence")
+
+
+def test_detect_persistent_divergence_is_valid_despite_pre_fault_blip(tmp_path):
+    ticks = [(1000000.0 + 12, "node2"), (1000000.0 + 20, ""), (1000000.0 + 33, "node3"),
+             (1000000.0 + 34, "node3+node1"), (1000000.0 + 39, "node3")]
+    tl, fl, au = write_run(tmp_path, [10] * 40, F1_ROWS, ticks)
+    m = rq3.load_run(tl, fl, au)
+    assert m["audit_div_pre"] == 1
+    assert m["detect_status"] == "detected"
+    assert m["detect_s"] == pytest.approx(33 - 30.2)
+
+
+def test_detect_pre_fault_divergence_not_counted_as_detection():
+    rows = [(10, "node2"), (31, ""), (39, "")]
+    s = rq3.audit_summary(rows, 30, 40)
+    assert s["audit_div_pre"] == 1 and s["detect_s"] is None
+    assert s["detect_status"] == "undetected"
+
+
+def test_detect_unreachable_only_is_not_detected():
+    rows = [(31, "down:node4"), (32, "down:node4"), (39, "down:node4")]
+    s = rq3.audit_summary(rows, 30, 40)
+    assert s["detect_status"] == "undetected" and s["detect_s"] is None
+
+
+def test_clock_skew_warning(tmp_path):
+    ok_ticks = [(1000000.5, ""), (1000031.0, "")]
+    tl, fl, au = write_run(tmp_path, [10] * 40, F1_ROWS, ok_ticks)
+    assert rq3.load_run(tl, fl, au)["warnings"] == ""
+    skewed = [(1000000.0 + 9.0, ""), (1000031.0, "")]
+    tl, fl, au = write_run(tmp_path, [10] * 40, F1_ROWS, skewed)
+    assert "clock skew" in rq3.load_run(tl, fl, au)["warnings"]
+    early = [(999999.0, "")]
+    tl, fl, au = write_run(tmp_path, [10] * 40, F1_ROWS, early)
+    assert "clock skew" in rq3.load_run(tl, fl, au)["warnings"]
+
+
+# ---- dip-based recovery / stall ---------------------------------------------
+
+def test_dip_start_index():
+    tl = [10] * 60 + [10, 10, 4, 0, 9, 10]
+    assert rq3.dip_start_index(tl, 60, 10) == 62
+    assert rq3.dip_start_index([10] * 70, 60, 10) is None
+    assert rq3.dip_start_index(tl, 60, None) is None
+
+
+def test_recovery_after_dip_skips_the_lagging_prefix():
+    tl = [10] * 60 + [10, 10, 4, 0, 9, 10]
+    assert recovery_time(tl, 60, 10) == 0  # literal brief semantics
+    assert recovery_time(tl, 60, 10, after_dip=True) == 4  # 9 tps at index 64
+    assert recovery_time([10] * 70, 60, 10, after_dip=True) is None  # no dip
+    assert recovery_time([10] * 60 + [0] * 5, 60, 10, after_dip=True) is None
+
+
+def test_stall_from_first_zero():
+    tl = [10] * 60 + [10, 10, 0, 0, 0, 7]
+    assert stall_seconds(tl, 60) == 0
+    assert stall_seconds(tl, 60, from_first_zero=True) == 3
+    assert stall_seconds([10] * 70, 60, from_first_zero=True) == 0
+    assert stall_seconds([10] * 62 + [0, 0, 5, 0], 60, from_first_zero=True) == 2
+
+
+def test_load_run_lagging_effect(tmp_path):
+    # fault at 30.2; throughput stays 10 until 33, then 0,0, then recovers
+    timeline = [5] * 10 + [10] * 23 + [0, 0, 4, 9, 10, 10] + [10]
+    tl, fl, _ = write_run(tmp_path, timeline, F1_ROWS)
+    m = rq3.load_run(tl, fl, None)
+    assert m["dip_start_s"] == pytest.approx(33 - 30.2)
+    assert m["min_after_fault_tps"] == 0
+    assert m["stall_s"] == 2
+    assert m["recovery_s"] == pytest.approx(36 - 30.2)
+    assert m["recovery_from_dip_s"] == pytest.approx(36 - 33)
+    assert m["recovery_status"] == "recovered"
+
+
+def test_load_run_never_recovers(tmp_path):
+    timeline = [5] * 10 + [10] * 20 + [10, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    tl, fl, _ = write_run(tmp_path, timeline, F1_ROWS)
+    m = rq3.load_run(tl, fl, None)
+    assert m["recovery_s"] is None and m["recovery_status"] == "not_recovered"
+    assert m["dip_start_s"] == pytest.approx(31 - 30.2)
+    assert m["stall_s"] == 9
+
+
+# ---- fault kinds ------------------------------------------------------------
+
+def test_unknown_fault_kind_is_an_input_error(tmp_path):
+    rows = [
+        "u,1000000000,-10.000,0.000,F4:node4@20,run_phase_start,,x",
+        "u,1000030200,20.200,30.200,F4:node4@20,corrupt_on,node4,d",
+    ]
+    tl, fl, _ = write_run(tmp_path, [10] * 40, rows)
+    with pytest.raises(rq3.InputError, match="unknown fault kind F4"):
+        rq3.load_run(tl, fl, None)
 
 
 def test_load_run_uses_first_injection_of_a_multi_node_fault(tmp_path):

@@ -18,14 +18,20 @@ Inputs (all written by experiments/run_one.sh)
   cluster.
 * <tag>.faults: CSV `utc,epoch_ms,t_s,timeline_s,fault,action,node,detail`
   (experiments/faults.sh).  The fault time is `timeline_s` of the first
-  injection row (action docker_stop, iptables_drop or netem_delay: logged just
-  BEFORE the command runs).  The `run_phase_start` row (timeline_s 0) gives the
-  epoch of timeline second 0.
+  injection row (INJECT_ACTIONS, e.g. docker_stop: logged just BEFORE the
+  command runs).  The `run_phase_start` row (timeline_s 0) gives the epoch of
+  timeline second 0; it is written when the host SEES the marker in the bench
+  log (0.1 s poll + log relay), so timeline_s/fault_at_s are up to ~0.3 s too
+  large against the true timeline (below the 1 s resolution; inherited from
+  faults.sh).
 * <tag>.audit: `unix_ts,nodes` per second (cmd/auditor --interval): `nodes` is
   empty (consistent), or '+'-joined `nodeK` (divergent) and `down:nodeK`
   (unreachable, never divergent).  unix_ts is on the clock of the client
   container, the .faults epoch_ms on the clock of the host that runs
   run_one.sh; both are read as the same clock (a skew shifts detect_s).
+  load_run warns when the first tick is not within [-0.1, 5] s of the
+  run_phase_start epoch (the auditor starts ~0.3-1 s after the marker), which
+  is how a Docker Desktop clock skew shows up.
 
 Conventions
 -----------
@@ -36,6 +42,36 @@ Conventions
   stall_seconds.
 * pre_mean = mean throughput of the full seconds between the end of the warmup
   and the fault; None when there are none (AT=0), then recovery_s is None.
+
+Loader output (load_run / CLI), all times in seconds relative to fault_at_s
+unless named otherwise
+------------------------------------------------------------------------
+* The effect of a fault can lag the injection row (a graceful `docker stop`,
+  client timeouts), so the headline numbers are measured from the DIP, the
+  first full second after the fault below 0.9 x pre_mean:
+    dip_start_s            that second minus fault_at (None: no dip)
+    min_after_fault_tps    lowest per-second throughput after the fault
+    recovery_s             first second >= 0.9 x pre_mean AFTER the dip, minus
+                           fault_at; recovery_from_dip_s = recovery_s - dip_start_s
+    recovery_status        recovered | no_dip | not_recovered | no_baseline
+                           (no_dip: throughput never fell below the threshold,
+                           so there is nothing to recover from)
+    stall_s                consecutive zero seconds starting at the first zero
+                           second after the fault (0: no second with 0 tps)
+  recovery_time()/stall_seconds() keep their plain "from the fault" meaning
+  (the brief's), selectable per call with after_dip / from_first_zero.
+* detect_s needs a guard because the audited digest can lag a block on a
+  healthy node (a one-tick false divergence) and the auditor can die early:
+    audit_ticks    number of audit lines
+    audit_last_s   last tick minus fault_at
+    audit_div_pre  ticks BEFORE the fault that listed a divergent node
+    detect_status  detected | undetected | no_audit | invalid: <reason>
+  detect_s is set only for `detected`: the first post-fault tick with a
+  divergent node, and either audit_div_pre == 0, or the divergence persists
+  (a divergent node of that tick is divergent again in the next tick).
+  `undetected` (a finding for F4) needs the auditor to have run until within
+  AUDIT_END_SLACK_S of the end of the timeline, else it is `invalid`.
+* warnings: ';'-joined text (empty = none), also on stderr in the CLI.
 """
 from __future__ import annotations
 
@@ -47,9 +83,18 @@ from pathlib import Path
 
 RECOVERY_FRACTION = 0.9  # recovered = throughput >= 0.9 x pre-fault mean
 FAULTS_COLUMNS = ["utc", "epoch_ms", "t_s", "timeline_s", "fault", "action", "node", "detail"]
-# faults.sh actions logged right before a fault is applied (the *_failed and
-# the "applied"/"stopped" completion rows are not injections).
-INJECT_ACTIONS = ("docker_stop", "iptables_drop", "netem_delay")
+# faults.sh actions logged right before a fault is applied, per fault kind (the
+# *_failed and the "applied"/"stopped" completion rows are not injections).
+# TO EXTEND: Task 15 adds F4/F5 (--fault=corrupt|silent on the nodes); add
+# "F4": (<its action name>,) here once faults.sh logs one.  A fault kind that
+# is not listed is reported as an InputError, not a crash.
+INJECT_ACTIONS = {
+    "F1": ("docker_stop",),
+    "F2": ("iptables_drop",),
+    "F3": ("netem_delay",),
+}
+AUDIT_END_SLACK_S = 3  # the auditor may stop this long before the timeline ends
+FIRST_TICK_WINDOW_S = (-0.1, 5.0)  # expected first audit tick vs run_phase_start
 RUN_START_ACTION = "run_phase_start"
 DOWN_PREFIX = "down:"  # unreachable-node token of the audit file
 
@@ -60,7 +105,23 @@ class InputError(ValueError):
 
 # ---- the metrics ------------------------------------------------------------
 
-def recovery_time(timeline, fault_at, pre_mean):
+def _first_full_second(fault_at):
+    return max(int(math.ceil(fault_at)), 0)
+
+
+def dip_start_index(timeline, fault_at, pre_mean):
+    """Index of the first full second after the fault below 0.9 x pre_mean, or
+    None (no dip, or pre_mean is None or not positive)."""
+    if pre_mean is None or not pre_mean > 0:
+        return None
+    need = RECOVERY_FRACTION * pre_mean - 1e-9
+    for i in range(_first_full_second(fault_at), len(timeline)):
+        if timeline[i] < need:
+            return i
+    return None
+
+
+def recovery_time(timeline, fault_at, pre_mean, after_dip=False):
     """Seconds after the fault until throughput is back to >= 0.9 x pre_mean.
 
     Looks at the full seconds from ceil(fault_at) on; returns
@@ -68,23 +129,41 @@ def recovery_time(timeline, fault_at, pre_mean):
     or None if there is none (or pre_mean is None or not positive).  A fault
     that never lowers throughput gives a value below 1 (0 for an integer
     fault_at).
+
+    after_dip=True (used by load_run): only seconds after the first
+    sub-threshold second count, so a fault whose effect lags the injection is
+    not "recovered" at once; None if there is no dip at all.
     """
     if pre_mean is None or not pre_mean > 0:
         return None
+    first = _first_full_second(fault_at)
+    if after_dip:
+        dip = dip_start_index(timeline, fault_at, pre_mean)
+        if dip is None:
+            return None
+        first = dip + 1
     need = RECOVERY_FRACTION * pre_mean - 1e-9
-    for i in range(max(int(math.ceil(fault_at)), 0), len(timeline)):
+    for i in range(first, len(timeline)):
         if timeline[i] >= need:
             return float(i - fault_at)
     return None
 
 
-def stall_seconds(timeline, fault_at):
-    """Number of consecutive seconds with throughput 0 from ceil(fault_at)."""
+def stall_seconds(timeline, fault_at, from_first_zero=False):
+    """Number of consecutive seconds with throughput 0 from ceil(fault_at).
+
+    from_first_zero=True (used by load_run): the run starts at the first zero
+    second after the fault instead of exactly at ceil(fault_at), so a stall
+    that begins a few seconds after the injection is still counted.
+    """
+    i = _first_full_second(fault_at)
+    if from_first_zero:
+        while i < len(timeline) and timeline[i] != 0:
+            i += 1
     n = 0
-    for i in range(max(int(math.ceil(fault_at)), 0), len(timeline)):
-        if timeline[i] != 0:
-            break
+    while i < len(timeline) and timeline[i] == 0:
         n += 1
+        i += 1
     return n
 
 
@@ -116,6 +195,42 @@ def unreachable_latency(audit_rows, fault_at):
         if ts >= fault_at and unreachable_nodes(nodes):
             return ts - fault_at
     return None
+
+
+def audit_summary(audit_rows, fault_at, end_s):
+    """Guarded detection result of a run (see "Loader output" in the module doc).
+
+    audit_rows: (ts, nodes) on the timeline axis, in file order; end_s: length
+    of the timeline in seconds.  Returns a dict with audit_ticks, audit_last_s,
+    audit_div_pre, detect_s and detect_status.
+    """
+    rows = list(audit_rows)
+    out = {"audit_ticks": len(rows), "audit_last_s": None, "audit_div_pre": 0,
+           "detect_s": None, "detect_status": ""}
+    if rows:
+        out["audit_last_s"] = max(ts for ts, _ in rows) - fault_at
+    out["audit_div_pre"] = sum(1 for ts, nodes in rows if ts < fault_at and divergent_nodes(nodes))
+    if not any(ts >= fault_at for ts, _ in rows):
+        out["detect_status"] = "invalid: no audit tick after the fault (auditor dead or not started)"
+        return out
+    k = next((i for i, (ts, nodes) in enumerate(rows) if ts >= fault_at and divergent_nodes(nodes)), None)
+    if k is None:
+        if max(ts for ts, _ in rows) < end_s - AUDIT_END_SLACK_S:
+            out["detect_status"] = "invalid: the auditor stopped %.1f s before the end of the run" % (
+                end_s - max(ts for ts, _ in rows))
+        else:
+            out["detect_status"] = "undetected"
+        return out
+    persists = k + 1 < len(rows) and bool(
+        set(divergent_nodes(rows[k][1])) & set(divergent_nodes(rows[k + 1][1])))
+    if out["audit_div_pre"] == 0 or persists:
+        out["detect_s"] = rows[k][0] - fault_at
+        out["detect_status"] = "detected"
+    else:
+        out["detect_status"] = (
+            "invalid: one-tick divergence with %d divergent tick(s) before the fault (digest lag artefact?)"
+            % out["audit_div_pre"])
+    return out
 
 
 # ---- readers ----------------------------------------------------------------
@@ -197,9 +312,17 @@ def load_run(timeline_path, faults_path, audit_path=None):
     """
     timeline = read_timeline(timeline_path)
     rows = read_faults(faults_path)
-    inject = [r for r in rows if r["action"] in INJECT_ACTIONS and r["timeline_s"] != ""]
+    actions = {a for acts in INJECT_ACTIONS.values() for a in acts}
+    inject = [r for r in rows if r["action"] in actions and r["timeline_s"] != ""]
     if not inject:
-        raise InputError("%s: no injection row (%s) with a timeline_s" % (faults_path, "/".join(INJECT_ACTIONS)))
+        kinds = sorted({r["fault"].split(":")[0] for r in rows if r["fault"]})
+        unknown = [k for k in kinds if k not in INJECT_ACTIONS]
+        if unknown:
+            raise InputError(
+                "%s: unknown fault kind %s: no injection action is known for it (INJECT_ACTIONS in rq3.py lists %s; "
+                "F4/F5 come with Task 15, add the action names faults.sh logs for them)"
+                % (faults_path, "/".join(unknown), ", ".join(sorted(INJECT_ACTIONS))))
+        raise InputError("%s: no injection row (%s) with a timeline_s" % (faults_path, "/".join(sorted(actions))))
     first = min(inject, key=lambda r: _num(r, "timeline_s", faults_path))
     fault_at = _num(first, "timeline_s", faults_path)
     warmup = int(round(fault_at - _num(first, "t_s", faults_path)))
@@ -212,23 +335,57 @@ def load_run(timeline_path, faults_path, audit_path=None):
 
     window = timeline[warmup:int(math.floor(fault_at))]
     pre_mean = sum(window) / len(window) if window else None
+    warnings = []
     audit = None
     if audit_path is not None:
-        audit = [(ts - origin_s, nodes) for ts, nodes in read_audit(audit_path)]
+        raw = read_audit(audit_path)
+        audit = [(ts - origin_s, nodes) for ts, nodes in raw]
+        if audit and not FIRST_TICK_WINDOW_S[0] <= audit[0][0] <= FIRST_TICK_WINDOW_S[1]:
+            warnings.append(
+                "first audit tick is %.2f s after the run_phase_start epoch (expected within [%g, %g] s): "
+                "clock skew between the client container and the host, or a late auditor"
+                % ((audit[0][0],) + FIRST_TICK_WINDOW_S))
 
     def r3(v):
         return None if v is None else round(v, 3)
 
-    return {
+    first_full = _first_full_second(fault_at)
+    after = timeline[first_full:]
+    dip = dip_start_index(timeline, fault_at, pre_mean)
+    recovery = recovery_time(timeline, fault_at, pre_mean, after_dip=True)
+    if pre_mean is None or not pre_mean > 0:
+        status = "no_baseline"
+    elif dip is None:
+        status = "no_dip"
+    elif recovery is None:
+        status = "not_recovered"
+    else:
+        status = "recovered"
+    dip_s = None if dip is None else dip - fault_at
+
+    res = {
         "fault": first["fault"],
         "fault_at_s": r3(fault_at),
         "warmup_s": warmup,
         "pre_mean_tps": r3(pre_mean),
-        "recovery_s": r3(recovery_time(timeline, fault_at, pre_mean)),
-        "stall_s": stall_seconds(timeline, fault_at),
-        "detect_s": None if audit is None else r3(detect_latency(audit, fault_at)),
-        "unreachable_s": None if audit is None else r3(unreachable_latency(audit, fault_at)),
+        "dip_start_s": r3(dip_s),
+        "min_after_fault_tps": r3(min(after)) if after else None,
+        "recovery_s": r3(recovery),
+        "recovery_from_dip_s": r3(None if recovery is None else recovery - dip_s),
+        "recovery_status": status,
+        "stall_s": stall_seconds(timeline, fault_at, from_first_zero=True),
     }
+    if audit is None:
+        res.update({"audit_ticks": None, "audit_last_s": None, "audit_div_pre": None,
+                    "detect_s": None, "detect_status": "no_audit", "unreachable_s": None})
+    else:
+        summ = audit_summary(audit, fault_at, len(timeline))
+        res.update({"audit_ticks": summ["audit_ticks"], "audit_last_s": r3(summ["audit_last_s"]),
+                    "audit_div_pre": summ["audit_div_pre"], "detect_s": r3(summ["detect_s"]),
+                    "detect_status": summ["detect_status"],
+                    "unreachable_s": r3(unreachable_latency(audit, fault_at))})
+    res["warnings"] = "; ".join(warnings)
+    return res
 
 
 def main(argv=None):
@@ -243,6 +400,8 @@ def main(argv=None):
         return 2
     for k, v in m.items():
         print("%s=%s" % (k, "" if v is None else v))
+    if m["warnings"]:
+        print("rq3: warning: %s" % m["warnings"], file=sys.stderr)
     return 0
 
 
