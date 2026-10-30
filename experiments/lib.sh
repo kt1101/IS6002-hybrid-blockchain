@@ -19,6 +19,11 @@ esac
 # Must match experiments/cluster/gen_compose.py.
 HBDB_VERITAS_PORT=1990
 HBDB_TSO_ADDR=172.28.0.3:7070
+# Consensus ports of the node containers (gen_compose.py RAFT_PORT,
+# RAFT_FORWARD_PORT, TM_P2P_PORT); see hbdb_consensus_ports.
+HBDB_RAFT_PORT=7100
+HBDB_RAFT_FORWARD_PORT=7101
+HBDB_TM_P2P_PORT=26656
 HBDB_ALL_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
 HBDB_IMPLEMENTED_BACKENDS="kafka-orig tm-orig kafka raft tendermint"
 
@@ -104,6 +109,29 @@ hbdb_check_tendermint_limits() {
     die "BACKEND=tendermint needs CLIENTS <= $HBDB_TM_ABCI_QUEUE (got $3): more outstanding Sets can put more txs in one Tendermint block than its $HBDB_TM_ABCI_QUEUE-request ABCI queue holds (consensus halts)"
   [ "$4" -le "$HBDB_TM_ABCI_QUEUE" ] ||
     die "BACKEND=tendermint needs LOAD_THREADS <= $HBDB_TM_ABCI_QUEUE (got $4): more outstanding load Sets can put more txs in one Tendermint block than its $HBDB_TM_ABCI_QUEUE-request ABCI queue holds (consensus halts)"
+}
+
+# hbdb_consensus_ports BACKEND: the TCP ports a node uses to talk consensus
+# with its peers, space-separated; the network-level silent fault (F2,
+# experiments/faults.sh fault_silent_net) drops them. raft: the raft transport
+# and the submit-forward HTTP endpoint; tendermint: the tendermint p2p port.
+# Prints nothing for backends without a network-silent mode (kafka-orig,
+# tm-orig, kafka: their F2 is FaultPolicy, Task 15) and for bft2 (its port is
+# added together with the backend).
+hbdb_consensus_ports() {
+  case "$1" in
+    raft) echo "$HBDB_RAFT_PORT $HBDB_RAFT_FORWARD_PORT" ;;
+    tendermint) echo "$HBDB_TM_P2P_PORT" ;;
+    *) ;;
+  esac
+}
+
+# Milliseconds since the epoch (bash 3.2 has no EPOCHREALTIME and macOS date
+# no %N: perl, then python3, then whole seconds from date).
+hbdb_epoch_ms() {
+  perl -MTime::HiRes=time -e 'printf "%d\n", time() * 1000' 2>/dev/null ||
+    python3 -c 'import time; print(int(time.time() * 1000))' 2>/dev/null ||
+    echo "$(($(date +%s) * 1000))"
 }
 
 # Fail unless $2 (named $1) is a non-negative integer.

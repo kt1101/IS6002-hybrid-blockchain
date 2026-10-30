@@ -41,8 +41,23 @@
 #
 # CLIENTS = number of concurrent client workers: ycsbbench --ndrivers=CLIENTS
 # --nthreads=1; driver k talks to node (k mod N)+1.
-# RTT_MS and FAULT are recorded only; netem/faults come in later tasks, so any
-# value other than 0 / none is rejected for now.
+#
+# RTT_MS > 0 (E5): after health.sh passes and before ycsbbench starts (so the
+# load and settle phases run with it too), every node gets netem delay
+# RTT_MS/2 on its egress (net_set_rtt, experiments/net.sh): node <-> node RTT
+# = RTT_MS, client <-> node RTT = RTT_MS/2.
+# FAULT (RQ3, experiments/faults.sh; e.g. F1:node4@60, F1:node3,node4@60,
+# F2:node4@60, F3:node1@60; FAULT_SLOW_MS=200 is the F3 delay): injected AT
+# seconds after the start of the MEASUREMENT window, i.e. WARMUP after the
+# "ycsbbench: run phase started" line appears in the bench log; in the
+# timeline file (which starts with the warmup) that is line index WARMUP+AT
+# (0-based). AT must be < DURATION. Every injection (and the RTT netem) is
+# logged with its UTC time, epoch ms and both offsets to
+# results/raw/<EXP>/<tag>.faults. The fault column of the CSV row records
+# FAULT with ',' replaced by '+' (F1:node3+node4@60). F2 for kafka-orig/kafka
+# and F4/F5 need Task 15's --fault flag and are rejected for now; tm-orig has
+# no F2. Nodes F1 stopped on purpose do not count as dead containers (exit 3);
+# a failed injection, or one that never ran, is exit 3 (no CSV row).
 #
 # Durations accept the suffixes ms, s, m and h (e.g. 500ms, 30s, 20m, 1h).
 # Watchdog: ycsbbench is killed if it runs longer than LOAD_TIMEOUT +
@@ -69,6 +84,8 @@
 #       down.sh always runs at the end.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+. "$HBDB_ROOT/experiments/net.sh"
+. "$HBDB_ROOT/experiments/faults.sh"
 
 EXP="${EXP:-}"
 BACKEND="${BACKEND:-}"
@@ -108,7 +125,7 @@ case "$WORKLOAD" in
   '' | *[!A-Za-z0-9_-]*) die "WORKLOAD must match [A-Za-z0-9_-]+, got '$WORKLOAD'" ;;
 esac
 case "$FAULT" in
-  '' | *[!A-Za-z0-9._:@-]*) die "FAULT must match [A-Za-z0-9._:@-]+, got '$FAULT'" ;;
+  '' | *[!A-Za-z0-9._:@,+-]*) die "FAULT must match [A-Za-z0-9._:@,+-]+, got '$FAULT'" ;;
 esac
 for d in "$DURATION" "$WARMUP" "$LOAD_TIMEOUT" "$LOAD_OP_TIMEOUT" "$SETTLE_TIMEOUT"; do
   echo "$d" | grep -Eq '^[0-9]+(ms|s|m|h)$' || die "DURATION/WARMUP/LOAD_TIMEOUT/LOAD_OP_TIMEOUT/SETTLE_TIMEOUT must look like 60s, 500ms, 2m; got '$d'"
@@ -122,13 +139,23 @@ dur_seconds() {
     *h) echo $((10#${1%h} * 3600)) ;;
   esac
 }
+# dur_ms D: milliseconds of a validated duration.
+dur_ms() {
+  case "$1" in
+    *ms) echo $((10#${1%ms})) ;;
+    *s) echo $((10#${1%s} * 1000)) ;;
+    *m) echo $((10#${1%m} * 60000)) ;;
+    *h) echo $((10#${1%h} * 3600000)) ;;
+  esac
+}
 watchdog_secs=$(($(dur_seconds "$LOAD_TIMEOUT") + $(dur_seconds "$SETTLE_TIMEOUT") + $(dur_seconds "$WARMUP") + $(dur_seconds "$DURATION") + 120))
 { echo "$CPUS" | grep -Eq '^([0-9]+(\.[0-9]*)?|\.[0-9]+)$' && awk -v c="$CPUS" 'BEGIN { exit !(c > 0) }'; } ||
   die "CPUS must be a positive number, got '$CPUS'"
 { echo "$MEM" | grep -Eq '^[0-9]+(\.[0-9]+)?[mMgG]$' && awk -v m="${MEM%?}" 'BEGIN { exit !(m > 0) }'; } ||
   die "MEM must be a positive number with suffix m, g, M or G (e.g. 768m, 2g), got '$MEM'"
-[ "$RTT_MS" -eq 0 ] || die "RTT_MS=$RTT_MS: network delay injection is not implemented yet (only RTT_MS=0)"
-[ "$FAULT" = none ] || die "FAULT=$FAULT: fault injection is not implemented yet (only FAULT=none)"
+fault_parse "$FAULT" "$BACKEND" "$N" "$(dur_seconds "$DURATION")"
+# CSV- and --tags-safe form of FAULT (no commas).
+fault_rec="$(echo "$FAULT" | tr ',' '+')"
 
 case "$BACKEND" in
   kafka-orig) native_mode=async ;;
@@ -171,6 +198,9 @@ watchdog_fired="$exp_dir/.$tag.watchdog"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 log_dir="$exp_dir/logs/$tag.$stamp"   # one directory per attempt
 events_file="$exp_dir/.$tag.events"
+faults_file="$exp_dir/$tag.faults"     # injection log (kept)
+fault_stopped="$exp_dir/.$tag.stopped" # services F1 stopped on purpose
+fault_stop="$exp_dir/.$tag.fault.stop" # aborts a pending injection
 lock_dir="$HBDB_RESULTS_RAW/.hbdb.lock"
 mkdir -p "$exp_dir"
 
@@ -182,13 +212,15 @@ ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # -dirty marks rows measured with uncommitted changes to tracked files.
 commit="$(git -C "$HBDB_ROOT" describe --always --dirty --abbrev=7 2>/dev/null | tr -d ',' || true)"
 commit="${commit:-unknown}"
-tags="ts=$ts,commit=$commit,exp=$EXP,backend=$BACKEND,n=$N,f=$F,clients=$CLIENTS,block_size=$BLOCK_SIZE,workload=$WORKLOAD,rtt_ms=$RTT_MS,fault=$FAULT,rep=$REP,commit_mode=$COMMIT_MODE"
+tags="ts=$ts,commit=$commit,exp=$EXP,backend=$BACKEND,n=$N,f=$F,clients=$CLIENTS,block_size=$BLOCK_SIZE,workload=$WORKLOAD,rtt_ms=$RTT_MS,fault=$fault_rec,rep=$REP,commit_mode=$COMMIT_MODE"
 
 # ---- cleanup on every exit path ----
 bench_pid=""
 sampler_pid=""
 watchdog_pid=""
 events_pid=""
+fault_pid=""
+fault_rc=0
 lock_held=0
 
 # acquire_lock: one run at a time on compose project hbdb (see header).
@@ -245,6 +277,20 @@ stop_sampler() {
   fi
 }
 
+# Abort a pending injection and wait for the scheduler; sets fault_rc to its
+# exit status (0 injected, 1 failed, 2 aborted before the injection).
+stop_faults() {
+  if [ -n "$fault_pid" ]; then
+    : >"$fault_stop"
+    if wait "$fault_pid"; then
+      fault_rc=0
+    else
+      fault_rc=$?
+    fi
+    fault_pid=""
+  fi
+}
+
 stop_watchdog() {
   if [ -n "$watchdog_pid" ]; then
     kill "$watchdog_pid" 2>/dev/null || true
@@ -256,9 +302,13 @@ stop_watchdog() {
 # check_containers: return 1 (and log each one) if any container of the
 # project is not running, e.g. OOM-killed (exit 137) under its mem_limit, or
 # has been OOM-killed although it is still running (a process other than the
-# main one was killed).
+# main one was killed). A service listed in $fault_stopped (stopped on purpose
+# by F1) may be stopped; it still counts if it was OOM-killed.
 check_containers() {
-  local ids id line bad=""
+  local ids id line bad="" stopped=""
+  if [ -f "$fault_stopped" ]; then
+    stopped="$(tr '\n' ' ' <"$fault_stopped")"
+  fi
   ids="$(docker ps -aq --filter "label=com.docker.compose.project=$HBDB_PROJECT")"
   if [ -z "$ids" ]; then
     log "no containers found for project $HBDB_PROJECT"
@@ -269,7 +319,9 @@ check_containers() {
       line="$id unknown unknown unknown"
     # shellcheck disable=SC2086
     set -- $line
-    if [ "${2:-}" != running ] || [ "${3:-}" = true ]; then
+    if [ "${2:-}" != running ] && [ "${3:-}" != true ] && hbdb_in_list "${1:-}" "$stopped"; then
+      log "container $1 is ${2:-?} (exit code ${4:-?}): stopped on purpose by FAULT=$FAULT"
+    elif [ "${2:-}" != running ] || [ "${3:-}" = true ]; then
       bad="$bad $1(status=${2:-?},oom_killed=${3:-?},exit_code=${4:-?})"
     fi
   done
@@ -318,6 +370,7 @@ cleanup() {
   fi
   stop_watchdog
   stop_sampler
+  stop_faults
   stop_events
   if [ -n "$bench_pid" ]; then
     kill "$bench_pid" 2>/dev/null
@@ -328,7 +381,7 @@ cleanup() {
   fi
   "$HBDB_CLUSTER_DIR/down.sh"
   collect_breakdown "$exp_dir/$tag.breakdown"
-  rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$events_file"
+  rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$events_file" "$fault_stopped" "$fault_stop"
   release_lock
   if [ "$rc" -eq 0 ]; then
     log "done: $EXP/$tag"
@@ -377,6 +430,25 @@ if ! "$HBDB_CLUSTER_DIR/health.sh"; then
   exit 2
 fi
 
+# ---- network delay (E5) and fault scheduling setup (faults.sh globals) ----
+FAULT_LOG=""
+if [ "$RTT_MS" -gt 0 ] || [ "$FAULT" != none ]; then
+  FAULT_LOG="$faults_file"
+fi
+FAULT_STOPPED="$fault_stopped"
+FAULT_STOP="$fault_stop"
+FAULT_WARMUP_MS="$(dur_ms "$WARMUP")"
+FAULT_T0_MS=""
+if [ "$RTT_MS" -gt 0 ]; then
+  # After health.sh (which ran without delay) and before ycsbbench, so load,
+  # settle, warmup and measurement all run with it.
+  if ! net_set_rtt "$RTT_MS"; then
+    log "could not apply netem for RTT_MS=$RTT_MS"
+    exit 1
+  fi
+  fault_log netem_rtt "node1-node$N" "egress delay ${NET_BASE_DELAY_MS}ms on every node (RTT_MS=$RTT_MS)"
+fi
+
 # ---- benchmark + docker stats sampling ----
 addrs=""
 i=1
@@ -389,7 +461,8 @@ if hbdb_backend_uses_tso "$BACKEND"; then
   tso_arg="--tso-addr=$HBDB_TSO_ADDR"
 fi
 
-rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$exp_dir/$tag.timeline"
+rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$exp_dir/$tag.timeline" \
+  "$faults_file" "$fault_stopped" "$fault_stop"
 : >"$bench_log"
 : >"$samples"
 
@@ -424,6 +497,17 @@ bench_pid=$!
 ) &
 watchdog_pid=$!
 
+# Fault scheduler (faults.sh fault_run): waits for the run-phase marker in
+# the bench log, then injects FAULT at WARMUP + AT seconds after it.
+if [ "$FAULT" != none ]; then
+  log "fault $FAULT: injection at t=${FAULT_AT}s of the measurement window (WARMUP $WARMUP + ${FAULT_AT}s after the run-phase marker), log $faults_file"
+  (
+    set +e
+    fault_run "$bench_log"
+  ) &
+  fault_pid=$!
+fi
+
 # Sample host CPU use once the run phase (warmup + measurement) has started:
 # sum of all cluster containers' CPU% / (100 * NCPU) * 100. There is no sleep
 # between samples: each `docker stats --no-stream` call itself takes about
@@ -454,6 +538,7 @@ fi
 bench_pid=""
 stop_watchdog
 stop_sampler
+stop_faults
 sed 's/^/    /' "$bench_log" | tail -n 30 >&2
 containers_ok=1
 check_containers || containers_ok=0
@@ -466,6 +551,14 @@ if [ "$bench_rc" -ne 0 ]; then
 fi
 if [ "$containers_ok" -ne 1 ]; then
   log "a cluster container died during the run; no CSV row written"
+  exit 3
+fi
+if [ "$FAULT" != none ] && [ "$fault_rc" -ne 0 ]; then
+  if [ "$fault_rc" -eq 2 ]; then
+    log "fault $FAULT was never injected (the run ended before t=${FAULT_AT}s); no CSV row written"
+  else
+    log "fault injection $FAULT failed (exit $fault_rc, see $faults_file); no CSV row written"
+  fi
   exit 3
 fi
 grep -q 'ycsbbench: run phase started' "$bench_log" || log "warning: run-phase marker not found in $bench_log"
