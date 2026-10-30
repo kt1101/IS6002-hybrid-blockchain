@@ -35,6 +35,9 @@
 #                          made by experiments/ycsb/gen.sh: 10k records,
 #                          100k operations by default)
 #   KEEP_LOGS=0 (1: keep container logs also on success)
+#   BACKEND=tendermint additionally needs COMMIT_MODE=sync, CLIENTS <= 256 and
+#                 LOAD_THREADS <= 256 (hbdb_check_tendermint_limits in lib.sh:
+#                 Tendermint's 256-request ABCI queue per block)
 #
 # CLIENTS = number of concurrent client workers: ycsbbench --ndrivers=CLIENTS
 # --nthreads=1; driver k talks to node (k mod N)+1.
@@ -147,6 +150,7 @@ esac
 LOAD_THREADS="${LOAD_THREADS:-$(hbdb_default_load_threads "$BACKEND")}"
 hbdb_require_uint LOAD_THREADS "$LOAD_THREADS"
 [ "$LOAD_THREADS" -ge 1 ] || die "LOAD_THREADS must be >= 1"
+hbdb_check_tendermint_limits "$BACKEND" "$COMMIT_MODE" "$CLIENTS" "$LOAD_THREADS"
 
 load_file="$HBDB_YCSB_DIR/$WORKLOAD.load.dat"
 run_file="$HBDB_YCSB_DIR/$WORKLOAD.run.dat"

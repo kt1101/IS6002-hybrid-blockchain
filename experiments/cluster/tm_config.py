@@ -54,18 +54,25 @@ Veritas block, ~1 KB per Set, so ~100 KB at block size 100 and ~1 MB at
             limit would stall on one large tx).
             consensus_params.evidence.max_bytes is capped at 50000 (always,
             not only when above block.max_bytes).
-            consensus_params.block.max_gas = 200 (tm-orig keeps -1): the
-            256-request limit above holds for any app speed, because
-            execBlockOnProxyApp (internal/state/execution.go) enqueues every
-            DeliverTx of a block with DeliverTxAsync in a tight loop, faster
-            than the single sender goroutine writes them to the socket, so a
-            TM block of noticeably more than 256 txs halts consensus. 5 MiB
-            alone would allow ~470 txs at BLOCK_SIZE=10 and thousands of tiny
-            partial-flush blocks. consensus/tendermint's CheckTx returns
-            GasWanted = 1 per tx, and the v1 mempool's ReapMaxBytesMaxGas
-            stops once the gas total would exceed max_gas, so every TM block
-            carries at most 200 txs whatever their size (PostCheckMaxGas
-            accepts gas 1 <= 200).
+            consensus_params.block.max_gas keeps the testnet default (-1),
+            as for tm-orig.
+
+  The 256-request limit above holds for any app speed: execBlockOnProxyApp
+  (internal/state/execution.go) enqueues every DeliverTx of a block with
+  DeliverTxAsync in a tight loop, faster than the socket client's single
+  sender goroutine writes them, so a TM block of noticeably more than 256 txs
+  halts consensus. CheckTx is async too (mempool connection): while DeliverTx
+  waits on a full Deliver channel, >256 concurrent broadcast_tx_sync calls
+  fail with "buffer is full" (Submit errors). 5 MiB alone would allow ~470
+  txs at BLOCK_SIZE=10. What keeps blocks below 256 txs is an invariant of
+  sync commit: every Veritas block carries at least one outstanding Set, so
+  the txs in all mempools <= outstanding Sets <= CLIENTS (run) or
+  LOAD_THREADS (load). run_one.sh and check_consistency.sh therefore refuse
+  BACKEND=tendermint unless COMMIT_MODE=sync, CLIENTS <= 256 and
+  LOAD_THREADS <= 256 (lib.sh hbdb_check_tendermint_limits). A gas cap
+  (CheckTx GasWanted = 1 + block.max_gas = 200) was tried and caused a
+  reproducible ~30 s stall at load start (empty TM blocks, broadcasts timing
+  out), so it was dropped.
 
 tm-orig's values are unchanged.
 
@@ -96,9 +103,6 @@ BACKENDS = ("tm-orig", "tendermint")
 
 GENESIS_BLOCK_MAX_BYTES = {"tm-orig": 225000, "tendermint": 5242880}
 GENESIS_EVIDENCE_MAX_BYTES = 50000
-# Backend tendermint only: txs per TM block (each tx wants 1 gas, see
-# consensus/tendermint GasPerTx); below the socket ABCI client's 256 slots.
-TENDERMINT_BLOCK_MAX_GAS = 200
 
 # Backend tendermint: config.toml edits on top of the common ones, all
 # required (a missing key is fatal).
@@ -149,19 +153,12 @@ def edit_genesis(dirs, backend="tm-orig"):
     cap_above = max_bytes if backend == "tm-orig" else GENESIS_EVIDENCE_MAX_BYTES
     if int(old_ev) > cap_above:
         evidence["max_bytes"] = _same_type(old_ev, GENESIS_EVIDENCE_MAX_BYTES)
-    old_gas = block.get("max_gas")
-    if backend == "tendermint":
-        if old_gas is None:
-            raise SystemExit("tm_config: consensus_params.block.max_gas not found in %s" % paths[0])
-        block["max_gas"] = _same_type(old_gas, TENDERMINT_BLOCK_MAX_GAS)
     text = json.dumps(doc, indent=2) + "\n"
     for path in paths:
         with open(path, "w") as f:
             f.write(text)
-    sys.stderr.write("tm_config: %s genesis block.max_bytes %r -> %r, block.max_gas %r -> %r,"
-                     " evidence.max_bytes %r -> %r on %d nodes\n"
-                     % (backend, old, block["max_bytes"], old_gas, block.get("max_gas"),
-                        old_ev, evidence["max_bytes"], len(paths)))
+    sys.stderr.write("tm_config: %s genesis block.max_bytes %r -> %r, evidence.max_bytes %r -> %r on %d nodes\n"
+                     % (backend, old, block["max_bytes"], old_ev, evidence["max_bytes"], len(paths)))
 
 
 def node_ip(j):

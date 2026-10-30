@@ -46,20 +46,13 @@ func (*App) Info(abcitypes.RequestInfo) abcitypes.ResponseInfo {
 	return abcitypes.ResponseInfo{Data: "veritas core (consensus/tendermint)"}
 }
 
-// GasPerTx is the gas every tx wants (CheckTx GasWanted). With the genesis
-// consensus_params.block.max_gas of experiments/cluster/tm_config.py (200
-// for this backend) it caps the txs per Tendermint block at max_gas: the
-// mempool reaps a proposal until the gas total would exceed max_gas. The cap
-// keeps a block below the 256 async requests Tendermint v0.35.0's socket
-// ABCI client can queue (execBlockOnProxyApp sends every DeliverTx of a
-// block with DeliverTxAsync; the 257th fails with "buffer is full" and
-// consensus halts), whatever the size of the Veritas blocks.
-const GasPerTx = 1
-
-// CheckTx accepts every tx (the core validates blocks when it applies them)
-// and asks for GasPerTx gas.
+// CheckTx accepts every tx (the core validates blocks when it applies them).
+// It asks for no gas: a gas cap per block (GasWanted 1 + genesis max_gas)
+// stalled the chain at load start, so the tx count per Tendermint block is
+// bounded by the harness instead (sync commit, CLIENTS and LOAD_THREADS <=
+// 256: experiments/lib.sh hbdb_check_tendermint_limits).
 func (*App) CheckTx(abcitypes.RequestCheckTx) abcitypes.ResponseCheckTx {
-	return abcitypes.ResponseCheckTx{Code: abcitypes.CodeTypeOK, GasWanted: GasPerTx}
+	return abcitypes.ResponseCheckTx{Code: abcitypes.CodeTypeOK}
 }
 
 // DeliverTx pushes a copy of req.Tx (one Veritas block) to Deliver, waiting

@@ -223,47 +223,18 @@ def test_unknown_backend_is_rejected(tmp_path):
         main(["--dir", str(tmp_path), "--n", "2", "--backend", "kafka"])
 
 
-def test_tendermint_genesis_caps_txs_per_block_by_gas(tmp_path):
-    # Each tx wants 1 gas (consensus/tendermint CheckTx), so max_gas is the
-    # tx count per TM block; it must stay below the socket ABCI client's 256
-    # queued async requests (one DeliverTxAsync per tx).
-    _testnet(tmp_path, 3)
-    assert main(["--dir", str(tmp_path), "--n", "3", "--backend", "tendermint"]) == 0
-    raw = [(tmp_path / ("node%d" % j) / "config" / "genesis.json").read_bytes() for j in range(3)]
-    assert raw[0] == raw[1] == raw[2]
-    block = json.loads(raw[0])["consensus_params"]["block"]
-    assert block["max_gas"] == "200"  # v0.35 writes int64 as a JSON string; type kept
-    assert 0 < int(block["max_gas"]) < 256
-
-
-def test_tendermint_max_gas_keeps_number_type(tmp_path):
-    g = json.loads(json.dumps(GENESIS))
-    g["consensus_params"]["block"]["max_gas"] = -1
-    _testnet(tmp_path, 2, genesis=g)
-    assert main(["--dir", str(tmp_path), "--n", "2", "--backend", "tendermint"]) == 0
-    out = json.loads((tmp_path / "node0" / "config" / "genesis.json").read_text())
-    assert out["consensus_params"]["block"]["max_gas"] == 200
-
-
-def test_tm_orig_keeps_max_gas(tmp_path):
+def test_tendermint_genesis_keeps_max_gas(tmp_path):
+    # No gas cap (it stalled the chain at load start); the tx count per TM
+    # block is bounded by the sync/CLIENTS guard in lib.sh instead.
     _testnet(tmp_path, 2)
-    assert main(["--dir", str(tmp_path), "--n", "2"]) == 0
+    assert main(["--dir", str(tmp_path), "--n", "2", "--backend", "tendermint"]) == 0
     block = json.loads((tmp_path / "node0" / "config" / "genesis.json").read_text())["consensus_params"]["block"]
     assert block["max_gas"] == "-1"
     g = json.loads(json.dumps(GENESIS))
-    del g["consensus_params"]["block"]["max_gas"]
-    d = tmp_path / "nogas"
+    g["consensus_params"]["block"]["max_gas"] = 12345
+    d = tmp_path / "num"
     d.mkdir()
     _testnet(d, 2, genesis=g)
-    assert main(["--dir", str(d), "--n", "2", "--backend", "tm-orig"]) == 0
-    block = json.loads((d / "node0" / "config" / "genesis.json").read_text())["consensus_params"]["block"]
-    assert "max_gas" not in block
-
-
-def test_tendermint_genesis_without_max_gas_is_fatal(tmp_path):
-    g = json.loads(json.dumps(GENESIS))
-    del g["consensus_params"]["block"]["max_gas"]
-    _testnet(tmp_path, 2, genesis=g)
-    with pytest.raises(SystemExit) as e:
-        main(["--dir", str(tmp_path), "--n", "2", "--backend", "tendermint"])
-    assert "max_gas" in str(e.value)
+    assert main(["--dir", str(d), "--n", "2", "--backend", "tendermint"]) == 0
+    block = json.loads((d / "node1" / "config" / "genesis.json").read_text())["consensus_params"]["block"]
+    assert block["max_gas"] == 12345

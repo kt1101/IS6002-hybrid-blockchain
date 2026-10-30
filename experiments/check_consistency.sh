@@ -18,7 +18,8 @@
 #   CLIENTS=16, WORKLOAD=a (needs $YCSB_DIR/<w>.load.dat and .run.dat, made by
 #   experiments/ycsb/gen.sh), KEEP_LOGS=0, LOAD_THREADS (ycsbbench --load-threads;
 #   default from hbdb_default_load_threads in lib.sh, 256 for the new backends,
-#   as in run_one.sh).
+#   as in run_one.sh). BACKEND=tendermint needs COMMIT_MODE=sync, CLIENTS <= 256
+#   and LOAD_THREADS <= 256 (hbdb_check_tendermint_limits in lib.sh).
 #
 # DURATION and WARMUP accept only the suffixes s and m (30s, 2m), unlike run_one.sh.
 #
@@ -75,6 +76,7 @@ case "$COMMIT_MODE" in
   sync | async) ;;
   *) die "COMMIT_MODE must be sync or async, got '$COMMIT_MODE'" ;;
 esac
+hbdb_check_tendermint_limits "$BACKEND" "$COMMIT_MODE" "$CLIENTS" "$LOAD_THREADS"
 case "$WORKLOAD" in
   '' | *[!A-Za-z0-9_-]*) die "WORKLOAD must match [A-Za-z0-9_-]+, got '$WORKLOAD'" ;;
 esac

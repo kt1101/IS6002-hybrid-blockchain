@@ -82,6 +82,30 @@ hbdb_default_load_threads() {
   esac
 }
 
+# Max txs one Tendermint v0.35.0 block may carry: its socket ABCI client
+# queues at most 256 async requests (abci/client/socket_client.go
+# reqQueueSize) and execBlockOnProxyApp sends every DeliverTx of a block with
+# DeliverTxAsync, so a block of more txs fails "buffer is full" and halts
+# consensus (CheckTx is async too: more concurrent broadcasts fail as Submit
+# errors).
+HBDB_TM_ABCI_QUEUE=256
+
+# hbdb_check_tendermint_limits BACKEND COMMIT_MODE CLIENTS LOAD_THREADS:
+# for BACKEND=tendermint, fail unless the tx count per Tendermint block is
+# bounded below the ABCI queue. In sync commit every Veritas block (one ABCI
+# tx) carries at least one outstanding Set, so the txs in all mempools are at
+# most the outstanding Sets: CLIENTS during the run, LOAD_THREADS during the
+# load. Async commit has no such bound. Other backends: no-op.
+hbdb_check_tendermint_limits() {
+  [ "$1" = tendermint ] || return 0
+  [ "$2" = sync ] ||
+    die "BACKEND=tendermint needs COMMIT_MODE=sync (got '$2'): only sync commit bounds the txs per Tendermint block below the $HBDB_TM_ABCI_QUEUE-request ABCI queue (more halts consensus)"
+  [ "$3" -le "$HBDB_TM_ABCI_QUEUE" ] ||
+    die "BACKEND=tendermint needs CLIENTS <= $HBDB_TM_ABCI_QUEUE (got $3): more outstanding Sets can put more txs in one Tendermint block than its $HBDB_TM_ABCI_QUEUE-request ABCI queue holds (consensus halts)"
+  [ "$4" -le "$HBDB_TM_ABCI_QUEUE" ] ||
+    die "BACKEND=tendermint needs LOAD_THREADS <= $HBDB_TM_ABCI_QUEUE (got $4): more outstanding load Sets can put more txs in one Tendermint block than its $HBDB_TM_ABCI_QUEUE-request ABCI queue holds (consensus halts)"
+}
+
 # Fail unless $2 (named $1) is a non-negative integer.
 hbdb_require_uint() {
   case "$2" in
