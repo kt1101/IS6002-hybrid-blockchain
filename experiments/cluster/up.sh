@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Generate the compose file (and, for tm-orig, the Tendermint testnet config)
+# Generate the compose file (and, for tm-orig and tendermint, the Tendermint
+# testnet config)
 # and start the cluster in the background.
 #
 # Env: BACKEND (required), N=4, BLOCK_SIZE=100, COMMIT_MODE=sync,
@@ -20,15 +21,16 @@ hbdb_require_uint BLOCK_SIZE "$BLOCK_SIZE"
 
 mkdir -p "$HBDB_GEN_DIR" "$HBDB_RESULTS_RAW" "$HBDB_YCSB_DIR"
 
-if [ "$BACKEND" = tm-orig ]; then
+if [ "$BACKEND" = tm-orig ] || [ "$BACKEND" = tendermint ]; then
   log "generating tendermint testnet config for $N validators"
   # rm runs inside the container so files it created earlier (owned by root
   # on a Linux host) can be removed too.
   docker run --rm -v "$HBDB_GEN_DIR:/gen" hbdb-node bash -c \
     "rm -rf /gen/tm && tendermint testnet --v $N --o /gen/tm" >&2
   # testnet writes hostname-based peers (nodeK); tm_config.py replaces them
-  # with the node IPs and applies the original config tweaks.
-  python3 "$HBDB_CLUSTER_DIR/tm_config.py" --dir "$HBDB_GEN_DIR/tm" --n "$N"
+  # with the node IPs and applies the original config tweaks (plus, for
+  # tendermint, the larger tx/body/block limits: one tx is a Veritas block).
+  python3 "$HBDB_CLUSTER_DIR/tm_config.py" --dir "$HBDB_GEN_DIR/tm" --n "$N" --backend "$BACKEND"
 fi
 
 log "generating compose: backend=$BACKEND n=$N block_size=$BLOCK_SIZE commit_mode=$COMMIT_MODE cpus=$CPUS mem=$MEM"

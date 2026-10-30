@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Fix the `tendermint testnet` output for the docker cluster (tm-orig).
+"""Fix the `tendermint testnet` output for the docker cluster (tm-orig and
+the new tendermint backend; --backend picks the values, default tm-orig).
 
 `tendermint testnet --v N --o DIR` writes DIR/node0..node{N-1} with a shared
 genesis. This script rewrites each node's config/config.toml the way
@@ -33,6 +34,30 @@ and every node's config/genesis.json (identical bytes on all nodes):
             Values keep the JSON type testnet wrote (v0.35 writes int64 as a
             string).
 
+Backend tendermint (consensus/tendermint: one ABCI tx = one marshalled
+Veritas block, ~1 KB per Set, so ~100 KB at block size 100 and ~1 MB at
+1000) gets every edit above with these differences:
+
+  [mempool] max-tx-bytes = 4194304 (4 MiB; default 1 MiB is below a block of
+            1000 Sets plus headroom)
+  [rpc]     max-body-bytes = 8388608 (8 MiB; broadcast_tx_sync carries the
+            tx base64-encoded in JSON, 4/3 of its size, so the default 1 MB
+            body limit would refuse blocks above ~730 KB)
+  genesis   consensus_params.block.max_bytes = 5242880 (5 MiB) instead of
+            225000: a block must hold a tx of max-tx-bytes plus header,
+            commit (~109 B per validator) and evidence (the mempool reaps in
+            order and stops at the first tx that does not fit, so a smaller
+            limit would stall on one large tx). evidence.max_bytes is capped
+            at 50000 (always, not only when above block.max_bytes). The 256-queued-requests limit of the socket ABCI
+            client (see above) still applies per TM block: here it only
+            bites with many small Veritas blocks (5 MiB / 256 = ~20 KB, i.e.
+            blocks of < ~20 Sets) piling up in the mempool faster than one
+            TM block per round drains them while DeliverTx is blocked on a
+            full Deliver channel; DeliverTx itself is a channel push (no
+            redis or ledger work, unlike veritas-tm), so the queue normally
+            drains as fast as the socket. Watch for "buffer is full" at
+            BLOCK_SIZE=10. tm-orig's values are unchanged.
+
 Directory node$j belongs to compose service node$(j+1) at 172.28.0.(11+j).
 Node IDs come from config/node_key.json ("id", or derived from the ed25519
 public key as hex(sha256(pubkey)[:20])). Standard library only.
@@ -56,15 +81,26 @@ REQUIRED = (
     ("mempool", "recheck"),
 )
 
-GENESIS_BLOCK_MAX_BYTES = 225000
+BACKENDS = ("tm-orig", "tendermint")
+
+GENESIS_BLOCK_MAX_BYTES = {"tm-orig": 225000, "tendermint": 5242880}
 GENESIS_EVIDENCE_MAX_BYTES = 50000
+
+# Backend tendermint: config.toml edits on top of the common ones, all
+# required (a missing key is fatal).
+TENDERMINT_MAX_TX_BYTES = 4194304
+TENDERMINT_RPC_MAX_BODY_BYTES = 8388608
+TENDERMINT_EDITS = {
+    ("mempool", "max-tx-bytes"): str(TENDERMINT_MAX_TX_BYTES),
+    ("rpc", "max-body-bytes"): str(TENDERMINT_RPC_MAX_BODY_BYTES),
+}
 
 
 def _same_type(old, value):
     return str(value) if isinstance(old, str) else value
 
 
-def edit_genesis(dirs):
+def edit_genesis(dirs, backend="tm-orig"):
     """Set consensus_params.block.max_bytes in every genesis.json.
 
     All input genesis files must be equal (testnet writes one genesis); the
@@ -89,15 +125,20 @@ def edit_genesis(dirs):
         old_ev = evidence["max_bytes"]
     except (KeyError, TypeError):
         raise SystemExit("tm_config: consensus_params.evidence.max_bytes not found in %s" % paths[0])
-    block["max_bytes"] = _same_type(old, GENESIS_BLOCK_MAX_BYTES)
-    if int(old_ev) > GENESIS_BLOCK_MAX_BYTES:
+    max_bytes = GENESIS_BLOCK_MAX_BYTES[backend]
+    block["max_bytes"] = _same_type(old, max_bytes)
+    # tm-orig: lowered only when above block.max_bytes (as before);
+    # tendermint: always capped at 50000, so the room left for txs never
+    # depends on the testnet default (1048576).
+    cap_above = max_bytes if backend == "tm-orig" else GENESIS_EVIDENCE_MAX_BYTES
+    if int(old_ev) > cap_above:
         evidence["max_bytes"] = _same_type(old_ev, GENESIS_EVIDENCE_MAX_BYTES)
     text = json.dumps(doc, indent=2) + "\n"
     for path in paths:
         with open(path, "w") as f:
             f.write(text)
-    sys.stderr.write("tm_config: genesis block.max_bytes %r -> %r, evidence.max_bytes %r -> %r on %d nodes\n"
-                     % (old, block["max_bytes"], old_ev, evidence["max_bytes"], len(paths)))
+    sys.stderr.write("tm_config: %s genesis block.max_bytes %r -> %r, evidence.max_bytes %r -> %r on %d nodes\n"
+                     % (backend, old, block["max_bytes"], old_ev, evidence["max_bytes"], len(paths)))
 
 
 def node_ip(j):
@@ -155,11 +196,13 @@ def main(argv=None):
     p = argparse.ArgumentParser(description="fix tendermint testnet configs for the docker cluster")
     p.add_argument("--dir", required=True, help="testnet output dir (contains node0..)")
     p.add_argument("--n", type=int, required=True)
+    p.add_argument("--backend", default="tm-orig", choices=BACKENDS)
     a = p.parse_args(argv)
 
     dirs = [os.path.join(a.dir, "node%d" % j) for j in range(a.n)]
     ids = [node_id(d) for d in dirs]
-    edit_genesis(dirs)
+    edit_genesis(dirs, a.backend)
+    required = REQUIRED + (tuple(TENDERMINT_EDITS) if a.backend == "tendermint" else ())
     for j, d in enumerate(dirs):
         peers = ",".join("%s@%s:%d" % (ids[k], node_ip(k), P2P_PORT) for k in range(a.n) if k != j)
         edits = {
@@ -174,11 +217,13 @@ def main(argv=None):
             ("rpc", "max-subscription-clients"): "2000",
             ("rpc", "max-open-connections"): "2000",
         }
+        if a.backend == "tendermint":
+            edits.update(TENDERMINT_EDITS)
         path = os.path.join(d, "config", "config.toml")
         with open(path) as f:
             text = f.read()
         text, missing = edit_toml(text, edits)
-        fatal = [k for k in REQUIRED if k in missing]
+        fatal = [k for k in required if k in missing]
         if fatal:
             raise SystemExit("tm_config: %s not found in %s"
                              % (", ".join("[%s] %s" % k for k in fatal), path))

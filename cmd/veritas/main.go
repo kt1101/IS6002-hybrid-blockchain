@@ -5,9 +5,12 @@
 // so the kafka-orig baseline keeps using this binary (veritas-kafka).
 //
 // With --consensus=<backend> it runs the shared core: core.Executor +
-// core.Server over the chosen consensus backend: "kafka" (consensus/kafka)
-// or "raft" (consensus/raft, configured with the --raft-* flags);
-// tendermint and bft2 exit with a "not implemented yet" error (Tasks 11-12).
+// core.Server over the chosen consensus backend: "kafka" (consensus/kafka),
+// "raft" (consensus/raft, configured with the --raft-* flags) or
+// "tendermint" (consensus/tendermint: an ABCI socket server for a local
+// tendermint process, --tm-abci-socket and --tm-rpc-addr; it requires
+// --version-mode=ordered); bft2 exits with a "not implemented yet" error
+// (Task 12).
 // On SIGTERM/SIGINT the core path closes the server, writes its time
 // breakdown to --breakdown-out and exits.
 package main
@@ -30,6 +33,7 @@ import (
 	"hybrid/consensus"
 	kafkacons "hybrid/consensus/kafka"
 	raftcons "hybrid/consensus/raft"
+	tmcons "hybrid/consensus/tendermint"
 	"hybrid/dbconn"
 	"hybrid/kafkarole"
 	pbv "hybrid/proto/veritas"
@@ -63,6 +67,10 @@ var (
 	raftBind      = kingpin.Flag("raft-bind", "raft: listen address of the raft transport (default: this node's RAFTADDR)").Default("").String()
 	raftDir       = kingpin.Flag("raft-dir", "raft: data dir (bolt log store and snapshots)").Default("").String()
 	raftBootstrap = kingpin.Flag("raft-bootstrap", "raft: bootstrap the cluster with all of --raft-peers (exactly one node, node1)").Bool()
+
+	// --consensus=tendermint only (same sockets as scripts/start_veritas_tendermint.sh).
+	tmABCISocket = kingpin.Flag("tm-abci-socket", "tendermint: listen address of the ABCI socket server (tendermint --proxy-app dials it)").Default("tcp://0.0.0.0:26658").String()
+	tmRPCAddr    = kingpin.Flag("tm-rpc-addr", "tendermint: RPC address of the local tendermint node (Submit = broadcast_tx_sync)").Default("tcp://127.0.0.1:26657").String()
 )
 
 func check(err error) {
@@ -175,7 +183,16 @@ func runCore() {
 		if peers, err = parseRaftPeers(*raftPeers); err != nil {
 			kingpin.Fatalf("%v", err)
 		}
-	case "tendermint", "bft2":
+	case "tendermint":
+		requireFlag("tm-abci-socket", *tmABCISocket)
+		requireFlag("tm-rpc-addr", *tmRPCAddr)
+		// No TSO: versions come from the consensus order (the core's height
+		// is the count of delivered blocks), so client versions would all be
+		// stale.
+		if vm != core.VersionOrdered {
+			kingpin.Fatalf("--consensus=tendermint requires --version-mode=ordered, got %q", *versionMode)
+		}
+	case "bft2":
 		fmt.Fprintf(os.Stderr, "veritas: --consensus=%s: not implemented yet\n", *consensusName)
 		os.Exit(2)
 	default:
@@ -229,6 +246,16 @@ func runCore() {
 		})
 		if err != nil {
 			log.Fatalf("raft consensus: %v", err)
+		}
+	case "tendermint":
+		// No drop callback: a block accepted by CheckTx but never committed
+		// (e.g. evicted from the mempool) times out its sync waiters.
+		cons, err = tmcons.New(tmcons.Config{
+			ABCISocket: *tmABCISocket,
+			RPCAddr:    *tmRPCAddr,
+		})
+		if err != nil {
+			log.Fatalf("tendermint consensus: %v", err)
 		}
 	}
 

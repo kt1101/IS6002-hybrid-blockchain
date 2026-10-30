@@ -13,6 +13,7 @@ laddr = "tcp://127.0.0.1:26657"
 max-open-connections = 900
 max-subscription-clients = 100
 max-subscriptions-per-client = 5
+max-body-bytes = 1000000
 
 [p2p]
 laddr = "tcp://0.0.0.0:26656"
@@ -27,6 +28,7 @@ allow-duplicate-ip = false
 recheck = true
 size = 5000
 cache-size = 10000
+max-tx-bytes = 1048576
 """
 
 GENESIS = {
@@ -149,3 +151,69 @@ def test_genesis_without_block_max_bytes_is_fatal(tmp_path):
     with pytest.raises(SystemExit) as e:
         main(["--dir", str(tmp_path), "--n", "2"])
     assert "max_bytes" in str(e.value)
+
+
+def test_tm_orig_keeps_default_tx_and_body_limits(tmp_path):
+    _testnet(tmp_path, 2)
+    assert main(["--dir", str(tmp_path), "--n", "2", "--backend", "tm-orig"]) == 0
+    t = (tmp_path / "node0" / "config" / "config.toml").read_text()
+    assert "max-tx-bytes = 1048576" in _section(t, "mempool")
+    assert "max-body-bytes = 1000000" in _section(t, "rpc")
+
+
+def test_tendermint_backend_raises_tx_and_body_limits(tmp_path):
+    ids = _testnet(tmp_path, 3)
+    assert main(["--dir", str(tmp_path), "--n", "3", "--backend", "tendermint"]) == 0
+    for j in range(3):
+        t = (tmp_path / ("node%d" % j) / "config" / "config.toml").read_text()
+        mempool, rpc = _section(t, "mempool"), _section(t, "rpc")
+        # One ABCI tx is a whole Veritas block (up to ~1 MB at block size 1000).
+        assert "max-tx-bytes = 4194304" in mempool
+        # broadcast_tx_sync sends the tx base64 in JSON: > 4/3 * max-tx-bytes.
+        assert "max-body-bytes = 8388608" in rpc
+        assert 8388608 > 4194304 * 4 // 3 + 1024
+        # The common tm-orig edits still apply.
+        assert "recheck = false" in mempool and "size = 100000" in mempool
+        assert "max-subscription-clients = 2000" in rpc
+    t = (tmp_path / "node1" / "config" / "config.toml").read_text()
+    assert 'persistent-peers = "%s@172.28.0.11:26656,%s@172.28.0.13:26656"' % (ids[0], ids[2]) in t
+
+
+def test_tendermint_genesis_fits_a_max_size_tx(tmp_path):
+    _testnet(tmp_path, 2)
+    assert main(["--dir", str(tmp_path), "--n", "2", "--backend", "tendermint"]) == 0
+    raw = [(tmp_path / ("node%d" % j) / "config" / "genesis.json").read_bytes() for j in range(2)]
+    assert raw[0] == raw[1]
+    g = json.loads(raw[0])
+    block, ev = g["consensus_params"]["block"], g["consensus_params"]["evidence"]
+    assert block["max_bytes"] == "5242880"
+    assert ev["max_bytes"] == "50000"
+    # Room for one tx of max-tx-bytes next to header, a 200-validator commit
+    # and the largest evidence (types.MaxDataBytes).
+    overhead = 11 + 626 + (94 + 200 * 109) + 50000
+    assert int(block["max_bytes"]) - overhead >= 4194304 + 16
+
+
+def test_tendermint_caps_small_evidence_limit_only_when_larger(tmp_path):
+    g = json.loads(json.dumps(GENESIS))
+    g["consensus_params"]["evidence"]["max_bytes"] = "1000"
+    _testnet(tmp_path, 2, genesis=g)
+    assert main(["--dir", str(tmp_path), "--n", "2", "--backend", "tendermint"]) == 0
+    out = json.loads((tmp_path / "node0" / "config" / "genesis.json").read_text())
+    assert out["consensus_params"]["evidence"]["max_bytes"] == "1000"
+
+
+def test_tendermint_fails_without_tx_or_body_limit_keys(tmp_path):
+    for key in ("max-tx-bytes = 1048576\n", "max-body-bytes = 1000000\n"):
+        d = tmp_path / key.split()[0]
+        d.mkdir()
+        _testnet(d, 2, toml=TOML.replace(key, ""))
+        with pytest.raises(SystemExit) as e:
+            main(["--dir", str(d), "--n", "2", "--backend", "tendermint"])
+        assert key.split()[0] in str(e.value)
+
+
+def test_unknown_backend_is_rejected(tmp_path):
+    _testnet(tmp_path, 2)
+    with pytest.raises(SystemExit):
+        main(["--dir", str(tmp_path), "--n", "2", "--backend", "kafka"])

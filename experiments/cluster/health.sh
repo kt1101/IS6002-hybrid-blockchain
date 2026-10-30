@@ -28,6 +28,11 @@
 #               through EVERY node + TSO; a follower's Set is forwarded to
 #               the leader, so this also waits for a leader election and
 #               checks every node's forward path and raft apply.
+#   tendermint: phase 1 Verify on every node (core.Server, as kafka), phase 2
+#               Set+Get through EVERY node WITHOUT a TSO (--version-mode=
+#               ordered); each Set is a block broadcast to that node's
+#               tendermint, so this also waits for tendermint to produce
+#               blocks and checks every node's RPC, mempool and ABCI path.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
@@ -91,7 +96,7 @@ fail() {
 
 log "probing $BACKEND cluster (N=$N, timeout ${HEALTH_TIMEOUT}s)"
 
-if [ "$BACKEND" = kafka-orig ] || [ "$BACKEND" = kafka ] || [ "$BACKEND" = raft ]; then
+if [ "$BACKEND" = kafka-orig ] || [ "$BACKEND" = kafka ] || [ "$BACKEND" = raft ] || [ "$BACKEND" = tendermint ]; then
   t="$(remaining)"
   i=1
   while [ "$i" -le "$N" ]; do
@@ -107,7 +112,7 @@ case "$BACKEND" in
   kafka-orig)
     probe "node1-setget" "$t" --addr="$(hbdb_node_ip 1):$HBDB_VERITAS_PORT" --mode=setget --tso-addr="$HBDB_TSO_ADDR"
     ;;
-  tm-orig)
+  tm-orig | tendermint)
     i=1
     while [ "$i" -le "$N" ]; do
       probe "node$i-setget" "$t" --addr="$(hbdb_node_ip "$i"):$HBDB_VERITAS_PORT" --mode=setget

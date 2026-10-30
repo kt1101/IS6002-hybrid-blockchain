@@ -58,7 +58,7 @@ def test_tendermint_compose_has_no_kafka_or_tso():
 
 
 def test_volumes_are_per_node_and_named():  # để down -v xóa sạch
-    for backend in ("kafka-orig", "tm-orig", "kafka", "raft"):
+    for backend in ("kafka-orig", "tm-orig", "kafka", "raft", "tendermint"):
         c = gen(backend=backend, n=5, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
         declared = c["volumes"]
         seen = set()
@@ -90,7 +90,7 @@ def test_every_service_has_init_and_short_grace():
 
 
 def test_unimplemented_backends_are_rejected(capsys):
-    for backend in ("tendermint", "bft2"):
+    for backend in ("bft2",):
         with pytest.raises(NotImplementedError):
             gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
         assert main(["--backend", backend, "--n", "4"]) != 0
@@ -146,6 +146,7 @@ def test_node_exits_when_any_long_lived_process_dies():
         "tm-orig": ("redis-server ", "veritas-tm ", "tendermint start "),
         "kafka": ("redis-server ", "veritas-kafka "),
         "raft": ("redis-server ", "veritas-kafka "),
+        "tendermint": ("redis-server ", "veritas-kafka ", "tendermint start "),
     }
     for backend, procs in expect.items():
         c = gen(backend=backend, n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
@@ -192,7 +193,7 @@ def test_kafka_backend_passes_commit_mode():
             assert "--commit-mode=%s " % mode in c["services"][k]["command"][-1]
 
 
-@pytest.mark.parametrize("backend", ["kafka", "raft"])
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint"])
 def test_core_backend_forwards_sigterm_to_veritas(backend):
     # tini signals only bash; bash must pass SIGTERM on so the server can
     # write its breakdown before the stop grace period ends.
@@ -286,3 +287,59 @@ def test_cli_accepts_raft(tmp_path):
     c = json.loads(out.read_text())
     assert _nodes(c) == ["node1", "node2", "node3"]
     assert "--consensus=raft --commit-mode=async" in c["services"]["node1"]["command"][-1]
+
+
+def test_tendermint_backend_runs_core_server_without_kafka_or_tso():
+    c = gen(backend="tendermint", n=4, block_size=50, commit_mode="sync", cpus=0.5, mem="768m",
+            tm_dir="/gen/tm", results_dir="/res")
+    assert "kafka" not in c["services"] and "tso" not in c["services"]
+    assert _nodes(c) == ["node1", "node2", "node3", "node4"]
+    for i, k in enumerate(_nodes(c), start=1):
+        s = c["services"][k]
+        assert "depends_on" not in s
+        assert s["cap_add"] == ["NET_ADMIN"]
+        # node$i gets testnet directory node$((i-1)) read-only, plus the results dir.
+        assert s["volumes"] == ["node%d-data:/data" % i, "/gen/tm/node%d:/tmcfg:ro" % (i - 1), "/res:/results"]
+        cmd = s["command"][-1]
+        assert ("GOMEMLIMIT=537MiB veritas-kafka --consensus=tendermint --commit-mode=sync"
+                " --version-mode=ordered --node-id=%d --signature=node%d " % (i, i)) in cmd
+        assert "--parties=node1,node2,node3,node4 --blk-size=50 --addr=:1990" in cmd
+        assert " --tm-abci-socket=tcp://0.0.0.0:26658 --tm-rpc-addr=tcp://127.0.0.1:26657 " in cmd
+        assert "--redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d" % i in cmd
+        assert "--breakdown-out=/results/breakdown-node%d.json &" % i in cmd
+        assert "kafka-addr" not in cmd and "tso" not in cmd
+        assert cmd.count("GOMEMLIMIT") == 1  # tendermint itself is not limited
+
+
+def test_tendermint_starts_after_abci_socket_listens():
+    c = gen(backend="tendermint", n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    lines = c["services"]["node2"]["command"][-1].rstrip("\n").split("\n")
+    assert lines[1] == "mkdir -p /data/tm && cp -R /tmcfg/. /data/tm/"
+    v = [j for j, l in enumerate(lines) if "--consensus=tendermint" in l][0]
+    wait = lines.index("until (echo > /dev/tcp/127.0.0.1/26658) 2>/dev/null; do sleep 0.2; done")
+    tm = lines.index("tendermint start --home /data/tm --proxy-app=tcp://127.0.0.1:26658 &")
+    assert v < wait < tm
+
+
+def test_tendermint_backend_passes_commit_mode():
+    for mode in ("sync", "async"):
+        c = gen(backend="tendermint", n=2, block_size=100, commit_mode=mode, cpus=0.5, mem="768m")
+        for k in _nodes(c):
+            assert "--consensus=tendermint --commit-mode=%s " % mode in c["services"][k]["command"][-1]
+
+
+def test_tm_orig_unchanged_by_tendermint():
+    c = gen(backend="tm-orig", n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
+            tm_dir="/gen/tm")
+    for k in _nodes(c):
+        cmd = c["services"][k]["command"][-1]
+        assert "--consensus" not in cmd and "trap " not in cmd
+        assert not any(v.endswith(":/results") for v in c["services"][k]["volumes"])
+
+
+def test_cli_accepts_tendermint(tmp_path):
+    out = tmp_path / "compose.json"
+    assert main(["--backend", "tendermint", "--n", "3", "--commit-mode", "async", "--out", str(out)]) == 0
+    c = json.loads(out.read_text())
+    assert _nodes(c) == ["node1", "node2", "node3"]
+    assert "--consensus=tendermint --commit-mode=async" in c["services"]["node1"]["command"][-1]

@@ -6,7 +6,7 @@
 #   EXP=smoke BACKEND=kafka-orig N=4 CLIENTS=16 DURATION=20s experiments/run_one.sh
 #
 # Env (defaults):
-#   EXP (required, [A-Za-z0-9._-]+)   BACKEND (required: kafka-orig | tm-orig | kafka | raft)
+#   EXP (required, [A-Za-z0-9._-]+)   BACKEND (required: kafka-orig | tm-orig | kafka | raft | tendermint)
 #   N=4  F=0  CLIENTS=16  BLOCK_SIZE=100  WORKLOAD=a  RTT_MS=0  FAULT=none  REP=1
 #   COMMIT_MODE: kafka-orig is always async, tm-orig always sync (the original
 #                code has no switch); default = the backend's mode, a mismatch

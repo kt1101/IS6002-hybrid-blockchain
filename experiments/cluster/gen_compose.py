@@ -7,7 +7,7 @@ is needed. Layout (network ``hbdb``, subnet 172.28.0.0/16):
     kafka   172.28.0.2     broker + zookeeper   (backends using Kafka)
     tso     172.28.0.3     timestamp oracle     (backends using a TSO)
     client  172.28.0.4     runs ycsbbench / hbdbprobe via `docker compose exec`
-    node$i  172.28.0.(10+i) redis + veritas server (+ tendermint for tm-orig)
+    node$i  172.28.0.(10+i) redis + veritas server (+ tendermint for tm-orig, tendermint)
 
 Implemented backends: kafka-orig, tm-orig (the original Veritas code, started
 with the same flags as scripts/start_veritas_{kafka,tendermint}.sh) and kafka
@@ -18,8 +18,13 @@ JSON written at shutdown). raft is the same binary with --consensus=raft
 (consensus/raft): no Kafka, a TSO like kafka, and on every node besides redis
 and veritas the raft transport on RAFT_PORT and the submit-forwarding HTTP
 endpoint on RAFT_FORWARD_PORT (node$i: 172.28.0.(10+i):7100 and :7101); node1
-bootstraps the full static peer set, the others wait to be contacted. The
-other names are accepted by the CLI but rejected until their task adds them.
+bootstraps the full static peer set, the others wait to be contacted.
+tendermint is the same binary with --consensus=tendermint
+(consensus/tendermint) and --version-mode=ordered: no Kafka, no TSO, and on
+every node a tendermint v0.35.0 process (the testnet config from up.sh, as
+tm-orig, with the tendermint values of tm_config.py) whose --proxy-app is the
+server's ABCI socket; one ABCI tx is one Veritas block. bft2 is accepted by
+the CLI but rejected until its task adds it.
 
 The veritas server of every node runs with GOMEMLIMIT = 70% of the node's
 memory cap (768m -> 537MiB), so the Go GC works harder before the cap is hit
@@ -39,7 +44,7 @@ import re
 import sys
 
 ALL_BACKENDS = ("kafka-orig", "tm-orig", "kafka", "raft", "tendermint", "bft2")
-IMPLEMENTED = ("kafka-orig", "tm-orig", "kafka", "raft")
+IMPLEMENTED = ("kafka-orig", "tm-orig", "kafka", "raft", "tendermint")
 COMMIT_MODES = ("sync", "async")
 
 PROJECT = "hbdb"
@@ -246,6 +251,36 @@ def _raft_node(i, n, block_size, commit_mode, memlimit):
     ) + _exit_when_any_exits(["redis-server", "veritas-kafka"])
 
 
+def _tendermint_node(i, n, block_size, commit_mode, memlimit):
+    """Node of the Tendermint backend (consensus/tendermint + core.Server).
+
+    Same layout as tm-orig (tendermint home copied from the read-only /tmcfg
+    into /data/tm, redis, then the veritas server, then tendermint once the
+    ABCI socket listens), but the server is veritas-kafka --consensus=
+    tendermint with --version-mode=ordered (no TSO). SIGTERM is forwarded to
+    the server as for kafka/raft, so the breakdown reaches /results; the
+    server closes its ABCI socket, tendermint is killed with the container.
+    """
+    parties = ",".join("node%d" % j for j in range(1, n + 1))
+    return [
+        "set -eu",
+        "mkdir -p /data/tm && cp -R /tmcfg/. /data/tm/",
+    ] + REDIS_START + _forward_sigterm(
+        # GOMEMLIMIT applies to the veritas server only, not to tendermint.
+        "GOMEMLIMIT=%s veritas-kafka --consensus=tendermint --commit-mode=%s --version-mode=ordered --node-id=%d"
+        " --signature=node%d --parties=%s --blk-size=%d --addr=:%d"
+        " --tm-abci-socket=%s --tm-rpc-addr=%s"
+        " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
+        " --breakdown-out=/results/breakdown-node%d.json &"
+        % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT,
+           TM_ABCI_LISTEN, TM_RPC, i, i)
+    ) + [
+        # tendermint exits if the ABCI app is not listening yet.
+        "until (echo > /dev/tcp/127.0.0.1/26658) 2>/dev/null; do sleep 0.2; done",
+        "tendermint start --home /data/tm --proxy-app=%s &" % TM_ABCI_DIAL,
+    ] + _exit_when_any_exits(["redis-server", "veritas-kafka", "tendermint"])
+
+
 def _tm_orig_node(i, n, block_size, memlimit):
     parties = ",".join("node%d" % j for j in range(1, n + 1))
     return [
@@ -302,7 +337,7 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
     fixed behaviour (kafka-orig async, tm-orig sync) and ignore it; the new
     backends pass it to the server as --commit-mode.
     tm_dir is the `tendermint testnet` output (node0..node{n-1}), mounted
-    read-only into node1..nodeN (tm-orig only).
+    read-only into node1..nodeN (tm-orig and tendermint).
     """
     if backend not in ALL_BACKENDS:
         raise ValueError("unknown backend %r" % backend)
@@ -352,6 +387,10 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
         elif backend == "raft":
             s["command"] = _bash(_raft_node(i, n, block_size, commit_mode, memlimit))
             s["volumes"].append("%s:/results" % results_dir)
+        elif backend == "tendermint":
+            s["command"] = _bash(_tendermint_node(i, n, block_size, commit_mode, memlimit))
+            s["volumes"].append("%s:/tmcfg:ro" % os.path.join(tm_dir, "node%d" % (i - 1)))
+            s["volumes"].append("%s:/results" % results_dir)
         elif backend == "tm-orig":
             s["command"] = _bash(_tm_orig_node(i, n, block_size, memlimit))
             s["volumes"].append("%s:/tmcfg:ro" % os.path.join(tm_dir, "node%d" % (i - 1)))
@@ -384,7 +423,7 @@ def main(argv=None):
     p.add_argument("--cpus", type=float, default=0.5, help="CPU cap per node")
     p.add_argument("--mem", default="768m", help="memory cap per node")
     p.add_argument("--out", default="-", help="output file ('-' = stdout)")
-    p.add_argument("--tm-dir", default=None, help="tendermint testnet dir (tm-orig)")
+    p.add_argument("--tm-dir", default=None, help="tendermint testnet dir (tm-orig, tendermint)")
     p.add_argument("--ycsb-dir", default=None, help="YCSB data dir, mounted at /ycsb in client")
     p.add_argument("--results-dir", default=None, help="results dir, mounted at /results in client")
     a = p.parse_args(argv)
