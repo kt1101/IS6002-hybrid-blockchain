@@ -22,11 +22,13 @@ exp_begin e3 "$@"
 [ -n "$BLOCKS" ] || die "BLOCKS must list at least one block size"
 for blk in $BLOCKS; do hbdb_require_uint BLOCKS "$blk"; done
 
-for b in $EXP_BACKEND_LIST; do
-  exp_resolve_clients "$b" || continue
-  c="$EXP_RESOLVED_CLIENTS"
-  for blk in $BLOCKS; do
-    exp_cfg "$b" 4 0 "$c" "$blk" a 0 none
+exp_plan() {
+  for b in $EXP_BACKEND_LIST; do
+    exp_resolve_clients "$b" || continue
+    c="$EXP_RESOLVED_CLIENTS"
+    for blk in $BLOCKS; do
+      exp_cfg "$b" 4 0 "$c" "$blk" a 0 none
+    done
   done
-done
-exp_finish
+}
+exp_main

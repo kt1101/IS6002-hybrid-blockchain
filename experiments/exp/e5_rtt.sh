@@ -21,11 +21,13 @@ exp_begin e5 "$@"
 [ -n "$RTTS" ] || die "RTTS must list at least one RTT"
 for rtt in $RTTS; do hbdb_require_uint RTTS "$rtt"; done
 
-for b in $EXP_BACKEND_LIST; do
-  exp_resolve_clients "$b" || continue
-  c="$EXP_RESOLVED_CLIENTS"
-  for rtt in $RTTS; do
-    exp_cfg "$b" 4 0 "$c" 100 a "$rtt" none
+exp_plan() {
+  for b in $EXP_BACKEND_LIST; do
+    exp_resolve_clients "$b" || continue
+    c="$EXP_RESOLVED_CLIENTS"
+    for rtt in $RTTS; do
+      exp_cfg "$b" 4 0 "$c" 100 a "$rtt" none
+    done
   done
-done
-exp_finish
+}
+exp_main

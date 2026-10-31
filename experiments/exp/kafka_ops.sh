@@ -18,6 +18,9 @@
 # reads = sum of the CURRENT-OFFSETs over the N nodes (all nodes read every
 # message), writes = mean of the LOG-END-OFFSETs (2 decimals);
 # current_offsets / log_end_offsets are the per-node values, '+'-joined.
+# A group that has committed no offset yet shows '-' in kafka-consumer-groups:
+# the row is still written, with '-' in current_offsets for that node and an
+# EMPTY reads (unknown, not 0), and the hook logs a warning.
 # The counters cover the whole life of the cluster (a fresh one per run): the
 # load phase, settle, warmup and measurement, not only the measurement window.
 # Consumers commit their offsets every 5 s (auto-commit), so the hook first
@@ -45,14 +48,13 @@ hbdb_require_uint KAFKA_OPS_WAIT "$KAFKA_OPS_WAIT"
 
 # parse_group TOPIC: read kafka-consumer-groups --describe output on stdin and
 # print "<current> <log-end>" of the line for TOPIC (a '-' current offset, i.e.
-# nothing committed yet, is 0); fail if there is no such line or a value is
-# not a number.
+# nothing committed yet, stays '-'); fail if there is no such line or a value
+# is not a number.
 parse_group() {
   awk -v t="$1" '
     $2 == t && !seen {
       cur = $4; end = $5
-      if (cur == "-") cur = 0
-      if (cur !~ /^[0-9]+$/ || end !~ /^[0-9]+$/) exit 2
+      if ((cur != "-" && cur !~ /^[0-9]+$/) || end !~ /^[0-9]+$/) exit 2
       print cur, end
       seen = 1
     }
@@ -65,6 +67,7 @@ sleep "$KAFKA_OPS_WAIT"
 cur_list=""
 end_list=""
 reads=0
+unknown=""
 writes_sum=0
 i=1
 while [ "$i" -le "$N" ]; do
@@ -78,10 +81,18 @@ while [ "$i" -le "$N" ]; do
   end="${pair#* }"
   cur_list="${cur_list:+$cur_list+}$cur"
   end_list="${end_list:+$end_list+}$end"
-  reads=$((reads + cur))
+  if [ "$cur" = "-" ]; then
+    unknown="${unknown:+$unknown }node$i"
+  else
+    reads=$((reads + cur))
+  fi
   writes_sum=$((writes_sum + end))
   i=$((i + 1))
 done
+if [ -n "$unknown" ]; then
+  log "warning: no committed offset yet for $unknown: reads left empty (unknown) in the row"
+  reads=""
+fi
 writes="$(awk -v s="$writes_sum" -v n="$N" 'BEGIN { printf "%.2f", s / n }')"
 
 mkdir -p "$(dirname "$KAFKA_OPS_CSV")"
@@ -91,4 +102,4 @@ else
   echo "$KAFKA_OPS_HEADER" >"$KAFKA_OPS_CSV"
 fi
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$EXP,$BACKEND,$N,$CLIENTS,$REP,$reads,$writes,$cur_list,$end_list" >>"$KAFKA_OPS_CSV"
-log "kafka ops: $EXP n=$N clients=$CLIENTS rep=$REP reads=$reads writes=$writes -> $KAFKA_OPS_CSV"
+log "kafka ops: $EXP n=$N clients=$CLIENTS rep=$REP reads=${reads:-unknown} writes=$writes -> $KAFKA_OPS_CSV"

@@ -273,7 +273,7 @@ def check_batch_flush(batch_flush):
     1s, 250ms, 2m, 1h (the forms run_one.sh accepts; Go's ParseDuration reads them)."""
     if batch_flush is None:
         return
-    m = re.match(r"^([0-9]+)(ms|s|m|h)$", batch_flush)
+    m = re.fullmatch(r"([0-9]+)(ms|s|m|h)", batch_flush)
     if not m or int(m.group(1)) < 1:
         raise ValueError("invalid --batch-flush %r: want a positive duration like 1s, 250ms, 2m" % (batch_flush,))
 

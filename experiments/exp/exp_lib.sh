@@ -4,10 +4,17 @@
 #
 #   . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/exp_lib.sh"
 #   exp_begin e1 "$@"                      # args, env, backends
-#   for b in $EXP_BACKEND_LIST; do
-#     exp_cfg "$b" 4 0 64 100 a 0 none     # BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT
-#   done
-#   exp_finish
+#   exp_plan() {                           # the matrix: called twice by exp_main
+#     for b in $EXP_BACKEND_LIST; do
+#       exp_cfg "$b" 4 0 64 100 a 0 none   # BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT
+#     done
+#   }
+#   exp_main
+#
+# exp_main calls exp_plan twice: first with EXP_VALIDATE_ONLY=1 (exp_cfg only
+# validates its configuration: fault string, tendermint limits, YCSB files),
+# so a bad plan dies before the first run and before any --dry-run output;
+# then for real, followed by exp_finish.
 #
 # exp_cfg runs one configuration for REPS=1..3 (plus the noise-rule reps), each
 # through experiments/run_one.sh with COMMIT_MODE=sync, appending to
@@ -38,8 +45,8 @@
 # RTT, fault and f); if CV > 10% rep REPS+1, then REPS+2 (at most EXTRA_REPS),
 # run, stopping as soon as CV <= 10%. Extra reps are ordinary rows with higher
 # rep numbers, so resuming works unchanged. The summary prints every CV and
-# flags those still above 10% (informational, not an error). Extra reps are
-# not part of the planned count.
+# flags those still above 10% (informational, not an error). An extra rep that
+# runs joins the planned runs, so the summary's planned count includes it.
 #
 # Resumable: a run whose row (backend, n, f, clients, block_size, workload,
 # rtt_ms, fault, rep) is already in results/raw/<EXP>.csv is skipped; a run
@@ -80,6 +87,7 @@ EXP_FAILED_NOW=""            # this invocation's failures (same format as the .f
 EXP_SKIPPED=""               # backends skipped (no usable E1 best), one line each
 EXP_DRY=0
 EXP_RESOLVED_CLIENTS=""
+EXP_VALIDATE_ONLY=0
 EXP_BEST_PLACEHOLDER="best-of-e1"
 
 # exp_dur_seconds D: whole seconds of a duration like 60s, 500ms, 3m, 1h.
@@ -296,6 +304,7 @@ exp_run() {
 exp_cfg() {
   local r=1
   exp_validate_cfg "$@"
+  [ "$EXP_VALIDATE_ONLY" != 1 ] || return 0
   if ! printf '%s\n' "$EXP_CFGS" | grep -Fxq "$*"; then
     EXP_CFGS="${EXP_CFGS:+$EXP_CFGS
 }$*"
@@ -354,27 +363,31 @@ exp_resolve_clients() {
     done
   done
   if [ -z "$missing" ] && EXP_RESOLVED_CLIENTS="$(python3 "$EXP_BEST_PY" "$EXP_E1_CSV" "$b")"; then
-    log "$b: best CLIENTS from $EXP_E1_CSV = $EXP_RESOLVED_CLIENTS"
+    [ "$EXP_VALIDATE_ONLY" = 1 ] || log "$b: best CLIENTS from $EXP_E1_CSV = $EXP_RESOLVED_CLIENTS"
     return 0
   fi
   EXP_RESOLVED_CLIENTS=""
   if [ "$EXP_DRY" = 1 ]; then
-    if [ -n "$missing" ]; then
-      log "$b: best CLIENTS of E1 not known yet (E1 rows missing, clients/rep: $missing); the dry run lists CLIENTS=$EXP_BEST_PLACEHOLDER"
-    else
-      log "$b: best CLIENTS of E1 not known (best_clients.py failed on $EXP_E1_CSV); the dry run lists CLIENTS=$EXP_BEST_PLACEHOLDER"
+    if [ "$EXP_VALIDATE_ONLY" != 1 ]; then
+      if [ -n "$missing" ]; then
+        log "$b: best CLIENTS of E1 not known yet (E1 rows missing, clients/rep: $missing); the dry run lists CLIENTS=$EXP_BEST_PLACEHOLDER"
+      else
+        log "$b: best CLIENTS of E1 not known (best_clients.py failed on $EXP_E1_CSV); the dry run lists CLIENTS=$EXP_BEST_PLACEHOLDER"
+      fi
     fi
     EXP_RESOLVED_CLIENTS="$EXP_BEST_PLACEHOLDER"
     return 0
   fi
-  if [ -n "$missing" ]; then
-    log "$b skipped: $EXP_E1_CSV lacks E1 rows at N=4 (clients/rep): $missing(run E1 first, or set BEST_CLIENTS_$up / FIXED_CLIENTS)"
-    EXP_SKIPPED="${EXP_SKIPPED:+$EXP_SKIPPED
-}$b: E1 rows missing (clients/rep): $missing"
-  else
-    log "$b skipped: best_clients.py failed on $EXP_E1_CSV"
-    EXP_SKIPPED="${EXP_SKIPPED:+$EXP_SKIPPED
-}$b: best_clients.py failed on $EXP_E1_CSV"
+  if [ "$EXP_VALIDATE_ONLY" != 1 ]; then
+    if [ -n "$missing" ]; then
+      log "$b skipped: $EXP_E1_CSV lacks E1 rows at N=4 (clients/rep): $missing(run E1 first, or set BEST_CLIENTS_$up / FIXED_CLIENTS)"
+      EXP_SKIPPED="${EXP_SKIPPED:+$EXP_SKIPPED
+}$b: E1 rows missing (clients/rep): $missing- to run it anyway set BEST_CLIENTS_$up=<n> (or FIXED_CLIENTS=<n> for all backends)"
+    else
+      log "$b skipped: best_clients.py failed on $EXP_E1_CSV"
+      EXP_SKIPPED="${EXP_SKIPPED:+$EXP_SKIPPED
+}$b: best_clients.py failed on $EXP_E1_CSV - to run it anyway set BEST_CLIENTS_$up=<n> (or FIXED_CLIENTS=<n> for all backends)"
+    fi
   fi
   return 1
 }
@@ -441,6 +454,15 @@ EOT3
   } >&2
   EXP_SUMMARY_PLANNED=$planned
   EXP_SUMMARY_PRESENT=$present
+}
+
+# exp_main: validate the whole plan, then run it (see the header).
+exp_main() {
+  EXP_VALIDATE_ONLY=1
+  exp_plan
+  EXP_VALIDATE_ONLY=0
+  exp_plan
+  exp_finish
 }
 
 # exp_finish: the final summary and the exit code (see the header).

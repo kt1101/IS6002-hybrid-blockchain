@@ -48,21 +48,24 @@ exp_hook_for() {
 # Rows of kafka runs in e2.csv vs rows in the ops file (both keyed by n,
 # clients, rep).
 exp_summary_extra() {
-  local rows ops
+  local rows ops unknown=0
   [ -s "$EXP_CSV" ] || return 0
   rows="$(awk -F, 'NR > 1 && $4 == "kafka" { c++ } END { print c + 0 }' "$EXP_CSV")"
   ops=0
   if [ -s "$E2_OPS_CSV" ]; then
     ops="$(awk -F, 'NR > 1 && $3 == "kafka" { c++ } END { print c + 0 }' "$E2_OPS_CSV")"
+    unknown="$(awk -F, 'NR > 1 && $3 == "kafka" && $7 == "" { c++ } END { print c + 0 }' "$E2_OPS_CSV")"
   fi
-  echo "kafka ops rows: $ops in $E2_OPS_CSV for $rows kafka rows in $EXP_CSV$([ "$ops" -ge "$rows" ] || echo '  (some runs have no ops row: see the PRE_DOWN_HOOK warnings in the logs)')"
+  echo "kafka ops rows: $ops in $E2_OPS_CSV for $rows kafka rows in $EXP_CSV$([ "$ops" -ge "$rows" ] || echo '  (some runs have no ops row: see the PRE_DOWN_HOOK warnings in the logs)')$([ "$unknown" -eq 0 ] || echo "  ($unknown ops rows have unknown (empty) reads: no committed offset)")"
 }
 
-for b in $EXP_BACKEND_LIST; do
-  exp_resolve_clients "$b" || continue
-  c="$EXP_RESOLVED_CLIENTS"
-  for n in $NS; do
-    exp_cfg "$b" "$n" 0 "$c" 100 a 0 none
+exp_plan() {
+  for b in $EXP_BACKEND_LIST; do
+    exp_resolve_clients "$b" || continue
+    c="$EXP_RESOLVED_CLIENTS"
+    for n in $NS; do
+      exp_cfg "$b" "$n" 0 "$c" 100 a 0 none
+    done
   done
-done
-exp_finish
+}
+exp_main

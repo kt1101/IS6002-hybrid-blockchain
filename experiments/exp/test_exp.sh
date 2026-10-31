@@ -9,11 +9,46 @@
 #
 # Bash 3.2 compatible, like the scripts it tests.
 set -u
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_ROOT="$(cd "$HERE/../.." && pwd)"
 
-TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/test_exp.XXXXXX")"
+# Hermetic: the drivers and run_one.sh read many knobs from the environment
+# (REPS, EXTRA_REPS, BACKENDS, EXP, FIXED_CLIENTS, BATCH_FLUSH, ...). A caller
+# that exported any of them (e.g. EXTRA_REPS=0 for a smoke run) must not change
+# what this suite checks, so drop every one of them first. Only PATH, HOME,
+# TMPDIR and KEEP_TMP survive.
+for v in EXP BACKEND BACKENDS N F CLIENTS BLOCK_SIZE WORKLOAD RTT_MS FAULT REP TAG COMMIT_MODE \
+  REPS EXTRA_REPS NS FIXED_CLIENTS BEST_CLIENTS_KAFKA BEST_CLIENTS_RAFT BEST_CLIENTS_TENDERMINT BEST_CLIENTS_BFT2 \
+  BEST_CLIENTS_KAFKA_ORIG BEST_CLIENTS_TM_ORIG E1_EXP E6_NF E6_AT E6_DURATION F5_KINDS BLOCKS WORKLOADS RTTS \
+  DURATION WARMUP DRY_RUN BATCH_FLUSH PRE_DOWN_HOOK KAFKA_OPS_CSV KAFKA_OPS_WAIT LOAD_THREADS LOAD_TIMEOUT \
+  LOAD_OP_TIMEOUT SETTLE_TIMEOUT HEALTH_TIMEOUT CPUS MEM KEEP_LOGS YCSB_DIR FAULT_SLOW_MS FAULT_CONFIRM_MS \
+  HBDB_NET_DEV NET_BASE_DELAY_MS NET_LIMIT_PKTS STUB_RC STUB_BACKEND STUB_NOISY_REP2 STUB_FAIL_ONCE \
+  DOCKER_STUB_LOG DOCKER_STUB_FAIL DOCKER_STUB_NOLINE DOCKER_STUB_DASH PART NS_B; do
+  unset "$v"
+done
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SRC_ROOT="$(cd "$HERE/../.." && pwd -P)"
+
+# A TMPDIR ending in '/' would put '//' into every path the drivers print.
+TMPDIR="${TMPDIR:-/tmp}"
+TMPDIR="${TMPDIR%/}"
+export TMPDIR
+TMP_ROOT="$(mktemp -d "$TMPDIR/test_exp.XXXXXX")"
+TMP_ROOT="$(cd "$TMP_ROOT" && pwd -P)"
 [ -n "${KEEP_TMP:-}" ] || trap 'rm -rf "$TMP_ROOT"' EXIT
+
+# No test may start a cluster: a docker on PATH that records the call and fails
+# (the kafka_ops tests below put their own canned docker in front).
+mkdir -p "$TMP_ROOT/bin"
+cat >"$TMP_ROOT/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+echo "docker $*" >>"${TMP_ROOT_DOCKER_LOG:?}"
+echo "test_exp.sh: unexpected docker call: $*" >&2
+exit 97
+STUB
+chmod +x "$TMP_ROOT/bin/docker"
+export TMP_ROOT_DOCKER_LOG="$TMP_ROOT/unexpected-docker.log"
+: >"$TMP_ROOT_DOCKER_LOG"
+export PATH="$TMP_ROOT/bin:$PATH"
 pass=0
 fail=0
 ok() { pass=$((pass + 1)); }
@@ -53,6 +88,10 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "EXP=$EXP BACKEND=$BACKEND N=$N F=$F CLIENTS=$CLIENTS BLOCK_SIZE=$BLOCK_SIZE WORKLOAD=$WORKLOAD RTT_MS=$RTT_MS FAULT=$FAULT REP=$REP COMMIT_MODE=$COMMIT_MODE DURATION=${DURATION:-} HOOK=${PRE_DOWN_HOOK:-}" >>"$root/stub.log"
 if [ -n "${STUB_RC:-}" ] && { [ -z "${STUB_BACKEND:-}" ] || [ "$STUB_BACKEND" = "$BACKEND" ]; }; then
   exit "$STUB_RC"
+fi
+if [ -n "${STUB_FAIL_ONCE:-}" ] && [ ! -e "$root/.failed-once" ]; then
+  : >"$root/.failed-once"
+  exit 3
 fi
 tps=100
 if [ "${STUB_NOISY_REP2:-}" = 1 ] && [ "$REP" = 2 ]; then tps=300; fi
@@ -224,6 +263,19 @@ e1_rows raft 64
 OUT="$(BACKENDS=raft "$ROOT/experiments/exp/e2_nodes.sh" --dry-run 2>/dev/null | head -1)"
 contains "E2 dry run reads the best from E1" "$OUT" "BACKEND=raft N=4 F=0 CLIENTS=64 "
 
+# retry that succeeds on the second attempt
+newtree retryok
+STUB_FAIL_ONCE=1 BACKENDS=raft drv e1_clients.sh
+eq "a run that fails once is retried and succeeds: exit" "$RC" 0
+eq "retry: 12 rows" "$(rows e1)" 12
+eq "retry: 13 calls" "$(calls)" 13
+eq "retry: no failure recorded" "$(ls "$ROOT/results/raw/e1.failures" 2>/dev/null | wc -l | tr -d ' ')" 0
+
+# skipped backends name the override
+newtree skiphint
+BACKENDS=raft drv e3_block.sh
+contains "skipped backend names BEST_CLIENTS_RAFT" "$OUT" "BEST_CLIENTS_RAFT=<n>"
+
 # --------------------------------------------------------- E3, E4, E5, E6 ----
 newtree e345
 FIXED_CLIENTS=32 drv e3_block.sh
@@ -259,6 +311,25 @@ eq "tendermint guard: nothing ran" "$(calls)" 0
 contains "tendermint guard: message" "$OUT" "needs CLIENTS <= 256"
 FIXED_CLIENTS=512 BACKENDS=tendermint drv e3_block.sh --dry-run
 eq "tendermint guard also in --dry-run" "$RC" 1
+# the whole plan is validated before the first run: kafka (first) must not run
+FIXED_CLIENTS=512 BACKENDS="kafka raft tendermint" drv e3_block.sh
+eq "bad tendermint plan after good backends: refused" "$RC" 1
+eq "bad plan: not one run happened" "$(calls)" 0
+eq "bad plan: no CSV" "$(rows e3)" 0
+LOAD_THREADS=300 FIXED_CLIENTS=64 BACKENDS="kafka tendermint" drv e5_rtt.sh
+eq "LOAD_THREADS plan refused before any run" "$(calls)" 0
+FIXED_CLIENTS=512 BACKENDS="kafka tendermint" drv e3_block.sh --dry-run
+eq "bad plan: --dry-run prints no plan line before dying" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 0
+FIXED_CLIENTS=64 E6_NF="7:1" BACKENDS=raft drv e6_faults.sh --dry-run
+eq "E6_NF with f != floor((N-1)/3) refused" "$RC" 1
+contains "E6_NF message" "$OUT" "f must be floor((N-1)/3) = 2 for N=7"
+FIXED_CLIENTS=64 E6_NF="4:1 7:2 10:3" BACKENDS=raft drv e6_faults.sh --dry-run
+eq "E6_NF with consistent pairs accepted" "$RC" 0
+DURATION=20s FIXED_CLIENTS=64 BACKENDS=raft drv e6_faults.sh --dry-run
+contains "E6 says it ignores DURATION" "$OUT" "DURATION=20s is ignored: E6 runs DURATION=180s"
+contains "E6 still uses 180s" "$OUT" "DURATION=180s"
+FIXED_CLIENTS=64 BACKENDS=raft drv e6_faults.sh --dry-run
+lacks "E6 quiet when DURATION is not set" "$OUT" "is ignored"
 LOAD_THREADS=300 FIXED_CLIENTS=64 BACKENDS=tendermint drv e3_block.sh --dry-run
 contains "tendermint LOAD_THREADS guard" "$OUT" "needs LOAD_THREADS <= 256"
 COMMIT_MODE=async drv e1_clients.sh --dry-run
@@ -284,7 +355,6 @@ eq "missing YCSB data: nothing ran" "$(calls)" 0
 
 # ---------------------------------------------------- kafka_ops.sh hook --------
 newtree ops
-mkdir -p "$TMP_ROOT/bin"
 cat >"$TMP_ROOT/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 # Stub docker: `docker compose ... exec -T kafka sh -c SCRIPT sh nodeK` prints a describe table.
@@ -320,7 +390,8 @@ hook EXP=e2 BACKEND=kafka N=7 CLIENTS=64 REP=1
 eq "hook appends (header once)" "$(grep -c '^ts,' "$OPS")" 1
 eq "hook appended row" "$(awk 'END { print NR }' "$OPS")" 3
 hook EXP=e2 BACKEND=kafka N=4 CLIENTS=64 REP=3 DOCKER_STUB_DASH=1
-eq "a '-' current offset is 0" "$(tail -1 "$OPS" | cut -d, -f7-)" "0,1000.00,0+0+0+0,1000+1000+1000+1000"
+eq "a '-' current offset is marked, reads left empty (not 0)" "$(tail -1 "$OPS" | cut -d, -f7-)" ",1000.00,-+-+-+-,1000+1000+1000+1000"
+contains "a '-' current offset: warning" "$OUT" "no committed offset yet for node1 node2 node3 node4"
 hook EXP=e2 BACKEND=raft N=4 CLIENTS=64 REP=1
 eq "hook ignores other backends" "$RC" 0
 eq "hook ignores other backends: no row" "$(awk 'END { print NR }' "$OPS")" 4
@@ -355,6 +426,7 @@ eq "BATCH_FLUSH on tm-orig refused" "$RC" 1
 run_one_check PRE_DOWN_HOOK=/nonexistent/hook
 eq "missing PRE_DOWN_HOOK refused" "$RC" 1
 contains "missing PRE_DOWN_HOOK message" "$OUT" "is not an executable file"
+eq "run_one checks never reached docker" "$(grep -c . "$TMP_ROOT_DOCKER_LOG")" 0
 eq "refused runs create nothing" "$(ls "$SRC_ROOT/results/raw/zzcheck" 2>/dev/null | wc -l | tr -d ' ')" 0
 contains "tag suffix for a non-default BATCH_FLUSH" "$(grep -F 'tag="${tag}_bf${BATCH_FLUSH}"' "$SRC_ROOT/experiments/run_one.sh")" '_bf'
 

@@ -16,9 +16,11 @@ set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/exp_lib.sh"
 
 exp_begin e1 "$@"
-for b in $EXP_BACKEND_LIST; do
-  for c in $EXP_CLIENTS_E1; do
-    exp_cfg "$b" 4 0 "$c" 100 a 0 none
+exp_plan() {
+  for b in $EXP_BACKEND_LIST; do
+    for c in $EXP_CLIENTS_E1; do
+      exp_cfg "$b" 4 0 "$c" 100 a 0 none
+    done
   done
-done
-exp_finish
+}
+exp_main

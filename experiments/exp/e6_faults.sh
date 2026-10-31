@@ -38,33 +38,40 @@ set -euo pipefail
 E6_NF="${E6_NF:-4:1 7:2}"
 E6_AT="${E6_AT:-60}"
 F5_KINDS="${F5_KINDS:-F5-F2 F5-F4}"
+if [ -n "${DURATION:-}" ] && [ "$DURATION" != "${E6_DURATION:-180s}" ]; then
+  log "note: DURATION=$DURATION is ignored: E6 runs DURATION=${E6_DURATION:-180s} (the fault is at second ${E6_AT}); set E6_DURATION to change it"
+fi
 DURATION="${E6_DURATION:-180s}"
 exp_begin e6 "$@"
 hbdb_require_uint E6_AT "$E6_AT"
 [ -n "$E6_NF" ] || die "E6_NF must list at least one N:f pair"
 for p in $E6_NF; do
   echo "$p" | grep -Eq '^[1-9][0-9]*:[1-9][0-9]*$' || die "E6_NF entries must look like 4:1, got '$p'"
+  [ "${p##*:}" -eq $(((${p%%:*} - 1) / 3)) ] ||
+    die "E6_NF entry '$p': f must be floor((N-1)/3) = $(((${p%%:*} - 1) / 3)) for N=${p%%:*} (the CSV f column and the F4/F5 node counts follow it)"
 done
 for k in $F5_KINDS; do
   case "$k" in F5-F2 | F5-F4) ;; *) die "F5_KINDS entries must be F5-F2 or F5-F4, got '$k'" ;; esac
 done
 
-for b in $EXP_BACKEND_LIST; do
-  exp_resolve_clients "$b" || continue
-  c="$EXP_RESOLVED_CLIENTS"
-  for p in $E6_NF; do
-    n="${p%%:*}"
-    f="${p##*:}"
-    nodes="$(fault_default_nodes "$n" "$f")"
-    for kind in F1 F2 F3 F4; do
-      exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:$nodes@$E6_AT"
-    done
-    if hbdb_in_list "$b" "tendermint bft2"; then
-      nodes5="$(fault_default_nodes "$n" $((f + 1)))"
-      for kind in $F5_KINDS; do
-        exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:$nodes5@$E6_AT"
+exp_plan() {
+  for b in $EXP_BACKEND_LIST; do
+    exp_resolve_clients "$b" || continue
+    c="$EXP_RESOLVED_CLIENTS"
+    for p in $E6_NF; do
+      n="${p%%:*}"
+      f="${p##*:}"
+      nodes="$(fault_default_nodes "$n" "$f")"
+      for kind in F1 F2 F3 F4; do
+        exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:$nodes@$E6_AT"
       done
-    fi
+      if hbdb_in_list "$b" "tendermint bft2"; then
+        nodes5="$(fault_default_nodes "$n" $((f + 1)))"
+        for kind in $F5_KINDS; do
+          exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:$nodes5@$E6_AT"
+        done
+      fi
+    done
   done
-done
-exp_finish
+}
+exp_main

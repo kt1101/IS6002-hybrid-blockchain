@@ -542,7 +542,7 @@ def test_batch_flush_after_fault_flags():
 
 
 def test_bad_batch_flush_is_rejected(capsys):
-    for bad in ("0s", "0ms", "1", "s", "1.5s", "-1s", "1 s", "", "1d"):
+    for bad in ("0s", "0ms", "1", "s", "1.5s", "-1s", "1 s", "", "1d", "1s\n"):
         with pytest.raises(ValueError):
             gen(backend="raft", n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m", batch_flush=bad)
     for backend in ("kafka-orig", "tm-orig"):

@@ -21,11 +21,13 @@ exp_begin e4 "$@"
 [ -n "$WORKLOADS" ] || die "WORKLOADS must list at least one workload"
 for w in $WORKLOADS; do exp_require_workload "$w"; done
 
-for b in $EXP_BACKEND_LIST; do
-  exp_resolve_clients "$b" || continue
-  c="$EXP_RESOLVED_CLIENTS"
-  for w in $WORKLOADS; do
-    exp_cfg "$b" 4 0 "$c" 100 "$w" 0 none
+exp_plan() {
+  for b in $EXP_BACKEND_LIST; do
+    exp_resolve_clients "$b" || continue
+    c="$EXP_RESOLVED_CLIENTS"
+    for w in $WORKLOADS; do
+      exp_cfg "$b" 4 0 "$c" 100 "$w" 0 none
+    done
   done
-done
-exp_finish
+}
+exp_main
