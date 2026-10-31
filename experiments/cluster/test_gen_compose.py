@@ -438,7 +438,7 @@ def _veritas_line(c, k):
     return start[0]
 
 
-@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint"])
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint", "bft2"])
 def test_node_fault_arms_only_the_named_nodes(backend):
     c = gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
             node_faults={4: "corrupt", 3: "corrupt"})
@@ -457,7 +457,7 @@ def test_kafka_silent_node_fault():
     assert " --fault=silent --fault-after=87600h &" in _veritas_line(c, "node4")
 
 
-@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint"])
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint", "bft2"])
 def test_core_nodes_write_the_veritas_pidfile(backend):
     c = gen(backend=backend, n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
     for k in _nodes(c):
@@ -470,6 +470,7 @@ def test_bad_node_faults_are_rejected(capsys):
     for backend, faults in [
         ("raft", {4: "silent"}),          # no vote hook: F2 is network-level
         ("tendermint", {4: "silent"}),
+        ("bft2", {4: "silent"}),
         ("kafka-orig", {4: "corrupt"}),   # original servers have no --fault
         ("tm-orig", {4: "corrupt"}),
         ("kafka", {5: "corrupt"}),        # n=4
@@ -493,3 +494,19 @@ def test_cli_node_fault(tmp_path):
     assert "--fault=corrupt" in _veritas_line(c, "node3") and "--fault=corrupt" in _veritas_line(c, "node4")
     assert "--fault" not in _veritas_line(c, "node1")
 
+
+def test_bft2_fault_goes_to_veritas_not_the_sidecar():
+    # F4 / F5-F4 on bft2: the --fault flags and the pid file the injector's
+    # SIGUSR1 uses belong to veritas, never to bft2-node.
+    c = gen(backend="bft2", n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
+            node_faults={3: "corrupt", 4: "corrupt"})
+    for k in ("node3", "node4"):
+        lines = c["services"][k]["command"][-1].split("\n")
+        sidecar = [l for l in lines if " bft2-node " in l and l.endswith(" &")]
+        assert len(sidecar) == 1 and "--fault" not in sidecar[0]
+        assert _veritas_line(c, k).endswith(" --fault=corrupt --fault-after=87600h &")
+        pid = [j for j, l in enumerate(lines) if "/tmp/hbdb-veritas.pid" in l]
+        assert len(pid) == 1 and lines[pid[0]] == 'echo "$$veritas_pid" >/tmp/hbdb-veritas.pid'
+        assert lines[pid[0] - 1] == "veritas_pid=$$!"
+        assert lines.index(sidecar[0]) < lines.index(_veritas_line(c, k))
+    assert "--fault" not in c["services"]["node1"]["command"][-1]

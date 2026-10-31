@@ -362,7 +362,7 @@ def bft2_peers(n):
     return ",".join("%d=%s:%d" % (j, node_ip(j), BFT2_PORT) for j in range(1, n + 1))
 
 
-def _bft2_node(i, n, block_size, commit_mode, memlimit, mem):
+def _bft2_node(i, n, block_size, commit_mode, memlimit, mem, fault=None):
     """Node of the bft2 backend (consensus/bft2 + core.Server, HotStuff sidecar).
 
     redis, then bft2-node (replica i of the static set 1..n, replica server
@@ -376,7 +376,9 @@ def _bft2_node(i, n, block_size, commit_mode, memlimit, mem):
     70% of the node cap for the veritas server and 20% for bft2-node
     (BFT2_GOMEMLIMIT_SHARE). bft2-node exits 3 if its replica can no longer
     commit (it fell behind past its retained blocks), which ends the
-    container like any other dead process.
+    container like any other dead process. fault arms veritas --fault as on
+    the other core backends (_forward_sigterm); VERITAS_PIDFILE holds the
+    veritas pid, never bft2-node's, so the injector's SIGUSR1 reaches veritas.
     """
     parties = ",".join("node%d" % j for j in range(1, n + 1))
     return [
@@ -397,7 +399,7 @@ def _bft2_node(i, n, block_size, commit_mode, memlimit, mem):
         " --bft2-api=%s"
         " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
         " --breakdown-out=/results/breakdown-node%d.json &"
-        % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT, BFT2_API_ADDR, i, i)
+        % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT, BFT2_API_ADDR, i, i), fault
     ) + _exit_when_any_exits(["redis-server", "bft2-node", "veritas-kafka"])
 
 
@@ -551,7 +553,7 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
             s["volumes"].append("%s:/tmcfg:ro" % os.path.join(tm_dir, "node%d" % (i - 1)))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "bft2":
-            s["command"] = _bash(_bft2_node(i, n, block_size, commit_mode, memlimit, mem))
+            s["command"] = _bash(_bft2_node(i, n, block_size, commit_mode, memlimit, mem, node_faults.get(i)))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "tm-orig":
             s["command"] = _bash(_tm_orig_node(i, n, block_size, memlimit))

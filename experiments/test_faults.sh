@@ -175,7 +175,11 @@ eq "F5-F2 tendermint is network-level" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$FA
 fault_parse F5-F4:node5,node6,node7@60 tendermint 7 180
 eq "F5-F4 N=7 hits 3 nodes" "$(fault_node_faults)" "node5=corrupt node6=corrupt node7=corrupt"
 fault_parse F5-F4:node3,node4@20 bft2 4 40
-eq "F5-F4 bft2" "$FAULT_POLICY" corrupt
+eq "F5-F4 bft2" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "F5/F4/corrupt/node3=corrupt node4=corrupt"
+fault_parse F5-F2:node3,node4@20 bft2 4 40
+eq "F5-F2 bft2 is network-level" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "F5/F2//"
+fault_parse F5-F4:node5,node6,node7@60 bft2 7 180
+eq "F5-F4 bft2 N=7" "$(fault_node_faults)" "node5=corrupt node6=corrupt node7=corrupt"
 fault_parse none kafka 4 40
 eq "none resets the policy" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "none///"
 
@@ -215,8 +219,10 @@ r="$(parse_rc F5-F4:node5,node6@20 tendermint 7 40)"
 contains "F5 two nodes at N=7" "$r" "exactly f+1 = 3 nodes"
 r="$(parse_rc F5-F4:node1,node2@20 tendermint 3 40)"
 contains "F5 N=3" "$r" "F5 needs N >= 4"
-r="$(parse_rc F5-F2:node3,node4@20 bft2 4 40)"
-eq "F5-F2 bft2 parses (network, port 7200)" "${r%%|*}" 0
+r="$(parse_rc F5-F4:node4@20 bft2 4 40)"
+contains "F5 bft2 one node at N=4" "$r" "exactly f+1 = 2 nodes"
+r="$(parse_rc F2:node4@20 bft2 4 40)"
+eq "F2 bft2 parses (network, port 7200)" "${r%%|*}" 0
 r="$(parse_rc F5-F3:node3,node4@20 tendermint 4 40)"
 contains "F5-F3" "$r" "F5 combines F2 or F4"
 r="$(parse_rc F4-F2:node4@20 tendermint 4 40)"
@@ -770,6 +776,23 @@ eq "itest f5 NODE_FAULTS" "$(cat "$SB/state/node_faults" 2>/dev/null)" "node3=co
 eq "itest f5 fault column" "$(tail -n 1 "$SB_RAW/it_f5.csv" | cut -d, -f11)" "F5-F4:node3+node4@0"
 itest f1nf EXP=it_f1nf FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1
 eq "itest f1 NODE_FAULTS empty" "$(cat "$SB/state/node_faults" 2>/dev/null)" ""
+# bft2 (Task 13 + 15): F4 and F5-F4 arm veritas and signal it at AT; F5-F2
+# drops the HotStuff replica port on both nodes.
+itest f4b EXP=it_f4b BACKEND=bft2 FAULT=F4:node4@0 DURATION=2s STUB_BENCH_SECS=1
+eq "itest f4 bft2 rc" "$it_rc" 0
+eq "itest f4 bft2 NODE_FAULTS" "$(cat "$SB/state/node_faults" 2>/dev/null)" "node4=corrupt"
+grep -q '^node4 sh -c .*cat /tmp/hbdb-veritas.pid.*kill -USR1' "$SB/state/node_execs" 2>/dev/null && ok || bad "itest f4 bft2 signal exec: $(cat "$SB/state/node_execs" 2>/dev/null)"
+eq "itest f4 bft2 log actions" "$(cut -d, -f6 "$(raw_tag it_f4b)" 2>/dev/null | tr '\n' ' ')" "action run_phase_start corrupt_on corrupt_applied "
+itest f5b EXP=it_f5b BACKEND=bft2 FAULT=F5-F4:node3,node4@0 DURATION=2s STUB_BENCH_SECS=1
+eq "itest f5-f4 bft2 rc" "$it_rc" 0
+eq "itest f5-f4 bft2 NODE_FAULTS" "$(cat "$SB/state/node_faults" 2>/dev/null)" "node3=corrupt node4=corrupt"
+eq "itest f5-f4 bft2 signals" "$(grep -c '^node[34] sh -c .*kill -USR1' "$SB/state/node_execs" 2>/dev/null)" 2
+itest f5nb EXP=it_f5nb BACKEND=bft2 FAULT=F5-F2:node3,node4@0 DURATION=2s STUB_BENCH_SECS=1
+eq "itest f5-f2 bft2 rc" "$it_rc" 0
+eq "itest f5-f2 bft2 NODE_FAULTS empty" "$(cat "$SB/state/node_faults" 2>/dev/null)" ""
+eq "itest f5-f2 bft2 iptables" "$(grep -c ',iptables_applied,node[34],' "$(raw_tag it_f5nb)" 2>/dev/null)" 2
+grep -q ',iptables_drop,node3,tcp OUTPUT --dport/--sport 7200$' "$(raw_tag it_f5nb)" 2>/dev/null && ok || bad "itest f5-f2 bft2 port: $(cat "$(raw_tag it_f5nb)" 2>/dev/null)"
+
 # L: a failed signal (no pid file in the container) is exit 3, no row.
 itest f4fail EXP=it_f4fail BACKEND=kafka FAULT=F2:node4@0 DURATION=2s STUB_BENCH_SECS=1 STUB_EXEC_RC=1
 eq "itest f2 kafka signal failure rc" "$it_rc" 3
