@@ -59,8 +59,12 @@
 # F4:node4@60) and F5-F4 (tendermint/bft2, f+1 nodes, e.g.
 # F5-F4:node3,node4@60) are veritas --fault flags: the faulty nodes are
 # created with the fault armed (NODE_FAULTS, passed to up.sh) and the injector
-# activates it with SIGUSR1 at AT (logged as silent_on / corrupt_on); F5-F2 is
-# F2 (network) on f+1 nodes. Nodes F1 stopped on purpose do not count as dead
+# activates it with SIGUSR1 at AT (logged as silent_on / corrupt_on; several
+# nodes in parallel), then confirms it through the node's active file within
+# FAULT_CONFIRM_MS=5000 (silent_confirmed / corrupt_confirmed; unconfirmed =
+# a failed injection, exit 3); F4 hits at most f = floor((N-1)/3) nodes;
+# F5-F2 is F2 (network) on f+1 nodes. F2 on kafka withholds only the node's
+# votes, so its own blocks still commit (~1/N of the throughput remains). Nodes F1 stopped on purpose do not count as dead
 # containers (exit 3); a failed injection, or one that never ran, is exit 3
 # (no CSV row).
 # Audit (FAULT != none; backends kafka, raft, tendermint, bft2): in parallel

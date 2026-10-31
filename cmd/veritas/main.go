@@ -19,12 +19,15 @@
 // sends no votes, F2) or --fault=corrupt (every applied value gets the
 // benchmark.CorruptMarker suffix, F4) turns on --fault-after after the
 // process start, or at once on SIGUSR1 (the experiment harness passes a very
-// large --fault-after and signals the node at the injection time).
+// large --fault-after and signals the node at the injection time). A SIGUSR1
+// activation writes the spec to --fault-active-file, which the harness reads
+// back to confirm it.
 package main
 
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -73,6 +76,7 @@ var (
 	breakdownOut  = kingpin.Flag("breakdown-out", "core: breakdown JSON written on SIGTERM/SIGINT (default /results/breakdown-node<node-id>.json)").Default("").String()
 	faultSpec     = kingpin.Flag("fault", "core: injected replica fault: none, silent (--consensus=kafka only: send no votes) or corrupt (append "+benchmark.CorruptMarker+" to every applied value)").Default(core.FaultNone).String()
 	faultAfter    = kingpin.Flag("fault-after", "core: the fault turns on this long after the process start (e.g. 60s); SIGUSR1 turns it on at once").Default("0s").Duration()
+	faultActive   = kingpin.Flag("fault-active-file", "core: written (the --fault spec) when SIGUSR1 activates the fault; removed at start (empty: none)").Default(defaultFaultActiveFile).String()
 
 	// --consensus=raft only. The raft server ID is --signature.
 	raftPeers     = kingpin.Flag("raft-peers", "raft: the full static cluster, ID=RAFTADDR/FORWARDADDR,... (ID = a node's signature; RAFTADDR its raft transport address, FORWARDADDR its submit-forwarding HTTP address)").Default("").String()
@@ -87,6 +91,10 @@ var (
 	// --consensus=bft2 only.
 	bft2API = kingpin.Flag("bft2-api", "bft2: local API (host:port) of the bft2-node HotStuff sidecar on this container").Default("127.0.0.1:7201").String()
 )
+
+// defaultFaultActiveFile is --fault-active-file's default; it must match
+// HBDB_FAULT_ACTIVE_FILE in experiments/lib.sh (faults.sh fault_confirm).
+const defaultFaultActiveFile = "/tmp/hbdb-fault-active"
 
 // processStart anchors --fault-after: the fault turns on --fault-after after
 // this moment (package initialisation, i.e. the process start).
@@ -231,8 +239,13 @@ func runCore() {
 	if err != nil {
 		kingpin.Fatalf("%v", err)
 	}
-	// Before anything listens: an unhandled SIGUSR1 would kill the process.
-	watchFaultSignal(fp, *faultSpec)
+	// Install the SIGUSR1 handler before anything listens. Go ignores a
+	// SIGUSR1 that has no handler, so a signal arriving before this point is
+	// lost (not fatal); the harness detects that because the activation is
+	// confirmed through --fault-active-file, which only the handler writes.
+	if err := watchFaultSignal(fp, *faultSpec, *faultActive); err != nil {
+		log.Fatalf("fault: %v", err)
+	}
 	if *faultSpec != core.FaultNone {
 		log.Printf("fault %s armed: active %v after the process start (%s) or on SIGUSR1",
 			*faultSpec, *faultAfter, processStart.UTC().Format(time.RFC3339))
@@ -433,20 +446,44 @@ func buildFault(spec, backend string, start time.Time, after time.Duration) (cor
 	return fp, nil
 }
 
-// watchFaultSignal makes SIGUSR1 activate fp at once (core.Activator); with
-// --fault=none the signal is logged and ignored. It returns after the
-// handler is installed.
-func watchFaultSignal(fp core.FaultPolicy, spec string) {
+// watchFaultSignal makes SIGUSR1 activate fp at once (core.Activator) and
+// then write spec to activeFile (unless activeFile is ""), so that a reader
+// knows the fault really is on; with --fault=none the signal is logged and
+// ignored and nothing is written. A stale activeFile is removed first. It
+// returns after the handler is installed.
+func watchFaultSignal(fp core.FaultPolicy, spec, activeFile string) error {
+	if activeFile != "" {
+		if err := os.Remove(activeFile); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stale %s: %v", activeFile, err)
+		}
+	}
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGUSR1)
 	go func() {
 		for range ch {
-			if a, ok := fp.(core.Activator); ok {
-				a.Activate()
-				log.Printf("SIGUSR1: fault %s activated", spec)
-			} else {
+			a, ok := fp.(core.Activator)
+			if !ok {
 				log.Printf("SIGUSR1 ignored: --fault=%s", spec)
+				continue
+			}
+			a.Activate()
+			log.Printf("SIGUSR1: fault %s activated", spec)
+			if activeFile != "" {
+				if err := writeFileAtomic(activeFile, spec+"\n"); err != nil {
+					log.Printf("fault: write %s: %v", activeFile, err)
+				}
 			}
 		}
 	}()
+	return nil
+}
+
+// writeFileAtomic writes data to path through a temporary file and a rename,
+// so a reader sees either no file or the whole content.
+func writeFileAtomic(path, data string) error {
+	tmp := path + ".tmp"
+	if err := ioutil.WriteFile(tmp, []byte(data), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

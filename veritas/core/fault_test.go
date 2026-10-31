@@ -29,9 +29,9 @@ func mustParseFault(t *testing.T, spec string, start time.Time, after time.Durat
 func TestNoFaultIsIdentity(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
 	for name, fp := range map[string]FaultPolicy{
-		"NoFault{}":         NoFault{},
-		"ParseFault(none)":  mustParseFault(t, "none", past, 0),
-		"ParseFault(none)+": mustParseFault(t, "none", time.Now(), time.Hour),
+		"NoFault{}":                          NoFault{},
+		"none, delay already passed":         mustParseFault(t, "none", past, 0),
+		"none, delay of an hour still ahead": mustParseFault(t, "none", time.Now(), time.Hour),
 	} {
 		if !fp.OnVote() {
 			t.Errorf("%s: OnVote() = false, want true", name)

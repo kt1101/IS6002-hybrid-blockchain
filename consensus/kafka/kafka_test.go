@@ -344,6 +344,49 @@ func TestKafkaSilentPartyBlocksDelivery(t *testing.T) {
 	}
 }
 
+// A silent party (ShouldVote false, F2 on kafka) withholds only its votes:
+// its OWN proposals still count as its approve and are completed by the
+// others' votes, so they are delivered everywhere, while the other parties'
+// blocks never complete. This is why F2 on kafka leaves about 1/N of the
+// throughput (the silent node's clients), unlike the network-silent F2.
+func TestKafkaSilentPartyOwnProposalsStillDelivered(t *testing.T) {
+	guard(t)
+	b := newFakeBroker()
+	nodes, _ := cluster(t, b, three, func(c *Config) {
+		if c.Signature == "n3" {
+			c.ShouldVote = func() bool { return false }
+		}
+	})
+	const othersSeq, ownSeq = 1<<40 | 1, 3<<40 | 1
+	submit(t, nodes[0], rawProposal("n1", othersSeq)) // needs n3's vote: never completes
+	submit(t, nodes[2], rawProposal("n3", ownSeq))    // n3's own block
+	for i, k := range nodes {
+		raw, ok := recv(t, k.Deliver())
+		if !ok {
+			t.Fatalf("node %d: Deliver closed", i)
+		}
+		if s := seqOf(t, raw); s != ownSeq {
+			t.Fatalf("node %d delivered %#x, want the silent node's own block %#x", i, s, int64(ownSeq))
+		}
+		if !quiet(k.Deliver(), 200*time.Millisecond) {
+			t.Fatalf("node %d delivered n1's block, which n3 never approved", i)
+		}
+	}
+	// n3 put exactly one message on the topic: its proposal, no vote.
+	var fromN3 int
+	for _, m := range b.messages(t) {
+		if m.GetSignature() == "n3" {
+			fromN3++
+			if len(m.GetTxs()) == 0 || len(m.GetTxs()[0].GetSets()) == 0 {
+				t.Fatalf("silent party produced a vote: %v", m)
+			}
+		}
+	}
+	if fromN3 != 1 {
+		t.Fatalf("n3 produced %d messages, want 1 (its proposal)", fromN3)
+	}
+}
+
 func TestKafkaSubmitCopiesAndDeliverReturnsFreshSlices(t *testing.T) {
 	guard(t)
 	b := newFakeBroker()

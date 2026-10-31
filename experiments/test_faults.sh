@@ -61,6 +61,10 @@ docker() {
   return 0
 }
 COMPOSE_EXEC_RC=0
+COMPOSE_FAIL_NODE=""
+CONFIRM_OUT=corrupt
+CONFIRM_AT=0
+PAR_HANDSHAKE=""
 hbdb_compose() {
   echo "compose $*" >>"$CALLS"
   echo "compose_$1 $FAKE_NOW" >>"$TIMES"
@@ -68,6 +72,33 @@ hbdb_compose() {
     ps) [ "$3" = node9 ] || echo "cid_$3" ;;
     exec)
       if [ "${4:-}" = sh ] && [ "${5:-}" = -c ]; then
+        case "$6" in
+          *"$HBDB_FAULT_ACTIVE_FILE"*)
+            # fault_confirm: the active file reads CONFIRM_OUT from
+            # CONFIRM_AT (fake epoch ms) on.
+            echo "$3" >>"$TMP_ROOT/confirms"
+            [ "$FAKE_NOW" -lt "$CONFIRM_AT" ] || echo "$CONFIRM_OUT"
+            return "$COMPOSE_EXEC_RC"
+            ;;
+          *"kill -USR1"*)
+            printf '%s\n' "$6" >"$TMP_ROOT/signal_script"
+            [ "$3" != "$COMPOSE_FAIL_NODE" ] || return 1
+            if [ -n "$PAR_HANDSHAKE" ]; then
+              # node4's signal unblocks node3's: only works in parallel.
+              if [ "$3" = node4 ]; then
+                : >"$TMP_ROOT/sig_node4"
+              else
+                k=0
+                while [ ! -e "$TMP_ROOT/sig_node4" ] && [ "$k" -lt 50 ]; do
+                  /bin/sleep 0.1
+                  k=$((k + 1))
+                done
+                [ -e "$TMP_ROOT/sig_node4" ] || return 1
+              fi
+            fi
+            return "$COMPOSE_EXEC_RC"
+            ;;
+        esac
         printf '%s\n' "$6" >"$TMP_ROOT/last_script"
       fi
       return "$COMPOSE_EXEC_RC"
@@ -87,8 +118,14 @@ reset() {
   NET_BASE_DELAY_MS=0
   DOCKER_STOP_RC=0
   COMPOSE_EXEC_RC=0
+  COMPOSE_FAIL_NODE=""
+  CONFIRM_OUT=corrupt
+  CONFIRM_AT=0
+  PAR_HANDSHAKE=""
+  FAULT_CONFIRM_MS=5000
   FAULT_PARENT_PID=""
-  rm -f "$FAULT_LOG" "$FAULT_STOPPED" "$FAULT_STOP" "$TMP_ROOT/last_script"
+  rm -f "$FAULT_LOG" "$FAULT_STOPPED" "$FAULT_STOP" "$TMP_ROOT/last_script" "$TMP_ROOT/signal_script" \
+    "$TMP_ROOT/confirms" "$TMP_ROOT/sig_node4"
   : >"$TIMES"
 }
 
@@ -115,6 +152,7 @@ eq "RAFT_FORWARD_PORT matches gen_compose" "$(sed -n 's/^RAFT_FORWARD_PORT = \([
 eq "TM_P2P_PORT matches gen_compose" "$(sed -n 's/^TM_P2P_PORT = \([0-9]*\).*/\1/p' "$gc")" "$HBDB_TM_P2P_PORT"
 eq "BFT2_PORT matches gen_compose" "$(sed -n 's/^BFT2_PORT = \([0-9]*\).*/\1/p' "$gc")" "$HBDB_BFT2_PORT"
 grep -q '"cap_add"\] = \["NET_ADMIN"\]' "$gc" && ok || bad "gen_compose.py no longer gives the nodes NET_ADMIN"
+eq "fault active file matches cmd/veritas" "$(sed -n 's/^const defaultFaultActiveFile = "\(.*\)".*/\1/p' "$HERE/../cmd/veritas/main.go")" "$HBDB_FAULT_ACTIVE_FILE"
 eq "VERITAS_PIDFILE matches gen_compose" "$(sed -n 's/^VERITAS_PIDFILE = "\(.*\)".*/\1/p' "$gc")" "$HBDB_VERITAS_PIDFILE"
 for b in kafka raft tendermint bft2; do
   hbdb_backend_has_fault_policy "$b" && ok || bad "$b has a FaultPolicy"
@@ -166,8 +204,8 @@ for b in kafka raft tendermint bft2; do
   fault_parse F4:node4@20 "$b" 4 40
   eq "F4 $b is --fault=corrupt" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "F4//corrupt/node4=corrupt"
 done
-fault_parse F4:node3,node4@20 raft 4 40
-eq "F4 two nodes" "$(fault_node_faults)" "node3=corrupt node4=corrupt"
+fault_parse F4:node6,node7@20 raft 7 40
+eq "F4 two nodes at N=7 (f=2)" "$(fault_node_faults)" "node6=corrupt node7=corrupt"
 fault_parse F5-F4:node3,node4@20 tendermint 4 40
 eq "F5-F4 tendermint" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "F5/F4/corrupt/node3=corrupt node4=corrupt"
 fault_parse F5-F2:node4+node3@20 tendermint 4 40
@@ -206,7 +244,13 @@ for b in kafka-orig tm-orig; do
   contains "F4 $b" "$r" "F4 (wrong state) needs a veritas-core backend"
 done
 r="$(parse_rc F4:node1,node2,node3,node4@20 raft 4 40)"
-contains "F4 all nodes" "$r" "may not corrupt every node"
+contains "F4 all nodes" "$r" "F4 corrupts at most f = floor((N-1)/3) = 1 nodes (N=4), got 4"
+r="$(parse_rc F4:node3,node4@20 tendermint 4 40)"
+contains "F4 f+1 nodes is F5-F4" "$r" "f+1 corrupt nodes is F5-F4"
+r="$(parse_rc F4:node5,node6,node7@20 raft 7 40)"
+contains "F4 3 nodes at N=7" "$r" "at most f = floor((N-1)/3) = 2 nodes (N=7), got 3"
+r="$(parse_rc F4:node3@20 kafka 3 40)"
+contains "F4 N=3 (f=0)" "$r" "at most f = floor((N-1)/3) = 0 nodes"
 r="$(parse_rc F5:node3,node4@20 tendermint 4 40)"
 contains "F5 without kind" "$r" "F5 needs its kind: F5-F2"
 for b in kafka raft kafka-orig tm-orig; do
@@ -434,11 +478,13 @@ fault_parse F4:node4@5 tendermint 4 40
 FAULT_T0_MS=$((FAKE_NOW + 10000))
 fault_inject 2>/dev/null; rc=$?
 eq "F4 inject rc" "$rc" 0
-eq "F4 signalled at t0+AT" "$(grep '^compose_exec ' "$TIMES" | awk '{ print $2 }')" 1015000
+eq "F4 signalled (and confirmed) at t0+AT" "$(grep '^compose_exec ' "$TIMES" | awk '{ print $2 }' | sort -u)" 1015000
 grep -q '^compose exec -T node4 sh -c ' "$CALLS" && ok || bad "F4 exec call: $(cat "$CALLS")"
 grep -q ',corrupt_on,node4,SIGUSR1 to veritas (--fault=corrupt)$' "$FAULT_LOG" && ok || bad "F4 on line: $(cat "$FAULT_LOG")"
 grep -q ',corrupt_applied,node4,kill returned$' "$FAULT_LOG" && ok || bad "F4 applied line: $(cat "$FAULT_LOG")"
-eq "F4 log actions" "$(cut -d, -f6 "$FAULT_LOG" | tr '\n' ' ')" "action corrupt_on corrupt_applied "
+eq "F4 log actions" "$(cut -d, -f6 "$FAULT_LOG" | tr '\n' ' ')" "action corrupt_on corrupt_applied corrupt_confirmed "
+grep -q ",corrupt_confirmed,node4,$HBDB_FAULT_ACTIVE_FILE reads corrupt$" "$FAULT_LOG" && ok || bad "F4 confirmed line: $(cat "$FAULT_LOG")"
+eq "F4 one confirmation read" "$(wc -l <"$TMP_ROOT/confirms" | tr -d ' ')" 1
 eq "F4 log t_s" "$(grep ',corrupt_on,' "$FAULT_LOG" | cut -d, -f3)" "5.000"
 # The script run in the container: SIGUSR1 to the pid in the pid file.
 fake_pidfile_dir="$TMP_ROOT/pid"
@@ -446,7 +492,7 @@ mkdir -p "$fake_pidfile_dir"
 sleep_bin=/bin/sleep # the sleep function above is a stub
 "$sleep_bin" 30 &
 victim=$!
-script="$(cat "$TMP_ROOT/last_script")"
+script="$(cat "$TMP_ROOT/signal_script")"
 contains "signal script reads the pid file" "$script" "cat $HBDB_VERITAS_PIDFILE"
 contains "signal script sends SIGUSR1" "$script" 'kill -USR1 "$p"'
 echo "$victim" >"$fake_pidfile_dir/v.pid"
@@ -457,16 +503,72 @@ eq "signal script delivered SIGUSR1 (exit 128+USR1)" "$vrc" $((128 + $(kill -l U
 rm -f "$fake_pidfile_dir/v.pid"
 sh -c "$(echo "$script" | sed "s#$HBDB_VERITAS_PIDFILE#$fake_pidfile_dir/v.pid#")" 2>/dev/null; rc=$?
 [ "$rc" -ne 0 ] && ok || bad "signal script without a pid file must fail"
-# kafka F2: silent_on; two nodes are signalled one after the other.
+# The confirmation script prints the active file, empty when missing.
+cscript="$(fault_confirm_script)"
+contains "confirm script reads the active file" "$cscript" "cat $HBDB_FAULT_ACTIVE_FILE"
+echo corrupt >"$fake_pidfile_dir/active"
+eq "confirm script output" "$(sh -c "$(echo "$cscript" | sed "s#$HBDB_FAULT_ACTIVE_FILE#$fake_pidfile_dir/active#")")" corrupt
+rm -f "$fake_pidfile_dir/active"
+out="$(sh -c "$(echo "$cscript" | sed "s#$HBDB_FAULT_ACTIVE_FILE#$fake_pidfile_dir/active#")")"; rc=$?
+eq "confirm script without the file" "$rc/$out" "0/"
+# kafka F2: silent_on on two nodes, confirmed on both.
 reset
+CONFIRM_OUT=silent
 FAULT_T0_MS="$FAKE_NOW"
 fault_parse F2:node3,node4@0 kafka 4 40
 FAULT_T0_MS="$FAKE_NOW"
 fault_inject 2>/dev/null; rc=$?
 eq "F2 kafka inject rc" "$rc" 0
-eq "F2 kafka execs" "$(grep -c '^compose exec -T node[34] sh -c' "$CALLS")" 2
-eq "F2 kafka log" "$(cut -d, -f6,7 "$FAULT_LOG" | tr '\n' ' ')" "action,node silent_on,node3 silent_applied,node3 silent_on,node4 silent_applied,node4 "
-grep -q 'iptables' "$TMP_ROOT/last_script" && bad "F2 kafka ran iptables" || ok
+eq "F2 kafka signal execs" "$(grep -c '^compose exec -T node[34] sh -c .*kill -USR1' "$CALLS")" 2
+eq "F2 kafka log" "$(cut -d, -f6,7 "$FAULT_LOG" | sort | tr '\n' ' ')" "action,node silent_applied,node3 silent_applied,node4 silent_confirmed,node3 silent_confirmed,node4 silent_on,node3 silent_on,node4 "
+eq "F2 kafka log header once" "$(grep -c '^utc,' "$FAULT_LOG")" 1
+[ -e "$TMP_ROOT/last_script" ] && bad "F2 kafka ran a non-signal script: $(cat "$TMP_ROOT/last_script")" || ok
+# Parallel: node3's kill only succeeds once node4's has been issued.
+reset
+PAR_HANDSHAKE=1
+FAULT_T0_MS="$FAKE_NOW"
+fault_parse F5-F4:node3,node4@0 tendermint 4 40
+FAULT_T0_MS="$FAKE_NOW"
+fault_inject 2>/dev/null; rc=$?
+eq "parallel signals rc" "$rc" 0
+eq "parallel signals confirmed" "$(grep -c ',corrupt_confirmed,node[34],' "$FAULT_LOG")" 2
+# One node fails: rc 1, the other is still activated and confirmed.
+reset
+COMPOSE_FAIL_NODE=node3
+FAULT_T0_MS="$FAKE_NOW"
+fault_parse F5-F4:node3,node4@0 tendermint 4 40
+FAULT_T0_MS="$FAKE_NOW"
+fault_inject 2>/dev/null; rc=$?
+eq "one node failing rc" "$rc" 1
+grep -q ',corrupt_on_failed,node3,' "$FAULT_LOG" && ok || bad "node3 failure not logged: $(cat "$FAULT_LOG")"
+grep -q ',corrupt_confirmed,node4,' "$FAULT_LOG" && ok || bad "node4 not confirmed: $(cat "$FAULT_LOG")"
+# Aborted before AT: nothing signalled.
+reset
+FAULT_T0_MS="$FAKE_NOW"
+fault_parse F5-F4:node3,node4@5 tendermint 4 40
+FAULT_T0_MS="$FAKE_NOW"
+: >"$FAULT_STOP"
+fault_inject 2>/dev/null; rc=$?
+eq "signal_all aborted rc" "$rc" 2
+grep -q '^compose exec' "$CALLS" && bad "aborted signal_all ran exec" || ok
+# Confirmation that arrives late (1.2 s): polled every 0.5 s, confirmed.
+reset
+FAULT_T0_MS="$FAKE_NOW"
+CONFIRM_AT=$((FAKE_NOW + 1200))
+fault_signal node4 0 corrupt 2>/dev/null; rc=$?
+eq "late confirm rc" "$rc" 0
+eq "late confirm polls" "$(wc -l <"$TMP_ROOT/confirms" | tr -d ' ')" 4
+eq "late confirm slept" "$SLEPT_MS" 1500
+# Never confirmed (wrong policy in the file): unconfirmed, rc 1.
+reset
+FAULT_T0_MS="$FAKE_NOW"
+CONFIRM_OUT=silent
+FAULT_CONFIRM_MS=2000
+fault_signal node4 0 corrupt 2>/dev/null; rc=$?
+eq "unconfirmed rc" "$rc" 1
+grep -q ",corrupt_unconfirmed,node4,$HBDB_FAULT_ACTIVE_FILE does not read corrupt after 2000ms$" "$FAULT_LOG" && ok || bad "unconfirmed line: $(cat "$FAULT_LOG")"
+grep -q ',corrupt_confirmed,' "$FAULT_LOG" && bad "unconfirmed run logged confirmed" || ok
+eq "unconfirmed waited FAULT_CONFIRM_MS" "$SLEPT_MS" 2000
 # F5-F4: both nodes corrupt; F5-F2: iptables on both nodes.
 reset
 FAULT_T0_MS="$FAKE_NOW"
@@ -617,6 +719,9 @@ case "$1" in
         shift
         if [ "$svc" != client ]; then
           echo "$svc $*" >>"$STUB_STATE/node_execs"
+          case "$*" in
+            *hbdb-fault-active*) echo "${STUB_CONFIRM-corrupt}" ;;
+          esac
           exit "${STUB_EXEC_RC:-0}"
         fi
         if [ "$1" = sh ]; then
@@ -764,7 +869,7 @@ eq "itest f4 rc" "$it_rc" 0
 eq "itest f4 NODE_FAULTS to up.sh" "$(cat "$SB/state/node_faults" 2>/dev/null)" "node4=corrupt"
 grep -q '^node4 sh -c .*kill -USR1' "$SB/state/node_execs" 2>/dev/null && ok || bad "itest f4 signal exec: $(cat "$SB/state/node_execs" 2>/dev/null)"
 f="$(raw_tag it_f4)"
-eq "itest f4 log actions" "$(cut -d, -f6 "$f" 2>/dev/null | tr '\n' ' ')" "action run_phase_start corrupt_on corrupt_applied "
+eq "itest f4 log actions" "$(cut -d, -f6 "$f" 2>/dev/null | tr '\n' ' ')" "action run_phase_start corrupt_on corrupt_applied corrupt_confirmed "
 t_s="$(grep ',corrupt_on,' "$f" 2>/dev/null | cut -d, -f3)"
 awk -v t="$t_s" 'BEGIN { exit !(t >= 1.0 && t < 1.6) }' && ok || bad "itest f4 t_s=$t_s (want ~1)"
 eq "itest f4 fault column" "$(tail -n 1 "$SB_RAW/it_f4.csv" | cut -d, -f11)" "F4:node4@1"
@@ -782,7 +887,7 @@ itest f4b EXP=it_f4b BACKEND=bft2 FAULT=F4:node4@0 DURATION=2s STUB_BENCH_SECS=1
 eq "itest f4 bft2 rc" "$it_rc" 0
 eq "itest f4 bft2 NODE_FAULTS" "$(cat "$SB/state/node_faults" 2>/dev/null)" "node4=corrupt"
 grep -q '^node4 sh -c .*cat /tmp/hbdb-veritas.pid.*kill -USR1' "$SB/state/node_execs" 2>/dev/null && ok || bad "itest f4 bft2 signal exec: $(cat "$SB/state/node_execs" 2>/dev/null)"
-eq "itest f4 bft2 log actions" "$(cut -d, -f6 "$(raw_tag it_f4b)" 2>/dev/null | tr '\n' ' ')" "action run_phase_start corrupt_on corrupt_applied "
+eq "itest f4 bft2 log actions" "$(cut -d, -f6 "$(raw_tag it_f4b)" 2>/dev/null | tr '\n' ' ')" "action run_phase_start corrupt_on corrupt_applied corrupt_confirmed "
 itest f5b EXP=it_f5b BACKEND=bft2 FAULT=F5-F4:node3,node4@0 DURATION=2s STUB_BENCH_SECS=1
 eq "itest f5-f4 bft2 rc" "$it_rc" 0
 eq "itest f5-f4 bft2 NODE_FAULTS" "$(cat "$SB/state/node_faults" 2>/dev/null)" "node3=corrupt node4=corrupt"
@@ -798,6 +903,18 @@ itest f4fail EXP=it_f4fail BACKEND=kafka FAULT=F2:node4@0 DURATION=2s STUB_BENCH
 eq "itest f2 kafka signal failure rc" "$it_rc" 3
 grep -q ',silent_on_failed,node4,' "$(raw_tag it_f4fail)" 2>/dev/null && ok || bad "itest f2 kafka failure not logged"
 [ -e "$SB_RAW/it_f4fail.csv" ] && bad "itest f2 kafka failure wrote a CSV row" || ok
+
+# M: the activation is never confirmed -> exit 3, no row.
+itest unconf EXP=it_unconf BACKEND=tendermint FAULT=F4:node4@0 DURATION=2s STUB_BENCH_SECS=2 STUB_CONFIRM=none FAULT_CONFIRM_MS=600
+eq "itest unconfirmed rc" "$it_rc" 3
+grep -q ',corrupt_unconfirmed,node4,' "$(raw_tag it_unconf)" 2>/dev/null && ok || bad "itest unconfirmed not logged: $(cat "$(raw_tag it_unconf)" 2>/dev/null)"
+[ -e "$SB_RAW/it_unconf.csv" ] && bad "itest unconfirmed wrote a CSV row" || ok
+contains "itest unconfirmed msg" "$it_err" "fault injection F4:node4@0 failed"
+# kafka F2 confirmed through the active file reading silent.
+itest kf2 EXP=it_kf2 BACKEND=kafka FAULT=F2:node4@0 DURATION=2s STUB_BENCH_SECS=2 STUB_CONFIRM=silent
+eq "itest kafka f2 rc" "$it_rc" 0
+eq "itest kafka f2 NODE_FAULTS" "$(cat "$SB/state/node_faults" 2>/dev/null)" "node4=silent"
+grep -q ',silent_confirmed,node4,' "$(raw_tag it_kf2)" 2>/dev/null && ok || bad "itest kafka f2 not confirmed"
 
 # up.sh turns NODE_FAULTS into gen_compose.py --node-fault flags.
 grep -q 'node_fault_args="$node_fault_args --node-fault $nf"' "$HERE/cluster/up.sh" && ok || bad "up.sh --node-fault"

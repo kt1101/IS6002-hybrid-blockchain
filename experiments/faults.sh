@@ -21,7 +21,8 @@
 #                        --fault=corrupt (FaultPolicy.OnApply appends
 #                        -CORRUPT to every value the node applies, so its
 #                        root digest and its Gets go wrong), activated at AT
-#                        by fault_signal
+#                        by fault_signal; at most f = floor((N-1)/3) nodes
+#                        (N=4: 1, N=7: 2): f+1 corrupt nodes is F5-F4
 #   F5-F2:node3,node4@60 beyond the threshold (BFT backends only: tendermint,
 #   F5-F4:node3,node4@60 bft2): F2 (network) resp. F4 (corrupt) on exactly
 #                        f+1 nodes, f = floor((N-1)/3) (N=4: 2 nodes, N=7: 3)
@@ -33,7 +34,15 @@
 # --fault-after that never fires (87600h). At AT fault_signal sends SIGUSR1 to
 # the node's veritas (pid in HBDB_VERITAS_PIDFILE), which activates the fault
 # at once; so the activation is tied to the measurement window like every
-# other fault, independent of how long load and settle took.
+# other fault, independent of how long load and settle took. veritas then
+# writes the policy to HBDB_FAULT_ACTIVE_FILE; fault_signal polls that file
+# for up to FAULT_CONFIRM_MS and logs POLICY_confirmed, or
+# POLICY_unconfirmed and fails (run_one.sh: exit 3, no CSV row). Several
+# nodes are signalled in parallel.
+# Kafka F2 withholds the node's votes only: its own proposals still count as
+# its approve, so its own blocks keep committing (about 1/N of the
+# throughput remains); the network F2 of raft/tendermint/bft2 silences the
+# node completely.
 # Nodes are node1..node$N, separated by ',' or '+' (run_one.sh records the
 # string with '+' so it fits a CSV field and a ycsbbench --tags value). AT is
 # a whole number of seconds, 0 <= AT < DURATION. Node choice convention: the
@@ -79,6 +88,7 @@ FAULT_PARENT_PID="${FAULT_PARENT_PID:-}"
 FAULT_WARMUP_MS="${FAULT_WARMUP_MS:-0}"
 FAULT_T0_MS="${FAULT_T0_MS:-}"
 FAULT_SLOW_MS="${FAULT_SLOW_MS:-200}"
+FAULT_CONFIRM_MS="${FAULT_CONFIRM_MS:-5000}"
 FAULT_SPEC=none
 FAULT_KIND=none
 FAULT_SUB=""
@@ -173,7 +183,9 @@ fault_parse() {
     F4)
       hbdb_backend_has_fault_policy "$backend" ||
         die "FAULT='$spec': F4 (wrong state) needs a veritas-core backend (kafka, raft, tendermint, bft2; veritas --fault=corrupt); BACKEND=$backend is an original server without FaultPolicy"
-      [ "$count" -lt "$n" ] || die "FAULT='$spec': F4 may not corrupt every node (N=$n): the auditor needs an honest majority"
+      f=$(((n - 1) / 3))
+      [ "$count" -le "$f" ] ||
+        die "FAULT='$spec': F4 corrupts at most f = floor((N-1)/3) = $f nodes (N=$n), got $count; f+1 corrupt nodes is F5-F4 (tendermint, bft2)"
       FAULT_POLICY=corrupt
       ;;
     F5)
@@ -370,11 +382,33 @@ fault_signal_script() {
   printf '%s\n' "p=\"\$(cat $HBDB_VERITAS_PIDFILE)\" && [ -n \"\$p\" ] && kill -USR1 \"\$p\""
 }
 
+# fault_confirm_script: the shell script that prints the node's
+# HBDB_FAULT_ACTIVE_FILE (empty when missing): veritas writes its --fault
+# spec there once SIGUSR1 has activated the fault.
+fault_confirm_script() {
+  printf '%s\n' "cat $HBDB_FAULT_ACTIVE_FILE 2>/dev/null || true"
+}
+
+# fault_confirm NODE POLICY: return 0 once NODE's active file reads POLICY,
+# 1 if it does not within FAULT_CONFIRM_MS (polled every 0.5 s).
+fault_confirm() {
+  local node="$1" policy="$2" deadline got
+  hbdb_require_uint FAULT_CONFIRM_MS "$FAULT_CONFIRM_MS"
+  deadline=$(($(hbdb_epoch_ms) + 10#$FAULT_CONFIRM_MS))
+  while :; do
+    got="$(hbdb_compose exec -T "$node" sh -c "$(fault_confirm_script)" 2>/dev/null | tr -d ' \r\n')"
+    [ "$got" = "$policy" ] && return 0
+    [ "$(hbdb_epoch_ms)" -lt "$deadline" ] || return 1
+    sleep 0.5
+  done
+}
+
 # fault_signal NODE AT POLICY (F2 on kafka, F4, F5-F4): at second AT send
 # SIGUSR1 to NODE's veritas server, which runs with --fault=POLICY (armed by
-# gen_compose.py, see the header) and activates the fault on it. Logged as
-# POLICY_on (the injection row, just before the signal) and POLICY_applied
-# once kill returned. Return as fault_crash.
+# gen_compose.py, see the header) and activates the fault on it, then
+# confirm the activation (fault_confirm). Logged as POLICY_on (the injection
+# row, just before the signal), POLICY_applied once kill returned, then
+# POLICY_confirmed, or POLICY_unconfirmed (return 1). Return as fault_crash.
 fault_signal() {
   local node="$1" policy="$3"
   case "$policy" in
@@ -389,19 +423,46 @@ fault_signal() {
     return 1
   fi
   fault_log "${policy}_applied" "$node" "kill returned"
+  if ! fault_confirm "$node" "$policy"; then
+    fault_log "${policy}_unconfirmed" "$node" "$HBDB_FAULT_ACTIVE_FILE does not read $policy after ${FAULT_CONFIRM_MS}ms"
+    log "fault $FAULT_KIND: --fault=$policy on $node NOT confirmed within ${FAULT_CONFIRM_MS}ms"
+    return 1
+  fi
+  fault_log "${policy}_confirmed" "$node" "$HBDB_FAULT_ACTIVE_FILE reads $policy"
   return 0
 }
 
+# fault_signal_all NODES AT POLICY: fault_signal every node of NODES
+# (space-separated) in parallel once AT is reached, so their activations are
+# not a docker exec apart. Return 2 if aborted before AT, else 1 if any node
+# failed, else 0.
+fault_signal_all() {
+  local node pid pids="" rc=0 r
+  fault_wait_until "$2" || return 2
+  # Every child appends to FAULT_LOG: write the header before they start.
+  if [ -n "$FAULT_LOG" ] && [ ! -s "$FAULT_LOG" ]; then
+    echo "$FAULT_LOG_HEADER" >>"$FAULT_LOG"
+  fi
+  for node in $1; do
+    fault_signal "$node" "$2" "$3" &
+    pids="$pids $!"
+  done
+  for pid in $pids; do
+    if wait "$pid"; then r=0; else r=$?; fi
+    [ "$r" -eq 0 ] || [ "$rc" -ne 0 ] || rc=1
+  done
+  return "$rc"
+}
+
 # fault_inject: run the parsed fault (FAULT_KIND / FAULT_NODES / FAULT_AT).
-# Multi-node faults hit the nodes one after the other (one exec each, a few
-# hundred ms apart), all at or right after AT.
+# FaultPolicy faults signal their nodes in parallel (fault_signal_all); the
+# network F2/F5-F2 and F3 hit the nodes one after the other (one exec each, a
+# few hundred ms apart), all at or right after AT.
 fault_inject() {
   local node rc
   if [ -n "$FAULT_POLICY" ]; then
-    for node in $FAULT_NODES; do
-      fault_signal "$node" "$FAULT_AT" "$FAULT_POLICY" || return $?
-    done
-    return 0
+    fault_signal_all "$FAULT_NODES" "$FAULT_AT" "$FAULT_POLICY"
+    return $?
   fi
   case "$FAULT_KIND" in
     none) return 0 ;;

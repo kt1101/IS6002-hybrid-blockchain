@@ -30,6 +30,9 @@ HBDB_BFT2_PORT=7200
 # File holding the veritas server's pid in every core node container
 # (gen_compose.py VERITAS_PIDFILE); faults.sh fault_signal sends SIGUSR1 there.
 HBDB_VERITAS_PIDFILE=/tmp/hbdb-veritas.pid
+# File veritas writes (its --fault spec) once SIGUSR1 activated the fault
+# (cmd/veritas defaultFaultActiveFile); faults.sh fault_confirm reads it.
+HBDB_FAULT_ACTIVE_FILE=/tmp/hbdb-fault-active
 HBDB_ALL_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
 HBDB_IMPLEMENTED_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
 

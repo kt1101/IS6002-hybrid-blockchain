@@ -1,6 +1,9 @@
 package main
 
 import (
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
@@ -70,7 +73,9 @@ func TestBuildFault(t *testing.T) {
 	}
 }
 
-// SIGUSR1 activates an armed fault at once (the harness's injection).
+// SIGUSR1 activates an armed fault at once (the harness's injection) and the
+// handler then writes the spec to the active file (the harness's
+// confirmation); a stale active file is removed when the handler is set up.
 func TestFaultSignalActivates(t *testing.T) {
 	fp, err := buildFault("corrupt", "tendermint", time.Now(), 1000*time.Hour)
 	if err != nil {
@@ -79,18 +84,50 @@ func TestFaultSignalActivates(t *testing.T) {
 	if got := fp.OnApply("k", "v"); got != "v" {
 		t.Fatalf("before the signal: %q", got)
 	}
-	watchFaultSignal(fp, "corrupt")
+	active := filepath.Join(t.TempDir(), "fault-active")
+	if err := ioutil.WriteFile(active, []byte("stale\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := watchFaultSignal(fp, "corrupt", active); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(active); !os.IsNotExist(err) {
+		t.Fatalf("stale active file not removed: %v", err)
+	}
 	if err := syscall.Kill(syscall.Getpid(), syscall.SIGUSR1); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for !fp.(core.Activator).Active() {
+	for {
+		b, err := ioutil.ReadFile(active)
+		if err == nil && string(b) == "corrupt\n" {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("fault not active 5 s after SIGUSR1")
+			t.Fatalf("active file %s not written 5 s after SIGUSR1: %q, %v", active, b, err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	if !fp.(core.Activator).Active() {
+		t.Fatalf("active file written but the fault is not active")
+	}
 	if got := fp.OnApply("k", "v"); got != "v"+benchmark.CorruptMarker {
 		t.Fatalf("after the signal: %q", got)
+	}
+}
+
+func TestWriteFileAtomic(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f")
+	if err := writeFileAtomic(p, "silent\n"); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := ioutil.ReadFile(p); err != nil || string(b) != "silent\n" {
+		t.Fatalf("read back %q, %v", b, err)
+	}
+	if _, err := os.Stat(p + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("temporary file left behind: %v", err)
+	}
+	if err := writeFileAtomic(filepath.Join(t.TempDir(), "missing-dir", "f"), "x"); err == nil {
+		t.Fatalf("write into a missing directory succeeded")
 	}
 }
