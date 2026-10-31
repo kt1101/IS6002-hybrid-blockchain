@@ -115,6 +115,13 @@ eq "RAFT_FORWARD_PORT matches gen_compose" "$(sed -n 's/^RAFT_FORWARD_PORT = \([
 eq "TM_P2P_PORT matches gen_compose" "$(sed -n 's/^TM_P2P_PORT = \([0-9]*\).*/\1/p' "$gc")" "$HBDB_TM_P2P_PORT"
 eq "BFT2_PORT matches gen_compose" "$(sed -n 's/^BFT2_PORT = \([0-9]*\).*/\1/p' "$gc")" "$HBDB_BFT2_PORT"
 grep -q '"cap_add"\] = \["NET_ADMIN"\]' "$gc" && ok || bad "gen_compose.py no longer gives the nodes NET_ADMIN"
+eq "VERITAS_PIDFILE matches gen_compose" "$(sed -n 's/^VERITAS_PIDFILE = "\(.*\)".*/\1/p' "$gc")" "$HBDB_VERITAS_PIDFILE"
+for b in kafka raft tendermint bft2; do
+  hbdb_backend_has_fault_policy "$b" && ok || bad "$b has a FaultPolicy"
+done
+for b in kafka-orig tm-orig; do
+  hbdb_backend_has_fault_policy "$b" && bad "$b has no FaultPolicy" || ok
+done
 
 # ---- default fault nodes ----
 eq "default 4/1" "$(fault_default_nodes 4 1)" "node4"
@@ -148,6 +155,29 @@ fault_parse F2:node4@60 bft2 4 180
 eq "F2 bft2" "$FAULT_KIND/$FAULT_NODES/$FAULT_BACKEND" "F2/node4/bft2"
 fault_parse "F1:$(fault_default_nodes 7 2)@60" raft 7 180
 eq "default nodes round-trip" "$FAULT_NODES" "node7 node6"
+eq "F1 no policy" "$FAULT_POLICY/$(fault_node_faults)" "/"
+fault_parse F2:node4@60 raft 4 180
+eq "F2 raft is network-level" "$FAULT_POLICY/$(fault_node_faults)" "/"
+# FaultPolicy faults (Task 15).
+fault_parse F2:node4@20 kafka 4 40
+eq "F2 kafka is --fault=silent" "$FAULT_KIND/$FAULT_POLICY/$FAULT_NODES" "F2/silent/node4"
+eq "F2 kafka node faults" "$(fault_node_faults)" "node4=silent"
+for b in kafka raft tendermint bft2; do
+  fault_parse F4:node4@20 "$b" 4 40
+  eq "F4 $b is --fault=corrupt" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "F4//corrupt/node4=corrupt"
+done
+fault_parse F4:node3,node4@20 raft 4 40
+eq "F4 two nodes" "$(fault_node_faults)" "node3=corrupt node4=corrupt"
+fault_parse F5-F4:node3,node4@20 tendermint 4 40
+eq "F5-F4 tendermint" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "F5/F4/corrupt/node3=corrupt node4=corrupt"
+fault_parse F5-F2:node4+node3@20 tendermint 4 40
+eq "F5-F2 tendermint is network-level" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$FAULT_NODES" "F5/F2//node4 node3"
+fault_parse F5-F4:node5,node6,node7@60 tendermint 7 180
+eq "F5-F4 N=7 hits 3 nodes" "$(fault_node_faults)" "node5=corrupt node6=corrupt node7=corrupt"
+fault_parse F5-F4:node3,node4@20 bft2 4 40
+eq "F5-F4 bft2" "$FAULT_POLICY" corrupt
+fault_parse none kafka 4 40
+eq "none resets the policy" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "none///"
 
 # ---- parser: rejected ----
 r="$(parse_rc F1:node5@20 raft 4 40)"
@@ -161,16 +191,36 @@ r="$(parse_rc F1:node4@40 raft 4 40)"
 contains "AT >= DURATION" "$r" "AT=40 must be < DURATION (40s)"
 r="$(parse_rc F1:node1,node2,node3,node4@10 raft 4 40)"
 contains "F1 all nodes" "$r" "may not stop every node"
-r="$(parse_rc F2:node4@20 kafka 4 40)"
-contains "F2 kafka" "$r" "Task 15"
+r="$(parse_rc F2:node1,node2,node3,node4@20 kafka 4 40)"
+contains "F2 kafka all nodes" "$r" "may not silence every node"
 r="$(parse_rc F2:node4@20 kafka-orig 4 40)"
-contains "F2 kafka-orig" "$r" "Task 15"
+contains "F2 kafka-orig" "$r" "unmodified original server"
 r="$(parse_rc F2:node4@20 tm-orig 4 40)"
 contains "F2 tm-orig" "$r" "no network-silent mode"
-r="$(parse_rc F4:node4@20 raft 4 40)"
-contains "F4" "$r" "F4 (wrong state) needs Task 15"
+for b in kafka-orig tm-orig; do
+  r="$(parse_rc F4:node4@20 "$b" 4 40)"
+  contains "F4 $b" "$r" "F4 (wrong state) needs a veritas-core backend"
+done
+r="$(parse_rc F4:node1,node2,node3,node4@20 raft 4 40)"
+contains "F4 all nodes" "$r" "may not corrupt every node"
 r="$(parse_rc F5:node3,node4@20 tendermint 4 40)"
-contains "F5" "$r" "F5 (f+1 nodes of F2/F4"
+contains "F5 without kind" "$r" "F5 needs its kind: F5-F2"
+for b in kafka raft kafka-orig tm-orig; do
+  r="$(parse_rc F5-F4:node3,node4@20 "$b" 4 40)"
+  contains "F5 $b (not BFT)" "$r" "BFT backends only"
+done
+r="$(parse_rc F5-F4:node4@20 tendermint 4 40)"
+contains "F5 one node at N=4" "$r" "exactly f+1 = 2 nodes (N=4, f=1), got 1; e.g. FAULT=F5-F4:node4,node3@20"
+r="$(parse_rc F5-F4:node5,node6@20 tendermint 7 40)"
+contains "F5 two nodes at N=7" "$r" "exactly f+1 = 3 nodes"
+r="$(parse_rc F5-F4:node1,node2@20 tendermint 3 40)"
+contains "F5 N=3" "$r" "F5 needs N >= 4"
+r="$(parse_rc F5-F2:node3,node4@20 bft2 4 40)"
+eq "F5-F2 bft2 parses (network, port 7200)" "${r%%|*}" 0
+r="$(parse_rc F5-F3:node3,node4@20 tendermint 4 40)"
+contains "F5-F3" "$r" "F5 combines F2 or F4"
+r="$(parse_rc F4-F2:node4@20 tendermint 4 40)"
+contains "sub-kind on F4" "$r" "only F5 takes a sub-kind"
 r="$(parse_rc F9:node4@20 raft 4 40)"
 contains "F9" "$r" "unknown fault kind F9"
 for s in F1 F1:node4 F1:@20 F1:node4@ f1:node4@20 F1:n4@20 "F1:node4@2s" F1:node4@20,; do
@@ -371,6 +421,76 @@ fault_inject 2>/dev/null; rc=$?
 eq "F2 inject rc" "$rc" 0
 eq "F2 inject execs" "$(grep -c '^compose exec -T node[34] sh -c' "$CALLS")" 2
 
+# ---- FaultPolicy activation (F2 kafka, F4, F5-F4): SIGUSR1 at AT ----
+reset
+FAULT_T0_MS=$((FAKE_NOW + 10000))
+fault_parse F4:node4@5 tendermint 4 40
+FAULT_T0_MS=$((FAKE_NOW + 10000))
+fault_inject 2>/dev/null; rc=$?
+eq "F4 inject rc" "$rc" 0
+eq "F4 signalled at t0+AT" "$(grep '^compose_exec ' "$TIMES" | awk '{ print $2 }')" 1015000
+grep -q '^compose exec -T node4 sh -c ' "$CALLS" && ok || bad "F4 exec call: $(cat "$CALLS")"
+grep -q ',corrupt_on,node4,SIGUSR1 to veritas (--fault=corrupt)$' "$FAULT_LOG" && ok || bad "F4 on line: $(cat "$FAULT_LOG")"
+grep -q ',corrupt_applied,node4,kill returned$' "$FAULT_LOG" && ok || bad "F4 applied line: $(cat "$FAULT_LOG")"
+eq "F4 log actions" "$(cut -d, -f6 "$FAULT_LOG" | tr '\n' ' ')" "action corrupt_on corrupt_applied "
+eq "F4 log t_s" "$(grep ',corrupt_on,' "$FAULT_LOG" | cut -d, -f3)" "5.000"
+# The script run in the container: SIGUSR1 to the pid in the pid file.
+fake_pidfile_dir="$TMP_ROOT/pid"
+mkdir -p "$fake_pidfile_dir"
+sleep_bin=/bin/sleep # the sleep function above is a stub
+"$sleep_bin" 30 &
+victim=$!
+script="$(cat "$TMP_ROOT/last_script")"
+contains "signal script reads the pid file" "$script" "cat $HBDB_VERITAS_PIDFILE"
+contains "signal script sends SIGUSR1" "$script" 'kill -USR1 "$p"'
+echo "$victim" >"$fake_pidfile_dir/v.pid"
+sh -c "$(echo "$script" | sed "s#$HBDB_VERITAS_PIDFILE#$fake_pidfile_dir/v.pid#")"; rc=$?
+eq "signal script rc" "$rc" 0
+wait "$victim" 2>/dev/null; vrc=$?
+eq "signal script delivered SIGUSR1 (exit 128+USR1)" "$vrc" $((128 + $(kill -l USR1)))
+rm -f "$fake_pidfile_dir/v.pid"
+sh -c "$(echo "$script" | sed "s#$HBDB_VERITAS_PIDFILE#$fake_pidfile_dir/v.pid#")" 2>/dev/null; rc=$?
+[ "$rc" -ne 0 ] && ok || bad "signal script without a pid file must fail"
+# kafka F2: silent_on; two nodes are signalled one after the other.
+reset
+FAULT_T0_MS="$FAKE_NOW"
+fault_parse F2:node3,node4@0 kafka 4 40
+FAULT_T0_MS="$FAKE_NOW"
+fault_inject 2>/dev/null; rc=$?
+eq "F2 kafka inject rc" "$rc" 0
+eq "F2 kafka execs" "$(grep -c '^compose exec -T node[34] sh -c' "$CALLS")" 2
+eq "F2 kafka log" "$(cut -d, -f6,7 "$FAULT_LOG" | tr '\n' ' ')" "action,node silent_on,node3 silent_applied,node3 silent_on,node4 silent_applied,node4 "
+grep -q 'iptables' "$TMP_ROOT/last_script" && bad "F2 kafka ran iptables" || ok
+# F5-F4: both nodes corrupt; F5-F2: iptables on both nodes.
+reset
+FAULT_T0_MS="$FAKE_NOW"
+fault_parse F5-F4:node3,node4@0 tendermint 4 40
+FAULT_T0_MS="$FAKE_NOW"
+fault_inject 2>/dev/null
+eq "F5-F4 log" "$(grep -c ',corrupt_applied,node[34],' "$FAULT_LOG")" 2
+reset
+fault_parse F5-F2:node3,node4@0 tendermint 4 40
+FAULT_T0_MS="$FAKE_NOW"
+fault_inject 2>/dev/null; rc=$?
+eq "F5-F2 inject rc" "$rc" 0
+eq "F5-F2 iptables on both" "$(grep -c ',iptables_applied,node[34],' "$FAULT_LOG")" 2
+grep -q 'iptables' "$TMP_ROOT/last_script" && ok || bad "F5-F2 did not run iptables"
+# Failure and abort.
+reset
+FAULT_T0_MS="$FAKE_NOW"
+COMPOSE_EXEC_RC=1
+fault_signal node4 0 corrupt 2>/dev/null; rc=$?
+eq "signal failure rc" "$rc" 1
+grep -q ',corrupt_on_failed,node4,' "$FAULT_LOG" && ok || bad "signal failure logged"
+reset
+FAULT_T0_MS="$FAKE_NOW"
+: >"$FAULT_STOP"
+fault_signal node4 5 corrupt; rc=$?
+eq "signal aborted rc" "$rc" 2
+grep -q '^compose exec' "$CALLS" && bad "aborted signal ran exec" || ok
+(fault_signal node4 0 bogus) 2>/dev/null; rc=$?
+eq "signal unknown policy dies" "$rc" 1
+
 # ---- run_one.sh check_containers: skips exactly the F1-stopped services ----
 eval "$(sed -n '/^check_containers() {/,/^}/p' "$HERE/run_one.sh")"
 INSPECT="$TMP_ROOT/inspect"
@@ -425,10 +545,15 @@ contains "run_one comma list accepted" "$r" "missing $empty_ycsb/a.load.dat"
 r="$(run_validate BACKEND=raft RTT_MS=20)"
 contains "run_one RTT_MS accepted" "$r" "missing $empty_ycsb/a.load.dat"
 r="$(run_validate BACKEND=kafka FAULT=F2:node4@20)"
-eq "run_one F2 kafka rc" "${r%%|*}" 1
-contains "run_one F2 kafka msg" "$r" "Task 15"
+contains "run_one F2 kafka parses" "$r" "missing $empty_ycsb/a.load.dat"
 r="$(run_validate BACKEND=raft FAULT=F4:node4@20)"
-contains "run_one F4 msg" "$r" "Task 15"
+contains "run_one F4 parses" "$r" "missing $empty_ycsb/a.load.dat"
+r="$(run_validate BACKEND=tendermint FAULT=F5-F4:node3,node4@20)"
+contains "run_one F5-F4 parses" "$r" "missing $empty_ycsb/a.load.dat"
+r="$(run_validate BACKEND=kafka-orig FAULT=F4:node4@20)"
+contains "run_one F4 kafka-orig rejected" "$r" "needs a veritas-core backend"
+r="$(run_validate BACKEND=raft FAULT=F5-F4:node3,node4@20)"
+contains "run_one F5 raft rejected" "$r" "BFT backends only"
 r="$(run_validate BACKEND=raft FAULT=F1:node5@20)"
 contains "run_one node5 N=4" "$r" "node5 does not exist"
 r="$(run_validate BACKEND=raft FAULT=F1:node4@40)"
@@ -451,6 +576,8 @@ for s in down up health; do
   printf '#!/bin/sh\necho %s >>"$STUB_STATE/cluster.log"\nexit 0\n' "$s" >"$SB/experiments/cluster/$s.sh"
   chmod +x "$SB/experiments/cluster/$s.sh"
 done
+# up.sh also records the NODE_FAULTS it was given (the armed --fault nodes).
+printf '#!/bin/sh\necho up >>"$STUB_STATE/cluster.log"\necho "${NODE_FAULTS-unset}" >"$STUB_STATE/node_faults"\nexit 0\n' >"$SB/experiments/cluster/up.sh"
 echo "READ k1" >"$SB/ycsb/a.load.dat"
 echo "READ k1" >"$SB/ycsb/a.run.dat"
 cat >"$SB/bin/docker" <<'EOF'
@@ -482,7 +609,10 @@ case "$1" in
         shift 2 # exec -T
         svc="$1"
         shift
-        if [ "$svc" != client ]; then exit "${STUB_EXEC_RC:-0}"; fi
+        if [ "$svc" != client ]; then
+          echo "$svc $*" >>"$STUB_STATE/node_execs"
+          exit "${STUB_EXEC_RC:-0}"
+        fi
         if [ "$1" = sh ]; then
           # run_one.sh start_audit: `sh -c SCRIPT sh PIDFILE ADDRS OUT` starts
           # the periodic auditor, `sh -c 'kill ...' sh PIDFILE` stops it.
@@ -620,6 +750,35 @@ itest origaudit EXP=it_orig BACKEND=kafka-orig FAULT=F1:node4@0 DURATION=2s STUB
 eq "itest kafka-orig rc" "$it_rc" 0
 contains "itest kafka-orig audit skipped" "$it_err" "audit skipped"
 grep -q 'auditor' "$SB/state/calls" && bad "itest kafka-orig: the auditor was started" || ok
+
+# J: F4 through run_one: node4 is created with --fault armed (NODE_FAULTS to
+# up.sh) and signalled at marker + WARMUP + AT; the audit runs.
+itest f4 EXP=it_f4 BACKEND=tendermint FAULT=F4:node4@1 DURATION=2s STUB_BENCH_SECS=2
+eq "itest f4 rc" "$it_rc" 0
+eq "itest f4 NODE_FAULTS to up.sh" "$(cat "$SB/state/node_faults" 2>/dev/null)" "node4=corrupt"
+grep -q '^node4 sh -c .*kill -USR1' "$SB/state/node_execs" 2>/dev/null && ok || bad "itest f4 signal exec: $(cat "$SB/state/node_execs" 2>/dev/null)"
+f="$(raw_tag it_f4)"
+eq "itest f4 log actions" "$(cut -d, -f6 "$f" 2>/dev/null | tr '\n' ' ')" "action run_phase_start corrupt_on corrupt_applied "
+t_s="$(grep ',corrupt_on,' "$f" 2>/dev/null | cut -d, -f3)"
+awk -v t="$t_s" 'BEGIN { exit !(t >= 1.0 && t < 1.6) }' && ok || bad "itest f4 t_s=$t_s (want ~1)"
+eq "itest f4 fault column" "$(tail -n 1 "$SB_RAW/it_f4.csv" | cut -d, -f11)" "F4:node4@1"
+grep -q 'auditor' "$SB/state/calls" && ok || bad "itest f4: the auditor was not started"
+# K: F5-F4 arms both nodes; F1 arms none.
+itest f5 EXP=it_f5 BACKEND=tendermint FAULT=F5-F4:node3,node4@0 DURATION=2s STUB_BENCH_SECS=1
+eq "itest f5 rc" "$it_rc" 0
+eq "itest f5 NODE_FAULTS" "$(cat "$SB/state/node_faults" 2>/dev/null)" "node3=corrupt node4=corrupt"
+eq "itest f5 fault column" "$(tail -n 1 "$SB_RAW/it_f5.csv" | cut -d, -f11)" "F5-F4:node3+node4@0"
+itest f1nf EXP=it_f1nf FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1
+eq "itest f1 NODE_FAULTS empty" "$(cat "$SB/state/node_faults" 2>/dev/null)" ""
+# L: a failed signal (no pid file in the container) is exit 3, no row.
+itest f4fail EXP=it_f4fail BACKEND=kafka FAULT=F2:node4@0 DURATION=2s STUB_BENCH_SECS=1 STUB_EXEC_RC=1
+eq "itest f2 kafka signal failure rc" "$it_rc" 3
+grep -q ',silent_on_failed,node4,' "$(raw_tag it_f4fail)" 2>/dev/null && ok || bad "itest f2 kafka failure not logged"
+[ -e "$SB_RAW/it_f4fail.csv" ] && bad "itest f2 kafka failure wrote a CSV row" || ok
+
+# up.sh turns NODE_FAULTS into gen_compose.py --node-fault flags.
+grep -q 'node_fault_args="$node_fault_args --node-fault $nf"' "$HERE/cluster/up.sh" && ok || bad "up.sh --node-fault"
+grep -q -- '--mem "$MEM" $node_fault_args' "$HERE/cluster/up.sh" && ok || bad "up.sh passes node_fault_args"
 
 # The recorded fault value must be CSV/--tags safe and the tag file-name safe.
 grep -q 'fault_rec="$(echo "$FAULT" | tr '"','"' '"'+'"')"' "$HERE/run_one.sh" && ok || bad "run_one fault_rec"

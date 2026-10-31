@@ -317,6 +317,7 @@ func TestLedgerEntryFormatMatchesOriginal(t *testing.T) {
 
 type suffixFault struct{}
 
+func (suffixFault) OnVote() bool                   { return true }
 func (suffixFault) OnApply(key, val string) string { return val + "-CORRUPT" }
 
 // The FaultPolicy output reaches both the store and the ledger.

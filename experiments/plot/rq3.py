@@ -85,13 +85,17 @@ RECOVERY_FRACTION = 0.9  # recovered = throughput >= 0.9 x pre-fault mean
 FAULTS_COLUMNS = ["utc", "epoch_ms", "t_s", "timeline_s", "fault", "action", "node", "detail"]
 # faults.sh actions logged right before a fault is applied, per fault kind (the
 # *_failed and the "applied"/"stopped" completion rows are not injections).
-# TO EXTEND: Task 15 adds F4/F5 (--fault=corrupt|silent on the nodes); add
-# "F4": (<its action name>,) here once faults.sh logs one.  A fault kind that
-# is not listed is reported as an InputError, not a crash.
+# silent_on / corrupt_on: the SIGUSR1 that activates veritas --fault=silent
+# (F2 on kafka) or --fault=corrupt (F4, F5-F4) at AT (faults.sh fault_signal).
+# The key is the kind as written in the fault column (F5-F2, F5-F4).  A fault
+# kind that is not listed is reported as an InputError, not a crash.
 INJECT_ACTIONS = {
     "F1": ("docker_stop",),
-    "F2": ("iptables_drop",),
+    "F2": ("iptables_drop", "silent_on"),
     "F3": ("netem_delay",),
+    "F4": ("corrupt_on",),
+    "F5-F2": ("iptables_drop",),
+    "F5-F4": ("corrupt_on",),
 }
 AUDIT_END_SLACK_S = 3  # the auditor may stop this long before the timeline ends
 FIRST_TICK_WINDOW_S = (-0.1, 5.0)  # expected first audit tick vs run_phase_start
@@ -320,7 +324,7 @@ def load_run(timeline_path, faults_path, audit_path=None):
         if unknown:
             raise InputError(
                 "%s: unknown fault kind %s: no injection action is known for it (INJECT_ACTIONS in rq3.py lists %s; "
-                "F4/F5 come with Task 15, add the action names faults.sh logs for them)"
+                "add the action names faults.sh logs for it)"
                 % (faults_path, "/".join(unknown), ", ".join(sorted(INJECT_ACTIONS))))
         raise InputError("%s: no injection row (%s) with a timeline_s" % (faults_path, "/".join(sorted(actions))))
     first = min(inject, key=lambda r: _num(r, "timeline_s", faults_path))

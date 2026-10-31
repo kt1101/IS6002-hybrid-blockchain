@@ -71,7 +71,9 @@ type Executor struct {
 	ledgerTime time.Duration
 }
 
-// NewExecutor builds an executor. A nil fp means NoFault{}.
+// NewExecutor builds an executor. A nil fp means NoFault{}. The executor
+// uses only fp.OnApply (every applied Set); fp.OnVote is the Kafka
+// backend's vote hook (cmd/veritas wires both from --fault).
 func NewExecutor(s KVStore, l *ledger.LogLedger, mode VersionMode, fp FaultPolicy) *Executor {
 	if fp == nil {
 		fp = NoFault{}

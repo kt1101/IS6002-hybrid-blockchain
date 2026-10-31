@@ -14,6 +14,12 @@
 // it requires --version-mode=ordered).
 // On SIGTERM/SIGINT the core path closes the server, writes its time
 // breakdown to --breakdown-out and exits.
+//
+// Fault injection (RQ3, core path only): --fault=silent (kafka only: the node
+// sends no votes, F2) or --fault=corrupt (every applied value gets the
+// benchmark.CorruptMarker suffix, F4) turns on --fault-after after the
+// process start, or at once on SIGUSR1 (the experiment harness passes a very
+// large --fault-after and signals the node at the injection time).
 package main
 
 import (
@@ -26,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/golang/protobuf/proto"
 	"google.golang.org/grpc"
@@ -40,6 +47,7 @@ import (
 	"hybrid/kafkarole"
 	pbv "hybrid/proto/veritas"
 	"hybrid/veritas"
+	"hybrid/veritas/benchmark"
 	"hybrid/veritas/core"
 	"hybrid/veritas/ledger"
 )
@@ -63,6 +71,8 @@ var (
 	versionMode   = kingpin.Flag("version-mode", "core: client (client versions, stale writes abort) or ordered (versions from the consensus order)").Default("client").String()
 	nodeID        = kingpin.Flag("node-id", "core: node id in [0, 2^23), unique per deployment (high bits of every SharedLog seq)").Default("-1").Int()
 	breakdownOut  = kingpin.Flag("breakdown-out", "core: breakdown JSON written on SIGTERM/SIGINT (default /results/breakdown-node<node-id>.json)").Default("").String()
+	faultSpec     = kingpin.Flag("fault", "core: injected replica fault: none, silent (--consensus=kafka only: send no votes) or corrupt (append "+benchmark.CorruptMarker+" to every applied value)").Default(core.FaultNone).String()
+	faultAfter    = kingpin.Flag("fault-after", "core: the fault turns on this long after the process start (e.g. 60s); SIGUSR1 turns it on at once").Default("0s").Duration()
 
 	// --consensus=raft only. The raft server ID is --signature.
 	raftPeers     = kingpin.Flag("raft-peers", "raft: the full static cluster, ID=RAFTADDR/FORWARDADDR,... (ID = a node's signature; RAFTADDR its raft transport address, FORWARDADDR its submit-forwarding HTTP address)").Default("").String()
@@ -77,6 +87,10 @@ var (
 	// --consensus=bft2 only.
 	bft2API = kingpin.Flag("bft2-api", "bft2: local API (host:port) of the bft2-node HotStuff sidecar on this container").Default("127.0.0.1:7201").String()
 )
+
+// processStart anchors --fault-after: the fault turns on --fault-after after
+// this moment (package initialisation, i.e. the process start).
+var processStart = time.Now()
 
 func check(err error) {
 	if err != nil {
@@ -112,6 +126,9 @@ func partySet() map[string]struct{} {
 
 // runOriginal is the unchanged original main (veritas/server.go).
 func runOriginal() {
+	if *faultSpec != core.FaultNone {
+		kingpin.Fatalf("--fault=%s needs --consensus (the original server has no fault hooks)", *faultSpec)
+	}
 	requireFlag("kafka-addr", *kafkaAddr)
 	requireFlag("kafka-group", *kafkaGroup)
 	requireFlag("kafka-topic", *kafkaTopic)
@@ -210,6 +227,16 @@ func runCore() {
 	if out == "" {
 		out = fmt.Sprintf("/results/breakdown-node%d.json", *nodeID)
 	}
+	fp, err := buildFault(*faultSpec, *consensusName, processStart, *faultAfter)
+	if err != nil {
+		kingpin.Fatalf("%v", err)
+	}
+	// Before anything listens: an unhandled SIGUSR1 would kill the process.
+	watchFaultSignal(fp, *faultSpec)
+	if *faultSpec != core.FaultNone {
+		log.Printf("fault %s armed: active %v after the process start (%s) or on SIGUSR1",
+			*faultSpec, *faultAfter, processStart.UTC().Format(time.RFC3339))
+	}
 
 	r, err := dbconn.NewRedisConn(*redisAddr, *redisPwd, *redisDb)
 	if err != nil {
@@ -219,7 +246,7 @@ func runCore() {
 	if err != nil {
 		log.Fatalf("create ledger: %v", err)
 	}
-	ex := core.NewExecutor(core.NewRedisStore(r), l, vm, nil)
+	ex := core.NewExecutor(core.NewRedisStore(r), l, vm, fp)
 
 	// The backend is built before the server, but its drop callback must
 	// reach the server: it goes through dropper, pointed at srv.AbortBlock
@@ -230,13 +257,14 @@ func runCore() {
 	switch *consensusName {
 	case "kafka":
 		cons, err = kafkacons.New(kafkacons.Config{
-			Brokers:   *kafkaAddr,
-			Topic:     *kafkaTopic,
-			Group:     *signature,
-			Signature: *signature,
-			Parties:   partySet(),
-			Validate:  validator(ex),
-			OnDrop:    drops.drop,
+			Brokers:    *kafkaAddr,
+			Topic:      *kafkaTopic,
+			Group:      *signature,
+			Signature:  *signature,
+			Parties:    partySet(),
+			Validate:   validator(ex),
+			ShouldVote: fp.OnVote,
+			OnDrop:     drops.drop,
 		})
 		if err != nil {
 			log.Fatalf("kafka consensus: %v", err)
@@ -387,4 +415,38 @@ func validator(ex *core.Executor) func([]byte) bool {
 		}
 		return ok
 	}
+}
+
+// buildFault parses --fault/--fault-after for backend (--consensus). silent
+// exists only for kafka, the one backend with a vote hook
+// (kafka.Config.ShouldVote); F2 for the other backends is injected at the
+// network level (experiments/faults.sh).
+func buildFault(spec, backend string, start time.Time, after time.Duration) (core.FaultPolicy, error) {
+	fp, err := core.ParseFault(spec, start, after)
+	if err != nil {
+		return nil, fmt.Errorf("--fault=%s --fault-after=%v: %v", spec, after, err)
+	}
+	if spec == core.FaultSilent && backend != "kafka" {
+		return nil, fmt.Errorf("--fault=silent needs --consensus=kafka (the only backend with a vote hook), got --consensus=%s; "+
+			"its silent fault (F2) is injected at the network level (experiments/faults.sh)", backend)
+	}
+	return fp, nil
+}
+
+// watchFaultSignal makes SIGUSR1 activate fp at once (core.Activator); with
+// --fault=none the signal is logged and ignored. It returns after the
+// handler is installed.
+func watchFaultSignal(fp core.FaultPolicy, spec string) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGUSR1)
+	go func() {
+		for range ch {
+			if a, ok := fp.(core.Activator); ok {
+				a.Activate()
+				log.Printf("SIGUSR1: fault %s activated", spec)
+			} else {
+				log.Printf("SIGUSR1 ignored: --fault=%s", spec)
+			}
+		}
+	}()
 }

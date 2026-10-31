@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from gen_compose import gen, gomemlimit, main
+from gen_compose import gen, gomemlimit, main, parse_node_faults
 
 
 def _nodes(c):
@@ -427,3 +427,69 @@ def test_cli_accepts_bft2(tmp_path):
     c = json.loads(out.read_text())
     assert _nodes(c) == ["node1", "node2", "node3", "node4"]
     assert "--consensus=bft2 --commit-mode=sync" in c["services"]["node1"]["command"][-1]
+
+
+# ---- fault injection (Task 15: veritas --fault, activated by SIGUSR1) ----
+
+def _veritas_line(c, k):
+    lines = c["services"][k]["command"][-1].split("\n")
+    start = [l for l in lines if l.startswith("GOMEMLIMIT=") and "veritas-kafka " in l]
+    assert len(start) == 1
+    return start[0]
+
+
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint"])
+def test_node_fault_arms_only_the_named_nodes(backend):
+    c = gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
+            node_faults={4: "corrupt", 3: "corrupt"})
+    for k in _nodes(c):
+        line = _veritas_line(c, k)
+        if k in ("node3", "node4"):
+            # Armed, never on by itself: faults.sh signals it at AT.
+            assert line.endswith(" --breakdown-out=/results/breakdown-%s.json --fault=corrupt --fault-after=87600h &" % k)
+        else:
+            assert "--fault" not in line and line.endswith(" &")
+
+
+def test_kafka_silent_node_fault():
+    c = gen(backend="kafka", n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
+            node_faults={4: "silent"})
+    assert " --fault=silent --fault-after=87600h &" in _veritas_line(c, "node4")
+
+
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint"])
+def test_core_nodes_write_the_veritas_pidfile(backend):
+    c = gen(backend=backend, n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    for k in _nodes(c):
+        lines = c["services"][k]["command"][-1].split("\n")
+        j = lines.index("veritas_pid=$$!")
+        assert lines[j + 1] == 'echo "$$veritas_pid" >/tmp/hbdb-veritas.pid'
+
+
+def test_bad_node_faults_are_rejected(capsys):
+    for backend, faults in [
+        ("raft", {4: "silent"}),          # no vote hook: F2 is network-level
+        ("tendermint", {4: "silent"}),
+        ("kafka-orig", {4: "corrupt"}),   # original servers have no --fault
+        ("tm-orig", {4: "corrupt"}),
+        ("kafka", {5: "corrupt"}),        # n=4
+        ("kafka", {4: "bogus"}),
+    ]:
+        with pytest.raises(ValueError):
+            gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
+                node_faults=faults)
+    assert main(["--backend", "raft", "--n", "4", "--node-fault", "node4=silent"]) == 1
+    assert "silent needs backend kafka" in capsys.readouterr().err
+    for bad in (["node4"], ["4=corrupt"], ["node4=corrupt", "node4=corrupt"], ["node0=corrupt"]):
+        with pytest.raises(ValueError):
+            parse_node_faults(bad)
+
+
+def test_cli_node_fault(tmp_path):
+    out = tmp_path / "compose.json"
+    assert main(["--backend", "tendermint", "--n", "4", "--node-fault", "node4=corrupt",
+                 "--node-fault", "node3=corrupt", "--out", str(out)]) == 0
+    c = json.loads(out.read_text())
+    assert "--fault=corrupt" in _veritas_line(c, "node3") and "--fault=corrupt" in _veritas_line(c, "node4")
+    assert "--fault" not in _veritas_line(c, "node1")
+

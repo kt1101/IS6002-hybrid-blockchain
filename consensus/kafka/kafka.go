@@ -72,9 +72,10 @@ type Config struct {
 	// keep them. It runs on the consumer goroutine, so it delays the
 	// consumption of later messages. nil = always Approve.
 	Validate func(blk []byte) bool
-	// ShouldVote (Task 15) is asked before each vote; false = send no vote at
-	// all (a silent party), so the block stays pending until it is evicted
-	// (see tracker). nil = always vote.
+	// ShouldVote is asked before each vote; false = send no vote at all (a
+	// silent party, fault F2), so the block stays pending until it is
+	// evicted (see tracker). cmd/veritas sets it to the node's
+	// core.FaultPolicy.OnVote (--fault=silent). nil = always vote.
 	ShouldVote func() bool
 	// OnDrop, if set, is called once for every block that will never be
 	// delivered: dropped because an Abort vote was read for it, or evicted

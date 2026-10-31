@@ -7,15 +7,33 @@
 # FAULT strings (run_one.sh FAULT=...):
 #   none                 no fault
 #   F1:node3,node4@60    crash: `docker stop` the nodes at second 60
-#   F2:node4@60          silent (raft, tendermint, bft2): the node stays up
-#                        but its consensus traffic is dropped by iptables in
-#                        its container (fault_silent_net). kafka-orig and
-#                        kafka: needs Task 15's --fault flag (FaultPolicy);
-#                        tm-orig: no silent mode.
+#   F2:node4@60          silent: the node stays up but sends no consensus
+#                        messages. raft, tendermint, bft2: its consensus
+#                        traffic is dropped by iptables in its container
+#                        (fault_silent_net). kafka: veritas --fault=silent
+#                        (FaultPolicy.OnVote: no approve/abort is sent),
+#                        activated at AT by fault_signal. kafka-orig (the
+#                        unmodified original server) and tm-orig: no silent
+#                        mode.
 #   F3:node1@60          slow: netem delay FAULT_SLOW_MS (200) ms on the
 #                        node's egress, on top of the RTT_MS/2 base delay
-#   F4, F5               wrong state / f+1 faulty nodes: need Task 15's
-#                        --fault flag (rejected for now)
+#   F4:node4@60          wrong state (kafka, raft, tendermint, bft2): veritas
+#                        --fault=corrupt (FaultPolicy.OnApply appends
+#                        -CORRUPT to every value the node applies, so its
+#                        root digest and its Gets go wrong), activated at AT
+#                        by fault_signal
+#   F5-F2:node3,node4@60 beyond the threshold (BFT backends only: tendermint,
+#   F5-F4:node3,node4@60 bft2): F2 (network) resp. F4 (corrupt) on exactly
+#                        f+1 nodes, f = floor((N-1)/3) (N=4: 2 nodes, N=7: 3)
+#
+# FaultPolicy faults (F2 on kafka, F4, F5-F4) are baked into the node's
+# command line when the cluster is created: run_one.sh passes
+# fault_node_faults (NODE_FAULTS, e.g. "node4=corrupt") to up.sh, and
+# gen_compose.py starts those nodes' veritas with --fault=<kind> and a
+# --fault-after that never fires (87600h). At AT fault_signal sends SIGUSR1 to
+# the node's veritas (pid in HBDB_VERITAS_PIDFILE), which activates the fault
+# at once; so the activation is tied to the measurement window like every
+# other fault, independent of how long load and settle took.
 # Nodes are node1..node$N, separated by ',' or '+' (run_one.sh records the
 # string with '+' so it fits a CSV field and a ycsbbench --tags value). AT is
 # a whole number of seconds, 0 <= AT < DURATION. Node choice convention: the
@@ -45,8 +63,10 @@
 #   FAULT_T0_MS      epoch ms of t=0 (set by fault_wait_marker; when empty a
 #                    fault_* call counts AT from the moment it is called)
 #   FAULT_SLOW_MS    F3 delay in ms (default 200)
-# fault_parse sets FAULT_SPEC, FAULT_KIND (none|F1|F2|F3), FAULT_NODES
-# (space-separated), FAULT_AT, FAULT_BACKEND.
+# fault_parse sets FAULT_SPEC, FAULT_KIND (none|F1|F2|F3|F4|F5), FAULT_SUB
+# (F5: F2 or F4, else empty), FAULT_NODES (space-separated), FAULT_AT,
+# FAULT_BACKEND and FAULT_POLICY (silent|corrupt when the fault is a veritas
+# --fault activated by SIGUSR1, else empty).
 
 if ! command -v net_delay >/dev/null 2>&1; then
   . "$HBDB_ROOT/experiments/net.sh"
@@ -61,6 +81,8 @@ FAULT_T0_MS="${FAULT_T0_MS:-}"
 FAULT_SLOW_MS="${FAULT_SLOW_MS:-200}"
 FAULT_SPEC=none
 FAULT_KIND=none
+FAULT_SUB=""
+FAULT_POLICY=""
 FAULT_NODES=""
 FAULT_AT=""
 FAULT_BACKEND=""
@@ -87,26 +109,42 @@ fault_default_nodes() {
 # fault_parse SPEC BACKEND N DURATION_S: validate SPEC (see the header) for
 # this backend and cluster size and set FAULT_*; die on anything invalid.
 fault_parse() {
-  local spec="$1" backend="$2" n="$3" dur="$4" rest nodes_part at node num seen="" count=0 ports
+  local spec="$1" backend="$2" n="$3" dur="$4" rest nodes_part at node num seen="" count=0 ports f net_silent=0
   FAULT_SPEC="$spec"
   FAULT_BACKEND="$backend"
   FAULT_KIND=none
+  FAULT_SUB=""
+  FAULT_POLICY=""
   FAULT_NODES=""
   FAULT_AT=""
   [ "$spec" = none ] && return 0
   hbdb_require_uint N "$n"
   hbdb_require_uint DURATION_S "$dur"
-  echo "$spec" | grep -Eq '^F[0-9]+:node[1-9][0-9]*([,+]node[1-9][0-9]*)*@[0-9]+$' ||
-    die "FAULT='$spec': want none or F<k>:node<i>[,node<j>...]@<seconds>, e.g. F1:node4@60, F1:node3,node4@60, F3:node1@60"
+  echo "$spec" | grep -Eq '^F[0-9]+(-F[0-9]+)?:node[1-9][0-9]*([,+]node[1-9][0-9]*)*@[0-9]+$' ||
+    die "FAULT='$spec': want none or F<k>:node<i>[,node<j>...]@<seconds>, e.g. F1:node4@60, F1:node3,node4@60, F3:node1@60, F5-F4:node3,node4@60"
   FAULT_KIND="${spec%%:*}"
   rest="${spec#*:}"
   nodes_part="${rest%@*}"
   at="${rest##*@}"
   case "$FAULT_KIND" in
-    F1 | F2 | F3) ;;
-    F4) die "FAULT='$spec': F4 (wrong state) needs Task 15's --fault flag (FaultPolicy.OnApply); not implemented yet" ;;
-    F5) die "FAULT='$spec': F5 (f+1 nodes of F2/F4, BFT backends only) needs Task 15's --fault flag; not implemented yet" ;;
-    *) die "FAULT='$spec': unknown fault kind $FAULT_KIND (F1 crash, F2 silent, F3 slow, F4 wrong state, F5 f+1 faulty)" ;;
+    *-*)
+      FAULT_SUB="${FAULT_KIND#*-}"
+      FAULT_KIND="${FAULT_KIND%%-*}"
+      [ "$FAULT_KIND" = F5 ] ||
+        die "FAULT='$spec': only F5 takes a sub-kind (F5-F2, F5-F4), got $FAULT_KIND-$FAULT_SUB"
+      case "$FAULT_SUB" in
+        F2 | F4) ;;
+        *) die "FAULT='$spec': F5 combines F2 or F4 (F5-F2, F5-F4), got F5-$FAULT_SUB" ;;
+      esac
+      ;;
+  esac
+  case "$FAULT_KIND" in
+    F1 | F2 | F3 | F4) ;;
+    F5)
+      [ -n "$FAULT_SUB" ] ||
+        die "FAULT='$spec': F5 needs its kind: F5-F2 (f+1 silent nodes) or F5-F4 (f+1 corrupt nodes), e.g. F5-F4:node3,node4@60"
+      ;;
+    *) die "FAULT='$spec': unknown fault kind $FAULT_KIND (F1 crash, F2 silent, F3 slow, F4 wrong state, F5-F2/F5-F4 f+1 faulty)" ;;
   esac
   for node in $(echo "$nodes_part" | tr ',+' '  '); do
     num="${node#node}"
@@ -125,20 +163,56 @@ fault_parse() {
       ;;
     F2)
       case "$backend" in
-        kafka-orig | kafka)
-          die "FAULT='$spec': F2 (silent) for BACKEND=$backend needs Task 15's --fault flag (FaultPolicy: the node withholds its approve); not implemented yet" ;;
+        kafka) FAULT_POLICY=silent ;;
+        kafka-orig)
+          die "FAULT='$spec': BACKEND=kafka-orig is the unmodified original server, it has no silent mode (no FaultPolicy); use BACKEND=kafka" ;;
+        *) net_silent=1 ;;
       esac
-      ports="$(hbdb_consensus_ports "$backend")"
-      [ -n "$ports" ] ||
-        die "FAULT='$spec': BACKEND=$backend has no network-silent mode (hbdb_consensus_ports lists no consensus ports for it)"
       [ "$count" -lt "$n" ] || die "FAULT='$spec': F2 may not silence every node (N=$n)"
+      ;;
+    F4)
+      hbdb_backend_has_fault_policy "$backend" ||
+        die "FAULT='$spec': F4 (wrong state) needs a veritas-core backend (kafka, raft, tendermint, bft2; veritas --fault=corrupt); BACKEND=$backend is an original server without FaultPolicy"
+      [ "$count" -lt "$n" ] || die "FAULT='$spec': F4 may not corrupt every node (N=$n): the auditor needs an honest majority"
+      FAULT_POLICY=corrupt
+      ;;
+    F5)
+      case "$backend" in
+        tendermint | bft2) ;;
+        *) die "FAULT='$spec': F5 (f+1 faulty nodes) is for the BFT backends only (tendermint, bft2), got BACKEND=$backend" ;;
+      esac
+      [ "$n" -ge 4 ] || die "FAULT='$spec': F5 needs N >= 4 (f = floor((N-1)/3) >= 1), got N=$n"
+      f=$(((n - 1) / 3))
+      [ "$count" -eq $((f + 1)) ] ||
+        die "FAULT='$spec': F5 hits exactly f+1 = $((f + 1)) nodes (N=$n, f=$f), got $count; e.g. FAULT=F5-$FAULT_SUB:$(fault_default_nodes "$n" $((f + 1)))@$at"
+      case "$FAULT_SUB" in
+        F2) net_silent=1 ;;
+        F4) FAULT_POLICY=corrupt ;;
+      esac
       ;;
     F3)
       hbdb_require_uint FAULT_SLOW_MS "$FAULT_SLOW_MS"
       [ "$FAULT_SLOW_MS" -ge 1 ] || die "FAULT_SLOW_MS must be >= 1"
       ;;
   esac
+  if [ "$net_silent" = 1 ]; then
+    ports="$(hbdb_consensus_ports "$backend")"
+    [ -n "$ports" ] ||
+      die "FAULT='$spec': BACKEND=$backend has no network-silent mode (hbdb_consensus_ports lists no consensus ports for it)"
+  fi
   return 0
+}
+
+# fault_node_faults: the veritas --fault of the parsed fault per node, for
+# up.sh / gen_compose.py --node-fault: "node3=corrupt node4=corrupt"; empty
+# when the fault is not a FaultPolicy fault (F1, F3, network F2/F5-F2).
+fault_node_faults() {
+  local node out=""
+  [ -n "$FAULT_POLICY" ] || return 0
+  for node in $FAULT_NODES; do
+    out="${out:+$out }$node=$FAULT_POLICY"
+  done
+  echo "$out"
 }
 
 # fault_log ACTION NODE DETAIL: append one line to FAULT_LOG (see header).
@@ -289,13 +363,50 @@ fault_silent_net() {
   return 0
 }
 
+# fault_signal_script: the shell script run in the node container: SIGUSR1
+# to the veritas server, whose pid gen_compose.py writes to
+# HBDB_VERITAS_PIDFILE; fails when the file or the process is missing.
+fault_signal_script() {
+  printf '%s\n' "p=\"\$(cat $HBDB_VERITAS_PIDFILE)\" && [ -n \"\$p\" ] && kill -USR1 \"\$p\""
+}
+
+# fault_signal NODE AT POLICY (F2 on kafka, F4, F5-F4): at second AT send
+# SIGUSR1 to NODE's veritas server, which runs with --fault=POLICY (armed by
+# gen_compose.py, see the header) and activates the fault on it. Logged as
+# POLICY_on (the injection row, just before the signal) and POLICY_applied
+# once kill returned. Return as fault_crash.
+fault_signal() {
+  local node="$1" policy="$3"
+  case "$policy" in
+    silent | corrupt) ;;
+    *) die "fault_signal: unknown policy '$policy'" ;;
+  esac
+  fault_wait_until "$2" || return 2
+  fault_log "${policy}_on" "$node" "SIGUSR1 to veritas (--fault=$policy)"
+  log "fault $FAULT_KIND: activating --fault=$policy on $node (SIGUSR1)"
+  if ! hbdb_compose exec -T "$node" sh -c "$(fault_signal_script)" >/dev/null; then
+    fault_log "${policy}_on_failed" "$node" "kill -USR1 failed"
+    return 1
+  fi
+  fault_log "${policy}_applied" "$node" "kill returned"
+  return 0
+}
+
 # fault_inject: run the parsed fault (FAULT_KIND / FAULT_NODES / FAULT_AT).
+# Multi-node faults hit the nodes one after the other (one exec each, a few
+# hundred ms apart), all at or right after AT.
 fault_inject() {
   local node rc
+  if [ -n "$FAULT_POLICY" ]; then
+    for node in $FAULT_NODES; do
+      fault_signal "$node" "$FAULT_AT" "$FAULT_POLICY" || return $?
+    done
+    return 0
+  fi
   case "$FAULT_KIND" in
     none) return 0 ;;
     F1) fault_crash "$FAULT_NODES" "$FAULT_AT" ;;
-    F2)
+    F2 | F5)
       for node in $FAULT_NODES; do
         fault_silent_net "$node" "$FAULT_AT" "$(hbdb_consensus_ports "$FAULT_BACKEND")" || return $?
       done

@@ -277,11 +277,58 @@ def test_load_run_never_recovers(tmp_path):
 
 def test_unknown_fault_kind_is_an_input_error(tmp_path):
     rows = [
-        "u,1000000000,-10.000,0.000,F4:node4@20,run_phase_start,,x",
-        "u,1000030200,20.200,30.200,F4:node4@20,corrupt_on,node4,d",
+        "u,1000000000,-10.000,0.000,F9:node4@20,run_phase_start,,x",
+        "u,1000030200,20.200,30.200,F9:node4@20,f9_on,node4,d",
     ]
     tl, fl, _ = write_run(tmp_path, [10] * 40, rows)
-    with pytest.raises(rq3.InputError, match="unknown fault kind F4"):
+    with pytest.raises(rq3.InputError, match="unknown fault kind F9"):
+        rq3.load_run(tl, fl, None)
+
+
+# Task 15: FaultPolicy faults are injected by SIGUSR1 (faults.sh fault_signal).
+def test_load_run_f4_corrupt_on_is_the_injection(tmp_path):
+    rows = [
+        "u,1000000000,-10.000,0.000,F4:node4@20,run_phase_start,,x",
+        "u,1000030200,20.200,30.200,F4:node4@20,corrupt_on,node4,SIGUSR1 to veritas (--fault=corrupt)",
+        "u,1000030500,20.500,30.500,F4:node4@20,corrupt_applied,node4,kill returned",
+    ]
+    tl, fl, au = write_run(tmp_path, [10] * 40, rows, [(1000029.0, ""), (1000032.0, "node4"), (1000033.0, "node4")])
+    m = rq3.load_run(tl, fl, au)
+    assert m["fault_at_s"] == pytest.approx(30.2)
+    assert m["detect_s"] == pytest.approx(32.0 - 30.2)
+
+
+def test_load_run_kafka_f2_silent_on_is_the_injection(tmp_path):
+    rows = [
+        "u,1000000000,-10.000,0.000,F2:node4@20,run_phase_start,,x",
+        "u,1000030300,20.300,30.300,F2:node4@20,silent_on,node4,SIGUSR1 to veritas (--fault=silent)",
+        "u,1000030600,20.600,30.600,F2:node4@20,silent_applied,node4,kill returned",
+    ]
+    tl, fl, _ = write_run(tmp_path, [10] * 31 + [0] * 9, rows)
+    m = rq3.load_run(tl, fl, None)
+    assert m["fault_at_s"] == pytest.approx(30.3)
+    assert m["recovery_s"] is None
+
+
+@pytest.mark.parametrize("kind,action", [("F5-F4", "corrupt_on"), ("F5-F2", "iptables_drop")])
+def test_load_run_f5_kinds(tmp_path, kind, action):
+    spec = "%s:node3+node4@20" % kind
+    rows = [
+        "u,1000000000,-10.000,0.000,%s,run_phase_start,,x" % spec,
+        "u,1000030300,20.300,30.300,%s,%s,node3,d" % (spec, action),
+        "u,1000030700,20.700,30.700,%s,%s,node4,d" % (spec, action),
+    ]
+    tl, fl, _ = write_run(tmp_path, [10] * 40, rows)
+    assert rq3.load_run(tl, fl, None)["fault_at_s"] == pytest.approx(30.3)
+
+
+def test_failed_signal_is_not_an_injection(tmp_path):
+    rows = [
+        "u,1000000000,-10.000,0.000,F4:node4@20,run_phase_start,,x",
+        "u,1000030300,20.300,30.300,F4:node4@20,corrupt_on_failed,node4,d",
+    ]
+    tl, fl, _ = write_run(tmp_path, [10] * 40, rows)
+    with pytest.raises(rq3.InputError, match="injection"):
         rq3.load_run(tl, fl, None)
 
 

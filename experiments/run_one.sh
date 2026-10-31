@@ -54,10 +54,15 @@
 # (0-based). AT must be < DURATION. Every injection (and the RTT netem) is
 # logged with its UTC time, epoch ms and both offsets to
 # results/raw/<EXP>/<tag>.faults. The fault column of the CSV row records
-# FAULT with ',' replaced by '+' (F1:node3+node4@60). F2 for kafka-orig/kafka
-# and F4/F5 need Task 15's --fault flag and are rejected for now; tm-orig has
-# no F2. Nodes F1 stopped on purpose do not count as dead containers (exit 3);
-# a failed injection, or one that never ran, is exit 3 (no CSV row).
+# FAULT with ',' replaced by '+' (F1:node3+node4@60). kafka-orig and tm-orig
+# have no F2, F4 or F5. F2 on kafka, F4 (any core backend, e.g.
+# F4:node4@60) and F5-F4 (tendermint/bft2, f+1 nodes, e.g.
+# F5-F4:node3,node4@60) are veritas --fault flags: the faulty nodes are
+# created with the fault armed (NODE_FAULTS, passed to up.sh) and the injector
+# activates it with SIGUSR1 at AT (logged as silent_on / corrupt_on); F5-F2 is
+# F2 (network) on f+1 nodes. Nodes F1 stopped on purpose do not count as dead
+# containers (exit 3); a failed injection, or one that never ran, is exit 3
+# (no CSV row).
 # Audit (FAULT != none; backends kafka, raft, tendermint, bft2): in parallel
 # with the bench `auditor --interval=1s --node-timeout=800ms` runs in the client container from the
 # run-phase marker on and writes results/raw/<EXP>/<tag>.audit, one line
@@ -165,6 +170,9 @@ watchdog_secs=$(($(dur_seconds "$LOAD_TIMEOUT") + $(dur_seconds "$SETTLE_TIMEOUT
 { echo "$MEM" | grep -Eq '^[0-9]+(\.[0-9]+)?[mMgG]$' && awk -v m="${MEM%?}" 'BEGIN { exit !(m > 0) }'; } ||
   die "MEM must be a positive number with suffix m, g, M or G (e.g. 768m, 2g), got '$MEM'"
 fault_parse "$FAULT" "$BACKEND" "$N" "$(dur_seconds "$DURATION")"
+# Nodes whose veritas runs with --fault armed (FaultPolicy faults; up.sh ->
+# gen_compose.py --node-fault); the injector activates it at AT.
+NODE_FAULTS="$(fault_node_faults)"
 # CSV- and --tags-safe form of FAULT (no commas).
 fault_rec="$(echo "$FAULT" | tr ',' '+')"
 
@@ -195,7 +203,7 @@ run_file="$HBDB_YCSB_DIR/$WORKLOAD.run.dat"
 [ -s "$load_file" ] || die "missing $load_file (run experiments/ycsb/gen.sh)"
 [ -s "$run_file" ] || die "missing $run_file (run experiments/ycsb/gen.sh)"
 
-export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT YCSB_DIR="$HBDB_YCSB_DIR"
+export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS YCSB_DIR="$HBDB_YCSB_DIR"
 
 tag="${BACKEND}_n${N}_f${F}_c${CLIENTS}_b${BLOCK_SIZE}_w${WORKLOAD}_rtt${RTT_MS}_${FAULT}_${COMMIT_MODE}_r${REP}"
 tag="$(echo "$tag" | tr -c 'A-Za-z0-9._\n-' '_')"

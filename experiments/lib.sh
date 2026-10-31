@@ -27,6 +27,9 @@ HBDB_TM_P2P_PORT=26656
 # bft2: HotStuff replica-to-replica port of bft2-node (its local API, 7201,
 # is loopback only and is not a consensus port).
 HBDB_BFT2_PORT=7200
+# File holding the veritas server's pid in every core node container
+# (gen_compose.py VERITAS_PIDFILE); faults.sh fault_signal sends SIGUSR1 there.
+HBDB_VERITAS_PIDFILE=/tmp/hbdb-veritas.pid
 HBDB_ALL_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
 HBDB_IMPLEMENTED_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
 
@@ -119,14 +122,23 @@ hbdb_check_tendermint_limits() {
 # experiments/faults.sh fault_silent_net) drops them. raft: the raft transport
 # and the submit-forward HTTP endpoint; tendermint: the tendermint p2p port;
 # bft2: the HotStuff replica port of bft2-node. Prints nothing for backends
-# without a network-silent mode (kafka-orig, tm-orig, kafka: their F2 is
-# FaultPolicy, Task 15).
+# without a network-silent mode (kafka-orig, tm-orig: none; kafka: its F2 is
+# veritas --fault=silent, FaultPolicy.OnVote).
 hbdb_consensus_ports() {
   case "$1" in
     raft) echo "$HBDB_RAFT_PORT $HBDB_RAFT_FORWARD_PORT" ;;
     tendermint) echo "$HBDB_TM_P2P_PORT" ;;
     bft2) echo "$HBDB_BFT2_PORT" ;;
     *) ;;
+  esac
+}
+
+# hbdb_backend_has_fault_policy BACKEND: true for the veritas-core backends,
+# whose nodes accept veritas --fault (core.FaultPolicy; F2 on kafka, F4, F5-F4).
+hbdb_backend_has_fault_policy() {
+  case "$1" in
+    kafka | raft | tendermint | bft2) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
