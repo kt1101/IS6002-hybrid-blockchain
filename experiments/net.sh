@@ -11,10 +11,19 @@
 # delayed. Everything lives in the container's network namespace, so it is
 # gone when down.sh removes the containers (every run starts a new cluster).
 #
-#   net_set_rtt RTT_MS   netem delay RTT_MS/2 on the egress of node1..node$N:
-#                        node <-> node round trips get RTT_MS (RTT_MS/2 each
-#                        way); client/TSO/kafka <-> node get RTT_MS/2, since
-#                        only the nodes are delayed.
+#   net_set_rtt RTT_MS   netem delay RTT_MS/2 on the egress of node1..node$N
+#                        and, when BACKEND uses them, of the Kafka broker
+#                        (kafka-orig, kafka: service kafka, hbdb-kafka image
+#                        with iproute2) and of the TSO (kafka-orig, kafka,
+#                        raft: service tso); both get NET_ADMIN in
+#                        gen_compose.py. Node <-> node and node <-> broker
+#                        round trips get RTT_MS (RTT_MS/2 each way), so the
+#                        kafka backend's consensus hops see the same RTT as
+#                        raft/tendermint/bft2 peers; client <-> node and
+#                        client <-> TSO get RTT_MS/2 (the client container is
+#                        not delayed: the TSO counts as a remote service
+#                        reached over half the WAN). NET_RTT_EXTRA lists the
+#                        non-node services it delayed ("" = none).
 #   net_delay NODE MS    set NODE's egress delay to MS ms (replace: works with
 #                        or without an earlier qdisc, so it is idempotent);
 #                        MS=0 removes the qdisc. The queue limit is
@@ -52,8 +61,22 @@ net_delay() {
   fi
 }
 
+NET_RTT_EXTRA=""
+
+# net_rtt_services BACKEND: the non-node services net_set_rtt delays too.
+net_rtt_services() {
+  local out=""
+  case "$1" in
+    kafka-orig | kafka) out="kafka" ;;
+  esac
+  if hbdb_backend_uses_tso "$1"; then
+    out="${out:+$out }tso"
+  fi
+  echo "$out"
+}
+
 net_set_rtt() {
-  local rtt="$1" half i
+  local rtt="$1" half i svc
   hbdb_require_uint RTT_MS "$rtt"
   hbdb_check_n "${N:-}"
   half="$(net_half_ms "$rtt")"
@@ -62,6 +85,11 @@ net_set_rtt() {
     net_delay "node$i" "$half" || { log "net_set_rtt: tc failed on node$i"; return 1; }
     i=$((i + 1))
   done
+  NET_RTT_EXTRA=""
+  for svc in $(net_rtt_services "${BACKEND:-}"); do
+    net_delay "$svc" "$half" || { log "net_set_rtt: tc failed on $svc"; return 1; }
+    NET_RTT_EXTRA="${NET_RTT_EXTRA:+$NET_RTT_EXTRA }$svc"
+  done
   NET_BASE_DELAY_MS="$half"
-  log "netem: egress delay ${half}ms on node1..node$N (RTT_MS=$rtt)"
+  log "netem: egress delay ${half}ms on node1..node$N${NET_RTT_EXTRA:+ and $NET_RTT_EXTRA} (RTT_MS=$rtt)"
 }

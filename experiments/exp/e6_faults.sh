@@ -10,7 +10,7 @@
 # measurement window (experiments/faults.sh), REPS=3 reps each. The CSV column
 # f holds f; the fault goes to the last nodes (fault_default_nodes in
 # faults.sh: N=4 -> node4, N=7 -> node7,node6; node1, the raft bootstrap node,
-# is not hit):
+# is not hit except by the leader faults below):
 #   F1 crash        f nodes (docker stop)
 #   F2 silent       f nodes (iptables drop of the consensus ports; kafka:
 #                   veritas --fault=silent, votes withheld only, so ~1/N of
@@ -20,9 +20,19 @@
 #   F5 (tendermint and bft2 only) f+1 nodes, both flavours: F5-F2 (silent,
 #                   liveness) and F5-F4 (corrupt, safety); F5_KINDS selects.
 # Per (N, f): 4 faults x 4 backends + 2 flavours x 2 BFT backends = 20 configs,
-# 40 over both sizes, 120 runs. The auditor runs during every fault run
-# (run_one.sh) and experiments/plot/rq3.py reads the .timeline/.faults/.audit
-# files in results/raw/e6/.
+# 40 over both sizes, 120 runs.
+# Leader faults (E6_LEADER=1, the default; 0 turns them off): for each backend
+# in E6_LEADER_BACKENDS (default "raft kafka") also F1:node1@AT and
+# F3:node1@AT (crash / slow node1, one node). node1 bootstraps the raft
+# configuration, so it is in practice always the raft leader when the fault
+# hits (run_one.sh writes every "entering leader state" line to
+# <tag>.leaders to confirm it); kafka has no leader node (the broker orders),
+# so its node1 runs are the control. tendermint and bft2 rotate the
+# proposer, so node1 is not special there. 2 faults x 2 backends x 2 (N, f) =
+# 8 more configs, 24 more runs (144 in all).
+# The auditor runs during every fault run (run_one.sh) and
+# experiments/plot/rq3.py reads the .timeline/.faults/.audit files in
+# results/raw/e6/.
 #
 # Rows in results/raw/e6.csv. The fault string is in the fault column
 # (F1:node4@60, F1:node7+node6@60, F5-F4:node3+node4@60 ...). Note on the
@@ -30,14 +40,18 @@
 # so a CV above 10% is common; EXTRA_REPS=0 turns the extra reps off.
 #
 # Other env: E6_NF="4:1 7:2" (N:f pairs), E6_AT=60 (injection second),
-# E6_DURATION=180s, F5_KINDS="F5-F2 F5-F4", and the common env, resumability,
-# retry, noise rule and exit codes described in experiments/exp/exp_lib.sh.
+# E6_DURATION=180s, F5_KINDS="F5-F2 F5-F4", E6_LEADER=1,
+# E6_LEADER_BACKENDS="raft kafka", and the common env, resumability, retry,
+# noise rule and exit codes described in experiments/exp/exp_lib.sh.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/exp_lib.sh"
 
 E6_NF="${E6_NF:-4:1 7:2}"
 E6_AT="${E6_AT:-60}"
 F5_KINDS="${F5_KINDS:-F5-F2 F5-F4}"
+E6_LEADER="${E6_LEADER:-1}"
+E6_LEADER_BACKENDS="${E6_LEADER_BACKENDS:-raft kafka}"
+case "$E6_LEADER" in 0 | 1) ;; *) die "E6_LEADER must be 0 or 1, got '$E6_LEADER'" ;; esac
 if [ -n "${DURATION:-}" ] && [ "$DURATION" != "${E6_DURATION:-180s}" ]; then
   log "note: DURATION=$DURATION is ignored: E6 runs DURATION=${E6_DURATION:-180s} (the fault is at second ${E6_AT}); set E6_DURATION to change it"
 fi
@@ -52,6 +66,9 @@ for p in $E6_NF; do
 done
 for k in $F5_KINDS; do
   case "$k" in F5-F2 | F5-F4) ;; *) die "F5_KINDS entries must be F5-F2 or F5-F4, got '$k'" ;; esac
+done
+for b in $E6_LEADER_BACKENDS; do
+  hbdb_in_list "$b" "$EXP_BACKENDS_ALL" || die "E6_LEADER_BACKENDS: '$b' is not an E1-E6 backend (one of: $EXP_BACKENDS_ALL)"
 done
 
 exp_plan() {
@@ -69,6 +86,11 @@ exp_plan() {
         nodes5="$(fault_default_nodes "$n" $((f + 1)))"
         for kind in $F5_KINDS; do
           exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:$nodes5@$E6_AT"
+        done
+      fi
+      if [ "$E6_LEADER" = 1 ] && hbdb_in_list "$b" "$E6_LEADER_BACKENDS"; then
+        for kind in F1 F3; do
+          exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:node1@$E6_AT"
         done
       fi
     done

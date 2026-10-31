@@ -445,6 +445,9 @@ def _tm_orig_node(i, n, block_size, memlimit):
 
 def _kafka_service():
     s = _service(KAFKA_IMAGE, "kafka", KAFKA_IP, KAFKA_CPUS, KAFKA_MEM)
+    # E5 RTT: experiments/net.sh delays the broker's egress with tc netem too
+    # (iproute2 is in Dockerfile.kafka).
+    s["cap_add"] = ["NET_ADMIN"]
     s["working_dir"] = "/opt/kafka"
     s["command"] = _bash([
         "set -u",
@@ -553,6 +556,7 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
 
     if uses_tso(backend):
         tso = _service(NODE_IMAGE, "tso", TSO_IP, TSO_CPUS, TSO_MEM)
+        tso["cap_add"] = ["NET_ADMIN"]  # E5 RTT: net.sh delays the TSO's egress too
         tso["working_dir"] = "/data"  # the oracle writes orc.log into its cwd
         tso["command"] = ["veritas-tso", "--addr=:%d" % TSO_PORT]
         tso["volumes"] = ["tso-data:/data"]

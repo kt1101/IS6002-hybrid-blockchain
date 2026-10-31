@@ -13,7 +13,10 @@
 // API of the bft2-node HotStuff sidecar on the same container, --bft2-api;
 // it requires --version-mode=ordered).
 // On SIGTERM/SIGINT the core path closes the server, writes its time
-// breakdown to --breakdown-out and exits.
+// breakdown to --breakdown-out and exits. Every SIGUSR2 writes a snapshot of
+// the (cumulative) breakdown next to it, the k-th one to
+// <breakdown-out without .json>.snap<k>.json (the harness signals at the
+// start and at the end of the measurement window).
 //
 // Fault injection (RQ3, core path only): --fault=silent (kafka only: the node
 // sends no votes, F2) or --fault=corrupt (every applied value gets the
@@ -329,6 +332,9 @@ func runCore() {
 		FlushInterval: *batchFlush, // > 0 (checked above)
 	}, cons, ex, l)
 	drops.set(srv.AbortBlock)
+	// SIGUSR2: breakdown snapshots for the measurement window (the harness
+	// signals at its start and its end; experiments/run_one.sh).
+	watchSnapshotSignal(srv.WriteBreakdownJSON, out)
 
 	gs := grpc.NewServer()
 	pbv.RegisterNodeServer(gs, srv)
@@ -481,6 +487,36 @@ func watchFaultSignal(fp core.FaultPolicy, spec, activeFile string) error {
 		}
 	}()
 	return nil
+}
+
+// snapshotPath is the file of the k-th SIGUSR2 breakdown snapshot (k >= 1)
+// for the breakdown file out: out without its ".json" suffix, then
+// ".snap<k>.json" (/results/breakdown-node1.json -> .../breakdown-node1.snap1.json).
+func snapshotPath(out string, k int) string {
+	return fmt.Sprintf("%s.snap%d.json", strings.TrimSuffix(out, ".json"), k)
+}
+
+// watchSnapshotSignal makes the k-th SIGUSR2 (k = 1, 2, ...) write the
+// node's cumulative breakdown to snapshotPath(out, k) through write
+// (core.Server.WriteBreakdownJSON), so the harness gets the blocks applied
+// inside the measurement window as the difference of two snapshots (the
+// breakdown at SIGTERM also covers the load phase). A failed write is only
+// logged. It returns after the handler is installed.
+func watchSnapshotSignal(write func(path string) error, out string) {
+	ch := make(chan os.Signal, 4)
+	signal.Notify(ch, syscall.SIGUSR2)
+	go func() {
+		k := 0
+		for range ch {
+			k++
+			p := snapshotPath(out, k)
+			if err := write(p); err != nil {
+				log.Printf("SIGUSR2: write breakdown snapshot %s: %v", p, err)
+				continue
+			}
+			log.Printf("SIGUSR2: breakdown snapshot %d written to %s", k, p)
+		}
+	}()
 }
 
 // writeFileAtomic writes data to path through a temporary file and a rename,

@@ -172,3 +172,88 @@ hbdb_check_n() {
   [ "$1" -ge 1 ] || die "N must be >= 1"
   [ "$1" -le 200 ] || die "N must be <= 200 (node IPs are 172.28.0.(10+i))"
 }
+
+# ---- per-container docker stats (run_one.sh <tag>.stats) ----
+# Format given to `docker stats --no-stream --format`.
+HBDB_STATS_FORMAT='{{.Name}},{{.CPUPerc}},{{.MemUsage}},{{.NetIO}}'
+# Header of results/raw/<EXP>/<tag>.stats: one line per container and sample.
+# epoch_ms/utc: host clock just before the `docker stats` call of the sample
+# (every container of one call shares them); cpu_pct as docker prints it
+# without '%'; mem_used/mem_limit/net_rx/net_tx: docker's strings (MemUsage
+# in KiB/MiB/GiB, NetIO in decimal kB/MB/GB, cumulative since the container
+# started, about 3-4 significant digits); *_bytes: the same parsed to bytes.
+HBDB_STATS_HEADER="epoch_ms,utc,name,cpu_pct,mem_used,mem_limit,net_rx,net_tx,mem_used_bytes,net_rx_bytes,net_tx_bytes"
+
+# hbdb_stats_lines EPOCH_MS UTC: turn `docker stats` lines in
+# HBDB_STATS_FORMAT (stdin) into HBDB_STATS_HEADER lines (stdout). Lines with
+# fewer than 4 fields are dropped.
+hbdb_stats_lines() {
+  awk -F, -v ms="$1" -v utc="$2" '
+    function bytes(s,   num, unit, m) {
+      gsub(/ /, "", s)
+      num = s
+      sub(/[A-Za-z]+$/, "", num)
+      unit = substr(s, length(num) + 1)
+      if (num == "" || num !~ /^[0-9.]+$/) return ""
+      if (unit == "B" || unit == "") m = 1
+      else if (unit == "kB" || unit == "KB") m = 1000
+      else if (unit == "MB") m = 1000000
+      else if (unit == "GB") m = 1000000000
+      else if (unit == "TB") m = 1000000000000
+      else if (unit == "KiB") m = 1024
+      else if (unit == "MiB") m = 1048576
+      else if (unit == "GiB") m = 1073741824
+      else if (unit == "TiB") m = 1099511627776
+      else return ""
+      return sprintf("%.0f", num * m)
+    }
+    NF >= 4 {
+      cpu = $2; gsub(/[% ]/, "", cpu)
+      n = split($3, mem, " / ")
+      if (n < 2) { mem[1] = $3; mem[2] = "" }
+      n = split($4, io, " / ")
+      if (n < 2) { io[1] = $4; io[2] = "" }
+      gsub(/ /, "", mem[1]); gsub(/ /, "", mem[2]); gsub(/ /, "", io[1]); gsub(/ /, "", io[2])
+      printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", ms, utc, $1, cpu, mem[1], mem[2], io[1], io[2], bytes(mem[1]), bytes(io[1]), bytes(io[2])
+    }'
+}
+
+# hbdb_json_int FILE KEY: the integer value of top-level "KEY": <int> in a
+# JSON file written with one key per line (core.WriteBreakdownJSON); prints
+# nothing if FILE or KEY is missing.
+hbdb_json_int() {
+  [ -f "$1" ] || return 0
+  awk -v k="\"$2\":" '$1 == k { v = $2; gsub(/[^0-9-]/, "", v); print v; exit }' "$1"
+}
+
+# hbdb_net_bytes_per_block STATS T1_MS T2_MS BLOCKS1 BLOCKS2: net_bytes_per_block
+# of a run: the sum of net_tx_bytes of the node containers (name nodeK) and of
+# the Kafka broker (name kafka; part of the kafka backends' consensus path) in
+# the sample closest to T2_MS minus the same sum in the sample closest to
+# T1_MS, divided by BLOCKS2 - BLOCKS1 (blocks applied on node1 between the two
+# breakdown snapshots), rounded to whole bytes. Client, TSO and other
+# containers are not counted. Prints nothing (and returns 1) when the stats
+# lack a sample, both instants map to the same sample, or no block was applied.
+hbdb_net_bytes_per_block() {
+  local stats="$1" t1="$2" t2="$3" b1="$4" b2="$5"
+  [ -s "$stats" ] && [ -n "$t1" ] && [ -n "$t2" ] && [ -n "$b1" ] && [ -n "$b2" ] || return 1
+  [ $((b2 - b1)) -gt 0 ] || return 1
+  awk -F, -v t1="$t1" -v t2="$t2" -v db="$((b2 - b1))" '
+    NR == 1 && $1 == "epoch_ms" { next }
+    $3 ~ /(^|[-_])node[0-9]+([-_]|$)/ || $3 ~ /(^|[-_])kafka([-_]|$)/ {
+      if ($11 == "") { bad[$1] = 1; next }
+      tx[$1] += $11; seen[$1] = 1
+    }
+    function absd(a) { return a < 0 ? -a : a }
+    END {
+      for (t in seen) {
+        if (t in bad) continue
+        if (s1 == "" || absd(t - t1) < absd(s1 - t1)) s1 = t
+        if (s2 == "" || absd(t - t2) < absd(s2 - t2)) s2 = t
+      }
+      if (s1 == "" || s2 == "" || s1 == s2) exit 1
+      v = (tx[s2] - tx[s1]) / db
+      if (v < 0) exit 1
+      printf "%.0f\n", v
+    }' "$stats"
+}

@@ -26,21 +26,42 @@ type Summary struct {
 	WrongGets int64
 }
 
+// OpKind classifies an observation for the per-kind statistics (OpSummaries,
+// SetTimeline). Every kind counts in Summary and Timeline.
+type OpKind int
+
+const (
+	// OpOther is an observation of Observe: counted in Summary and Timeline
+	// only, in no per-kind statistic.
+	OpOther OpKind = iota
+	// OpRead is an observation of ObserveGet.
+	OpRead
+	// OpWrite is an observation of ObserveSet.
+	OpWrite
+	numOpKinds
+)
+
+// kindStats are the in-window observations of one OpKind.
+type kindStats struct {
+	lats   []time.Duration // successful ops inside the window
+	errors int64           // failed ops inside the window
+}
+
 // Recorder collects per-request observations of a time-based run. Only
 // observations inside [start+warmup, start+warmup+duration) contribute to the
-// Summary; the Timeline additionally covers the warmup phase. Safe for
-// concurrent use.
+// Summary and the OpSummaries; the Timeline and the SetTimeline additionally
+// cover the warmup phase. Safe for concurrent use.
 type Recorder struct {
 	mu        sync.Mutex
 	warmup    time.Duration
 	duration  time.Duration
 	start     time.Time
-	lats      []time.Duration // successful ops inside the window
-	errors    int64
+	kinds     [numOpKinds]kindStats
 	wrongGets int64
 	errKinds  map[string]int64 // in-window errors by message, at most MaxErrorKinds keys
 	errOther  int64            // in-window errors whose message did not fit in errKinds
 	timeline  []int64          // successful ops per second since start, incl. warmup
+	wtimeline []int64          // successful Sets (ObserveSet) per second since start, incl. warmup
 }
 
 // NewRecorder creates a Recorder for a run that began at start.
@@ -51,26 +72,34 @@ func NewRecorder(warmup, duration time.Duration, start time.Time) *Recorder {
 		secs = 0
 	}
 	return &Recorder{
-		warmup:   warmup,
-		duration: duration,
-		start:    start,
-		timeline: make([]int64, secs),
+		warmup:    warmup,
+		duration:  duration,
+		start:     start,
+		timeline:  make([]int64, secs),
+		wtimeline: make([]int64, secs),
 	}
 }
 
-// Observe records one finished request: at is its completion time, lat its
-// latency, err its outcome.
+// Observe records one finished request of no particular kind (OpOther): at
+// is its completion time, lat its latency, err its outcome. It counts in
+// Summary and Timeline, not in OpSummaries.
 func (r *Recorder) Observe(at time.Time, lat time.Duration, err error) {
-	r.observe(at, lat, err, false)
+	r.observe(OpOther, at, lat, err, false)
 }
 
-// ObserveGet is Observe for a Get; a successful Get whose value ends with
-// CorruptMarker is also counted as a wrong get.
+// ObserveGet records a finished Get (OpRead); a successful Get whose value
+// ends with CorruptMarker is also counted as a wrong get.
 func (r *Recorder) ObserveGet(at time.Time, lat time.Duration, val string, err error) {
-	r.observe(at, lat, err, err == nil && strings.HasSuffix(val, CorruptMarker))
+	r.observe(OpRead, at, lat, err, err == nil && strings.HasSuffix(val, CorruptMarker))
 }
 
-func (r *Recorder) observe(at time.Time, lat time.Duration, err error, wrong bool) {
+// ObserveSet records a finished Set (OpWrite); a successful one also counts
+// in SetTimeline.
+func (r *Recorder) ObserveSet(at time.Time, lat time.Duration, err error) {
+	r.observe(OpWrite, at, lat, err, false)
+}
+
+func (r *Recorder) observe(kind OpKind, at time.Time, lat time.Duration, err error, wrong bool) {
 	off := at.Sub(r.start)
 	if off < 0 || off >= r.warmup+r.duration {
 		return
@@ -79,18 +108,22 @@ func (r *Recorder) observe(at time.Time, lat time.Duration, err error, wrong boo
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	k := &r.kinds[kind]
 	if err != nil {
 		if inWindow {
-			r.errors++
+			k.errors++
 			r.countErrorKind(err.Error())
 		}
 		return
 	}
 	if sec := int(off / time.Second); sec < len(r.timeline) {
 		r.timeline[sec]++
+		if kind == OpWrite {
+			r.wtimeline[sec]++
+		}
 	}
 	if inWindow {
-		r.lats = append(r.lats, lat)
+		k.lats = append(k.lats, lat)
 		if wrong {
 			r.wrongGets++
 		}
@@ -150,30 +183,107 @@ func (r *Recorder) ErrorKinds() []ErrorKind {
 	return out
 }
 
-// Summary aggregates the observations recorded so far.
-func (r *Recorder) Summary() Summary {
-	r.mu.Lock()
-	lats := make([]time.Duration, len(r.lats))
-	copy(lats, r.lats)
-	s := Summary{Errors: r.errors, WrongGets: r.wrongGets}
-	r.mu.Unlock()
+// latStats are the count and latency statistics of a set of latencies.
+type latStats struct {
+	n                    int
+	meanMs, p50Ms, p99Ms float64
+}
 
-	n := len(lats)
-	if r.duration > 0 {
-		s.TPS = float64(n) / r.duration.Seconds()
-	}
-	if n == 0 {
-		return s
+// summarize sorts lats in place and returns their statistics (zero
+// latencies when lats is empty).
+func summarize(lats []time.Duration) latStats {
+	st := latStats{n: len(lats)}
+	if st.n == 0 {
+		return st
 	}
 	sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
 	var sum time.Duration
 	for _, l := range lats {
 		sum += l
 	}
-	s.LatMeanMs = toMs(sum) / float64(n)
-	s.LatP50Ms = toMs(percentile(lats, 0.50))
-	s.LatP99Ms = toMs(percentile(lats, 0.99))
+	st.meanMs = toMs(sum) / float64(st.n)
+	st.p50Ms = toMs(percentile(lats, 0.50))
+	st.p99Ms = toMs(percentile(lats, 0.99))
+	return st
+}
+
+// Summary aggregates the observations recorded so far over every kind (the
+// CSV row: reads, writes and OpOther together).
+func (r *Recorder) Summary() Summary {
+	r.mu.Lock()
+	var lats []time.Duration
+	s := Summary{WrongGets: r.wrongGets}
+	for i := range r.kinds {
+		lats = append(lats, r.kinds[i].lats...)
+		s.Errors += r.kinds[i].errors
+	}
+	r.mu.Unlock()
+
+	st := summarize(lats)
+	if r.duration > 0 {
+		s.TPS = float64(st.n) / r.duration.Seconds()
+	}
+	s.LatMeanMs, s.LatP50Ms, s.LatP99Ms = st.meanMs, st.p50Ms, st.p99Ms
 	return s
+}
+
+// OpSummary is the measurement-window result of one operation kind: Count
+// successful ops (TPS = Count / duration), their latency mean, p50 and p99,
+// and Errors failed ops.
+type OpSummary struct {
+	Op        string // "read" or "write"
+	Count     int64
+	TPS       float64
+	LatMeanMs float64
+	LatP50Ms  float64
+	LatP99Ms  float64
+	Errors    int64
+}
+
+// OpSummaries returns the read (ObserveGet) and the write (ObserveSet)
+// summaries, in that order; OpOther observations (Observe) are in neither.
+func (r *Recorder) OpSummaries() []OpSummary {
+	kinds := []struct {
+		kind OpKind
+		name string
+	}{{OpRead, "read"}, {OpWrite, "write"}}
+	out := make([]OpSummary, 0, len(kinds))
+	for _, k := range kinds {
+		r.mu.Lock()
+		lats := make([]time.Duration, len(r.kinds[k.kind].lats))
+		copy(lats, r.kinds[k.kind].lats)
+		errs := r.kinds[k.kind].errors
+		r.mu.Unlock()
+		st := summarize(lats)
+		o := OpSummary{Op: k.name, Count: int64(st.n), Errors: errs,
+			LatMeanMs: st.meanMs, LatP50Ms: st.p50Ms, LatP99Ms: st.p99Ms}
+		if r.duration > 0 {
+			o.TPS = float64(st.n) / r.duration.Seconds()
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
+// OpsCSVHeader is the header line of the per-run ops sidecar (WriteOpsCSV).
+const OpsCSVHeader = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors"
+
+// WriteOpsCSV writes ops (OpSummaries) to path as a small CSV: the
+// OpsCSVHeader line, then one line per kind (experiments/run_one.sh keeps it
+// as results/raw/<EXP>/<tag>.ops.csv next to the 22-column row).
+func WriteOpsCSV(path string, ops []OpSummary) error {
+	var sb strings.Builder
+	sb.WriteString(OpsCSVHeader)
+	sb.WriteByte('\n')
+	for _, o := range ops {
+		fmt.Fprintf(&sb, "%s,%d,%s,%s,%s,%s,%d\n", o.Op, o.Count,
+			strconv.FormatFloat(o.TPS, 'f', 2, 64),
+			strconv.FormatFloat(o.LatMeanMs, 'f', 3, 64),
+			strconv.FormatFloat(o.LatP50Ms, 'f', 3, 64),
+			strconv.FormatFloat(o.LatP99Ms, 'f', 3, 64),
+			o.Errors)
+	}
+	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }
 
 // Timeline returns the number of successful requests per second since start
@@ -183,6 +293,16 @@ func (r *Recorder) Timeline() []int64 {
 	defer r.mu.Unlock()
 	out := make([]int64, len(r.timeline))
 	copy(out, r.timeline)
+	return out
+}
+
+// SetTimeline is Timeline restricted to successful Sets (ObserveSet): same
+// length, same t=0 (index 0 is the first second of the warmup).
+func (r *Recorder) SetTimeline() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]int64, len(r.wtimeline))
+	copy(out, r.wtimeline)
 	return out
 }
 

@@ -8,4 +8,10 @@ RUN apt-get update \
 RUN curl -fsSL https://archive.apache.org/dist/kafka/2.7.0/kafka_2.12-2.7.0.tgz | tar -xz -C /opt \
  && ln -s /opt/kafka_2.12-2.7.0 /opt/kafka
 
+# tc (netem) for the E5 RTT on the broker's egress (experiments/net.sh); a
+# separate layer so the cached Kafka download above is reused.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends iproute2 \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /opt/kafka

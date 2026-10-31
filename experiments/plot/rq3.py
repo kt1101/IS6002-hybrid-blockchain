@@ -46,12 +46,24 @@ Conventions
 Loader output (load_run / CLI), all times in seconds relative to fault_at_s
 unless named otherwise
 ------------------------------------------------------------------------
+* Recovery threshold: 0.9 x pre_mean x share, share = (N - k) / N for a
+  fault that takes k of the N nodes out of the cluster (F1 `docker_stop`,
+  network F2 / F5-F2 `iptables_drop`; k = the distinct nodes of those rows),
+  else share = 1.  The closed-loop clients are bound statically to nodes
+  (driver j -> node j mod N), so the clients of a stopped or partitioned node
+  produce ~0 tps whatever the protocol does, and post-fault throughput is
+  capped near share x pre_mean in the latency-bound regime; without the
+  factor `recovered` would be unreachable by construction.  Kafka F2
+  (silent_on: votes withheld, the node keeps serving) and F3/F4 keep
+  share = 1.  N comes from the `_n<N>_` part of the run tag (main) or the n
+  argument of load_run; unknown N -> share = 1.  Reported as
+  recovery_threshold_tps (with threshold_share, faulty_nodes, n).
 * The effect of a fault can lag the injection row (a graceful `docker stop`,
   client timeouts), so the headline numbers are measured from the DIP, the
-  first full second after the fault below 0.9 x pre_mean:
+  first full second after the fault below the recovery threshold:
     dip_start_s            that second minus fault_at (None: no dip)
     min_after_fault_tps    lowest per-second throughput after the fault
-    recovery_s             first second >= 0.9 x pre_mean AFTER the dip, minus
+    recovery_s             first second >= the threshold AFTER the dip, minus
                            fault_at; recovery_from_dip_s = recovery_s - dip_start_s
     recovery_status        recovered | no_dip | not_recovered | no_baseline
                            (no_dip: throughput never fell below the threshold,
@@ -78,10 +90,14 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import re
 import sys
 from pathlib import Path
 
-RECOVERY_FRACTION = 0.9  # recovered = throughput >= 0.9 x pre-fault mean
+RECOVERY_FRACTION = 0.9  # recovered = throughput >= 0.9 x pre-fault mean (x share)
+# Injection actions that take their nodes out of the cluster (their clients
+# then produce ~0 tps): F1 docker stop, network-level F2 / F5-F2.
+OUT_ACTIONS = ("docker_stop", "iptables_drop")
 FAULTS_COLUMNS = ["utc", "epoch_ms", "t_s", "timeline_s", "fault", "action", "node", "detail"]
 # faults.sh actions logged right before a fault is applied, per fault kind (the
 # *_failed and the "applied"/"stopped" completion rows are not injections).
@@ -113,19 +129,19 @@ def _first_full_second(fault_at):
     return max(int(math.ceil(fault_at)), 0)
 
 
-def dip_start_index(timeline, fault_at, pre_mean):
-    """Index of the first full second after the fault below 0.9 x pre_mean, or
-    None (no dip, or pre_mean is None or not positive)."""
+def dip_start_index(timeline, fault_at, pre_mean, share=1.0):
+    """Index of the first full second after the fault below 0.9 x pre_mean x
+    share, or None (no dip, or pre_mean is None or not positive)."""
     if pre_mean is None or not pre_mean > 0:
         return None
-    need = RECOVERY_FRACTION * pre_mean - 1e-9
+    need = RECOVERY_FRACTION * pre_mean * share - 1e-9
     for i in range(_first_full_second(fault_at), len(timeline)):
         if timeline[i] < need:
             return i
     return None
 
 
-def recovery_time(timeline, fault_at, pre_mean, after_dip=False):
+def recovery_time(timeline, fault_at, pre_mean, after_dip=False, share=1.0):
     """Seconds after the fault until throughput is back to >= 0.9 x pre_mean.
 
     Looks at the full seconds from ceil(fault_at) on; returns
@@ -137,16 +153,19 @@ def recovery_time(timeline, fault_at, pre_mean, after_dip=False):
     after_dip=True (used by load_run): only seconds after the first
     sub-threshold second count, so a fault whose effect lags the injection is
     not "recovered" at once; None if there is no dip at all.
+
+    share (0 < share <= 1) scales the threshold to 0.9 * pre_mean * share
+    (see "Recovery threshold" in the module doc).
     """
     if pre_mean is None or not pre_mean > 0:
         return None
     first = _first_full_second(fault_at)
     if after_dip:
-        dip = dip_start_index(timeline, fault_at, pre_mean)
+        dip = dip_start_index(timeline, fault_at, pre_mean, share)
         if dip is None:
             return None
         first = dip + 1
-    need = RECOVERY_FRACTION * pre_mean - 1e-9
+    need = RECOVERY_FRACTION * pre_mean * share - 1e-9
     for i in range(first, len(timeline)):
         if timeline[i] >= need:
             return float(i - fault_at)
@@ -306,7 +325,29 @@ def _num(row, col, path):
         raise InputError("%s: bad %s %r in the %s row" % (path, col, row[col], row["action"]))
 
 
-def load_run(timeline_path, faults_path, audit_path=None):
+def faulty_nodes(rows):
+    """Distinct nodes that the OUT_ACTIONS rows of a .faults file took out."""
+    out = set()
+    for r in rows:
+        if r["action"] in OUT_ACTIONS:
+            out.update(t for t in r["node"].split("+") if t)
+    return sorted(out)
+
+
+def threshold_share(n, k):
+    """(n - k) / n, or 1.0 when n is unknown or k is 0 (see the module doc)."""
+    if not n or not k or k >= n:
+        return 1.0
+    return (n - k) / float(n)
+
+
+def n_from_tag(prefix):
+    """N of a run tag like .../raft_n4_f1_c64_... (None if there is none)."""
+    m = re.search(r"_n([0-9]+)_", Path(str(prefix)).name)
+    return int(m.group(1)) if m else None
+
+
+def load_run(timeline_path, faults_path, audit_path=None, n=None):
     """RQ3 metrics of one run (a dict, see main for the keys).
 
     fault_at_s = timeline_s of the first (earliest) injection row of the .faults
@@ -339,6 +380,8 @@ def load_run(timeline_path, faults_path, audit_path=None):
 
     window = timeline[warmup:int(math.floor(fault_at))]
     pre_mean = sum(window) / len(window) if window else None
+    out_nodes = faulty_nodes(rows)
+    share = threshold_share(n, len(out_nodes))
     warnings = []
     audit = None
     if audit_path is not None:
@@ -355,8 +398,8 @@ def load_run(timeline_path, faults_path, audit_path=None):
 
     first_full = _first_full_second(fault_at)
     after = timeline[first_full:]
-    dip = dip_start_index(timeline, fault_at, pre_mean)
-    recovery = recovery_time(timeline, fault_at, pre_mean, after_dip=True)
+    dip = dip_start_index(timeline, fault_at, pre_mean, share)
+    recovery = recovery_time(timeline, fault_at, pre_mean, after_dip=True, share=share)
     if pre_mean is None or not pre_mean > 0:
         status = "no_baseline"
     elif dip is None:
@@ -372,6 +415,10 @@ def load_run(timeline_path, faults_path, audit_path=None):
         "fault_at_s": r3(fault_at),
         "warmup_s": warmup,
         "pre_mean_tps": r3(pre_mean),
+        "n": n,
+        "faulty_nodes": len(out_nodes),
+        "threshold_share": r3(share),
+        "recovery_threshold_tps": r3(None if pre_mean is None else RECOVERY_FRACTION * pre_mean * share),
         "dip_start_s": r3(dip_s),
         "min_after_fault_tps": r3(min(after)) if after else None,
         "recovery_s": r3(recovery),
@@ -398,7 +445,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     audit = Path(args.prefix + ".audit")
     try:
-        m = load_run(args.prefix + ".timeline", args.prefix + ".faults", audit if audit.exists() else None)
+        m = load_run(args.prefix + ".timeline", args.prefix + ".faults", audit if audit.exists() else None,
+                     n=n_from_tag(args.prefix))
     except InputError as e:
         print("rq3: %s" % e, file=sys.stderr)
         return 2

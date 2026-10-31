@@ -290,6 +290,26 @@ eq "rtt exec count" "$(grep -c 'tc qdisc replace dev eth0 root netem delay 10ms'
 for i in 1 2 3 4; do
   grep -q "^compose exec -T node$i tc qdisc replace dev eth0 root netem delay 10ms limit 100000$" "$CALLS" && ok || bad "rtt node$i"
 done
+eq "rtt no backend: no extra service" "$NET_RTT_EXTRA" ""
+# I5: the broker and the TSO get the same RTT_MS/2 egress delay.
+reset
+N=4
+BACKEND=raft net_set_rtt 20 2>/dev/null
+eq "rtt raft: nodes + tso" "$(grep -c 'tc qdisc replace dev eth0 root netem delay 10ms' "$CALLS")" 5
+grep -q "^compose exec -T tso tc qdisc replace dev eth0 root netem delay 10ms limit 100000$" "$CALLS" && ok || bad "rtt raft tso"
+grep -q "exec -T kafka " "$CALLS" && bad "rtt raft: kafka delayed" || ok
+eq "rtt raft extra" "$NET_RTT_EXTRA" "tso"
+reset
+N=4
+BACKEND=kafka net_set_rtt 20 2>/dev/null
+eq "rtt kafka: nodes + kafka + tso" "$(grep -c 'tc qdisc replace dev eth0 root netem delay 10ms' "$CALLS")" 6
+grep -q "^compose exec -T kafka tc qdisc replace dev eth0 root netem delay 10ms limit 100000$" "$CALLS" && ok || bad "rtt kafka broker"
+eq "rtt kafka extra" "$NET_RTT_EXTRA" "kafka tso"
+eq "rtt services kafka-orig" "$(net_rtt_services kafka-orig)" "kafka tso"
+for b in tendermint bft2 tm-orig; do
+  eq "rtt services $b" "$(net_rtt_services "$b")" ""
+done
+grep -q 'install -y --no-install-recommends iproute2' "$HERE/docker/Dockerfile.kafka" && ok || bad "Dockerfile.kafka lacks iproute2 (tc)"
 reset
 N=4
 net_set_rtt 0 2>/dev/null
@@ -299,6 +319,52 @@ N=2
 COMPOSE_EXEC_RC=1
 (net_set_rtt 20) 2>/dev/null; rc=$?
 eq "rtt tc failure" "$rc" 1
+
+# ---- lib.sh: docker stats sidecar, breakdown JSON, net_bytes_per_block ----
+eq "stats header" "$HBDB_STATS_HEADER" "epoch_ms,utc,name,cpu_pct,mem_used,mem_limit,net_rx,net_tx,mem_used_bytes,net_rx_bytes,net_tx_bytes"
+r="$(printf '%s\n' 'hbdb-node1-1,12.34%,123.5MiB / 768MiB,1.5MB / 2.25kB' 'hbdb-kafka-1,0.00%,0B / 0B,0B / 0B' 'junk' |
+  hbdb_stats_lines 1000 2026-10-31T00:00:00Z)"
+eq "stats line parsed" "$(echo "$r" | sed -n 1p)" "1000,2026-10-31T00:00:00Z,hbdb-node1-1,12.34,123.5MiB,768MiB,1.5MB,2.25kB,129499136,1500000,2250"
+eq "stats zero line" "$(echo "$r" | sed -n 2p)" "1000,2026-10-31T00:00:00Z,hbdb-kafka-1,0.00,0B,0B,0B,0B,0,0,0"
+eq "stats junk line dropped" "$(echo "$r" | grep -c .)" 2
+r="$(printf '%s\n' 'c,--,-- / --,-- / --' | hbdb_stats_lines 1 u)"
+eq "stats unparsable sizes left empty" "$r" "1,u,c,--,--,--,--,--,,,"
+eq "stats GiB/GB" "$(printf '%s\n' 'x,1%,1.5GiB / 2GiB,3GB / 1TB' | hbdb_stats_lines 1 u | cut -d, -f9-11)" "1610612736,3000000000,1000000000000"
+JS="$TMP_ROOT/snap.json"
+printf '{\n  "node": 1,\n  "batch_ns": 7,\n  "blocks": 1234,\n  "batch_blocks": 99,\n  "dropped_blocks": 3\n}\n' >"$JS"
+eq "json blocks (not batch_blocks)" "$(hbdb_json_int "$JS" blocks)" 1234
+eq "json dropped" "$(hbdb_json_int "$JS" dropped_blocks)" 3
+eq "json missing key" "$(hbdb_json_int "$JS" nope)" ""
+eq "json missing file" "$(hbdb_json_int "$TMP_ROOT/none.json" blocks)" ""
+ST="$TMP_ROOT/stats.csv"
+{
+  echo "$HBDB_STATS_HEADER"
+  # sample at 1000: node tx 1000+2000, kafka 500, client/tso ignored
+  echo "1000,u,hbdb-node1-1,1,a,b,c,d,1,0,1000"
+  echo "1000,u,hbdb-node2-1,1,a,b,c,d,1,0,2000"
+  echo "1000,u,hbdb-kafka-1,1,a,b,c,d,1,0,500"
+  echo "1000,u,hbdb-client-1,1,a,b,c,d,1,0,99999"
+  echo "1000,u,hbdb-tso-1,1,a,b,c,d,1,0,77777"
+  # sample at 2500
+  echo "2500,u,hbdb-node1-1,1,a,b,c,d,1,0,1500"
+  echo "2500,u,hbdb-node2-1,1,a,b,c,d,1,0,2500"
+  echo "2500,u,hbdb-kafka-1,1,a,b,c,d,1,0,700"
+  # sample at 9000: +10000 node bytes
+  echo "9000,u,hbdb-node1-1,1,a,b,c,d,1,0,11500"
+  echo "9000,u,hbdb-node2-1,1,a,b,c,d,1,0,2500"
+  echo "9000,u,hbdb-kafka-1,1,a,b,c,d,1,0,1700"
+  echo "9000,u,hbdb-client-1,1,a,b,c,d,1,0,0"
+} >"$ST"
+# t1=1200 -> sample 1000 (3500 bytes), t2=8000 -> sample 9000 (15700): 12200 / 4 blocks
+eq "net bytes per block" "$(hbdb_net_bytes_per_block "$ST" 1200 8000 6 10)" 3050
+eq "net bytes per block: closest samples" "$(hbdb_net_bytes_per_block "$ST" 2400 2600 0 2)" ""
+eq "net bytes per block: one sample apart" "$(hbdb_net_bytes_per_block "$ST" 1000 2600 0 2)" 600
+hbdb_net_bytes_per_block "$ST" 1000 9000 5 5 >/dev/null && bad "net bytes per block with 0 blocks" || ok
+hbdb_net_bytes_per_block "$ST" 1000 9000 "" 5 >/dev/null && bad "net bytes per block without a snapshot" || ok
+hbdb_net_bytes_per_block "$TMP_ROOT/none.csv" 1000 9000 1 5 >/dev/null && bad "net bytes per block without stats" || ok
+printf '%s\n%s\n' "$HBDB_STATS_HEADER" "1000,u,hbdb-node1-1,1,a,b,c,d,1,0," >"$TMP_ROOT/stats1.csv"
+echo "2000,u,hbdb-node1-1,1,a,b,c,d,1,0,99" >>"$TMP_ROOT/stats1.csv"
+hbdb_net_bytes_per_block "$TMP_ROOT/stats1.csv" 1000 2000 1 5 >/dev/null && bad "net bytes per block from an unparsed sample" || ok
 
 # ---- wait arithmetic ----
 reset
@@ -696,7 +762,19 @@ svc_of() { case "$1" in ck) echo client ;; c*) echo "node${1#c}" ;; esac; }
 case "$1" in
   events) exec sleep 600 ;;
   info) echo 4; exit 0 ;;
-  stats) for a; do case "$a" in c*) echo "1.00%" ;; esac; done; sleep 0.2; exit 0 ;;
+  stats)
+    # One line per container in run_one.sh's format; every node's tx grows
+    # by 100 kB per call (STUB_STATS_FAIL=1: print nothing, exit 1).
+    [ -z "${STUB_STATS_FAIL:-}" ] || exit 1
+    k=$(($(cat "$STUB_STATE/stats_n" 2>/dev/null || echo 0) + 1))
+    echo "$k" >"$STUB_STATE/stats_n"
+    for a; do
+      case "$a" in
+        c*) echo "hbdb-$(svc_of "$a")-1,1.00%,10.5MiB / 768MiB,1.5MB / $((k * 100))kB" ;;
+      esac
+    done
+    sleep 0.2
+    exit 0 ;;
   ps) printf 'c1\nc2\nc3\nc4\nck\n'; exit 0 ;;
   inspect)
     for id; do :; done
@@ -713,6 +791,15 @@ case "$1" in
     shift 5 # compose -p hbdb -f FILE
     case "$1" in
       ps) if [ -n "${3:-}" ]; then echo "c${3#node}"; else printf 'c1\nc2\nc3\nc4\nck\n'; fi; exit 0 ;;
+      logs)
+        # STUB_LOG_NODE's log holds STUB_LOG_LINE; every node logs a raft
+        # leader line when STUB_LEADER_LOG=1.
+        for svc; do :; done
+        echo "$svc | started"
+        [ "$svc" != "${STUB_LOG_NODE:-}" ] || echo "$svc | ${STUB_LOG_LINE:-}"
+        [ -z "${STUB_LEADER_LOG:-}" ] || [ "$svc" != node1 ] ||
+          echo "$svc | 2026-10-31T00:00:01.000Z [INFO]  raft: entering leader state: leader=\"Node at 172.28.0.11:7100 [Leader]\""
+        exit 0 ;;
       exec)
         shift 2 # exec -T
         svc="$1"
@@ -721,8 +808,26 @@ case "$1" in
           echo "$svc $*" >>"$STUB_STATE/node_execs"
           case "$*" in
             *hbdb-fault-active*) echo "${STUB_CONFIRM-corrupt}" ;;
+            *"kill -USR2"*)
+              # veritas writes breakdown snapshot k with 10*k applied blocks.
+              [ "${STUB_SNAP_RC:-0}" = 0 ] || exit "$STUB_SNAP_RC"
+              k=$(($(cat "$STUB_STATE/snap_$svc" 2>/dev/null || echo 0) + 1))
+              echo "$k" >"$STUB_STATE/snap_$svc"
+              printf '{\n  "node": %s,\n  "batch_ns": 5,\n  "blocks": %d,\n  "batch_blocks": 99\n}\n' "${svc#node}" $((k * 10)) \
+                >"$STUB_RESULTS/breakdown-$svc.snap$k.json"
+              exit 0 ;;
           esac
           exit "${STUB_EXEC_RC:-0}"
+        fi
+        if [ "$1" = auditor ]; then
+          echo "$*" >>"$STUB_STATE/auditor_once"
+          n=$(($(cat "$STUB_STATE/audit_n" 2>/dev/null || echo 0) + 1))
+          echo "$n" >"$STUB_STATE/audit_n"
+          # STUB_AUDIT_DIVERGE=k: the first k --once calls say DIVERGENT.
+          if [ "$n" -le "${STUB_AUDIT_DIVERGE:-0}" ]; then echo "DIVERGENT node3"; exit 1; fi
+          [ -z "${STUB_AUDIT_FAIL:-}" ] || { echo "auditor: node2: connection refused" >&2; exit 2; }
+          echo CONSISTENT
+          exit 0
         fi
         if [ "$1" = sh ]; then
           # run_one.sh start_audit: `sh -c SCRIPT sh PIDFILE ADDRS OUT` starts
@@ -740,18 +845,27 @@ case "$1" in
           esac
           exit 0
         fi
-        out="" tl="" tags=""
+        out="" tl="" wtl="" ops="" tags=""
         for a; do
           case "$a" in
             --out=*) out="$STUB_RESULTS${a#--out=/results}" ;;
             --timeline=*) tl="$STUB_RESULTS${a#--timeline=/results}" ;;
+            --wtimeline=*) wtl="$STUB_RESULTS${a#--wtimeline=/results}" ;;
+            --ops=*) ops="$STUB_RESULTS${a#--ops=/results}" ;;
             --tags=*) tags="${a#--tags=}" ;;
           esac
         done
         echo "ycsbbench: loaded 1 records"
         echo "ycsbbench: run phase started (warmup x, duration y)"
         sleep "${STUB_BENCH_SECS:-1}"
-        printf '5\n5\n5\n' >"$tl"
+        # STUB_TL: the timeline, space-separated (default 5 5 5).
+        printf '%s\n' ${STUB_TL:-5 5 5} >"$tl"
+        printf '2\n2\n2\n' >"$wtl"
+        # STUB_WERR: failed writes in the ops sidecar (of 200 ok);
+        # STUB_NO_OPS=1: no sidecar (an old ycsbbench).
+        [ -n "${STUB_NO_OPS:-}" ] ||
+          printf 'op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors\nread,300,150.00,1.000,1.000,2.000,0\nwrite,200,100.00,500.000,450.000,900.000,%s\n' \
+            "${STUB_WERR:-0}" >"$ops"
         vals="$(echo "$tags" | tr ',' '\n' | sed 's/^[^=]*=//' | tr '\n' ',' | sed 's/,$//')"
         printf '%s\n%s,100.0,1.0,1.0,2.0,0,0,,,\n' "$STUB_HEADER" "$vals" >"$out"
         exit "${STUB_BENCH_RC:-0}" ;;
@@ -772,8 +886,11 @@ itest() {
   rm -rf "$SB/state"
   mkdir -p "$SB/state"
   it_err="$(env PATH="$SB/bin:$PATH" STUB_STATE="$SB/state" STUB_RESULTS="$SB_RAW" STUB_HEADER="$HBDB_CSV_HEADER" \
-    YCSB_DIR="$SB/ycsb" BACKEND=raft N=4 WARMUP=0s "$@" "$SB/experiments/run_one.sh" 2>&1 >/dev/null)"
+    YCSB_DIR="$SB/ycsb" BACKEND=raft N=4 WARMUP=0s AUDIT_WAIT_SECS=0 "$@" "$SB/experiments/run_one.sh" 2>&1 >/dev/null)"
   it_rc=$?
+}
+it_tag() { # it_tag EXP SUFFIX: the single results/raw/EXP/*SUFFIX file
+  ls "$SB_RAW/$1"/*"$2" 2>/dev/null | head -n 1
 }
 raw_tag() { # raw_tag EXP: the single .faults file of the experiment
   ls "$SB_RAW/$1"/*.faults 2>/dev/null
@@ -784,8 +901,9 @@ itest rtt EXP=it_rtt RTT_MS=20 DURATION=2s STUB_BENCH_SECS=0.3
 eq "itest rtt rc" "$it_rc" 0
 f="$(raw_tag it_rtt)"
 [ -n "$f" ] && ok || bad "itest rtt: no .faults file: $it_err"
-grep -q ',netem_rtt,node1-node4,egress delay 10ms on every node (RTT_MS=20)$' "$f" 2>/dev/null && ok || bad "itest rtt: no netem_rtt line"
+grep -q ',netem_rtt,node1-node4,egress delay 10ms on every node and on tso (RTT_MS=20)$' "$f" 2>/dev/null && ok || bad "itest rtt: no netem_rtt line: $(cat "$f" 2>/dev/null)"
 eq "itest rtt tc calls" "$(grep -c 'exec -T node[1-4] tc qdisc replace dev eth0 root netem delay 10ms limit 100000$' "$SB/state/calls")" 4
+eq "itest rtt tc on the tso (raft)" "$(grep -c 'exec -T tso tc qdisc replace dev eth0 root netem delay 10ms limit 100000$' "$SB/state/calls")" 1
 eq "itest rtt row" "$(tail -n 1 "$SB_RAW/it_rtt.csv" | cut -d, -f10,11)" "20,none"
 eq "itest rtt lock released" "$(ls -d "$SB_RAW/.hbdb.lock" 2>/dev/null)" ""
 
@@ -855,7 +973,8 @@ kill -0 "$(cat "$SB/state/audit.pid" 2>/dev/null)" 2>/dev/null && bad "itest aud
 # I: no fault -> no auditor; original backends are not audited.
 itest noaudit EXP=it_noau DURATION=2s STUB_BENCH_SECS=1
 eq "itest no-fault rc" "$it_rc" 0
-grep -q 'auditor' "$SB/state/calls" && bad "itest no-fault: the auditor was started" || ok
+grep -q 'exec auditor' "$SB/state/calls" && bad "itest no-fault: the periodic auditor was started" || ok
+grep -q 'exec -T client auditor --addrs=.* --once$' "$SB/state/calls" && ok || bad "itest no-fault: no auditor --once (validity gate)"
 eq "itest no-fault audit file" "$(ls "$SB_RAW"/it_noau/*.audit 2>/dev/null)" ""
 itest origaudit EXP=it_orig BACKEND=kafka-orig FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1
 eq "itest kafka-orig rc" "$it_rc" 0
@@ -915,6 +1034,113 @@ itest kf2 EXP=it_kf2 BACKEND=kafka FAULT=F2:node4@0 DURATION=2s STUB_BENCH_SECS=
 eq "itest kafka f2 rc" "$it_rc" 0
 eq "itest kafka f2 NODE_FAULTS" "$(cat "$SB/state/node_faults" 2>/dev/null)" "node4=silent"
 grep -q ',silent_confirmed,node4,' "$(raw_tag it_kf2)" 2>/dev/null && ok || bad "itest kafka f2 not confirmed"
+
+# ---- final-review fixes: sidecars, net_bytes_per_block, validity gate ----
+# N: a fault-free core run keeps .ops.csv/.wtimeline/.stats/.snaps, fills
+# net_bytes_per_block from the two node1 snapshots, audits once.
+itest sidecars EXP=it_side DURATION=2s STUB_BENCH_SECS=2
+eq "itest sidecars rc" "$it_rc" 0
+o="$(it_tag it_side .ops.csv)"
+eq "itest ops.csv header" "$(head -n 1 "$o" 2>/dev/null)" "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors"
+eq "itest ops.csv kinds" "$(cut -d, -f1 "$o" 2>/dev/null | tr '\n' ' ')" "op read write "
+grep -q -- '--wtimeline=/results/it_side/.*\.wtimeline --ops=/results/it_side/.*\.ops\.csv' "$SB/state/calls" && ok || bad "itest: ycsbbench --wtimeline/--ops"
+[ -s "$(it_tag it_side .wtimeline)" ] && ok || bad "itest: no .wtimeline"
+s="$(it_tag it_side .stats)"
+eq "itest stats header" "$(head -n 1 "$s" 2>/dev/null)" "$HBDB_STATS_HEADER"
+grep -Eq '^[0-9]+,[0-9T:Z-]+,hbdb-node3-1,1.00,10.5MiB,768MiB,1.5MB,[0-9]+kB,11010048,1500000,[0-9]+$' "$s" 2>/dev/null && ok ||
+  bad "itest stats line: $(sed -n 2p "$s" 2>/dev/null)"
+grep -q ',hbdb-client-1,' "$s" 2>/dev/null && ok || bad "itest stats: client container not sampled"
+eq "itest stats: one line per container per sample" "$(($(grep -c . "$s") - 1))" "$((5 * $(cat "$SB/state/stats_n" 2>/dev/null || echo 0)))"
+p="$(it_tag it_side .snaps)"
+eq "itest snaps" "$(cut -d, -f1,3 "$p" 2>/dev/null | tr '\n' ' ')" "1,ok 2,ok "
+eq "itest snapshots signalled on every node twice" "$(grep -c '^node[1-4] sh -c .*cat /tmp/hbdb-veritas.pid.*kill -USR2' "$SB/state/node_execs" 2>/dev/null)" 8
+eq "itest snapshots collected" "$(ls "$SB_RAW/it_side/"*.breakdown/ 2>/dev/null | grep -c 'snap[12]\.json$')" 8
+nb="$(tail -n 1 "$SB_RAW/it_side.csv" 2>/dev/null | cut -d, -f22)"
+awk -v v="$nb" 'BEGIN { exit !(v ~ /^[0-9]+$/ && v > 0 && v % 40000 == 0) }' && ok ||
+  bad "itest net_bytes_per_block='$nb' (want a positive multiple of 40000: 4 nodes x 100 kB per sample / 10 blocks)"
+eq "itest row has 22 fields" "$(tail -n 1 "$SB_RAW/it_side.csv" | awk -F, '{ print NF }')" 22
+eq "itest final audit" "$(cat "$(it_tag it_side .final_audit)" 2>/dev/null)" "CONSISTENT"
+grep -q '^auditor --addrs=172.28.0.11:1990,172.28.0.12:1990,172.28.0.13:1990,172.28.0.14:1990 --once$' "$SB/state/auditor_once" 2>/dev/null && ok ||
+  bad "itest auditor --once call: $(cat "$SB/state/auditor_once" 2>/dev/null)"
+contains "itest sampler/net log" "$it_err" "net_bytes_per_block=$nb"
+grep -q 'kill -0 "$parent" 2>/dev/null || exit 0$' "$HERE/run_one.sh" && ok || bad "run_one sampler parent guard"
+grep -q 'kill -0 "$parent" 2>/dev/null || exit 0 # run_one.sh is gone' "$HERE/run_one.sh" && ok || bad "run_one watchdog parent guard"
+
+# O: write errors above 1 % of the writes fail a fault-free run; 1 % passes.
+itest werr EXP=it_werr DURATION=2s STUB_BENCH_SECS=0.5 STUB_WERR=3
+eq "itest write errors 3/203 rc" "$it_rc" 3
+contains "itest write errors msg" "$it_err" "3 of 203 writes failed"
+[ -e "$SB_RAW/it_werr.csv" ] && bad "itest write errors wrote a row" || ok
+itest werr2 EXP=it_werr2 DURATION=2s STUB_BENCH_SECS=0.5 STUB_WERR=2
+eq "itest write errors 2/202 rc" "$it_rc" 0
+itest werrf EXP=it_werrf FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1 STUB_WERR=150
+eq "itest write errors in a fault run are not checked" "$it_rc" 0
+[ -e "$SB/state/auditor_once" ] && bad "itest fault run ran auditor --once" || ok
+itest noops EXP=it_noops DURATION=2s STUB_BENCH_SECS=0.5 STUB_NO_OPS=1
+eq "itest missing ops sidecar rc" "$it_rc" 3
+contains "itest missing ops sidecar msg" "$it_err" "wrote no usable"
+
+# P: zero seconds in the measurement window.
+itest zero3 EXP=it_zero3 DURATION=5s STUB_BENCH_SECS=0.5 STUB_TL="5 0 0 0 5"
+eq "itest 3 zero seconds rc" "$it_rc" 3
+contains "itest 3 zero seconds msg" "$it_err" "3 consecutive measurement second(s) with 0 successful ops"
+itest zero1 EXP=it_zero1 DURATION=5s STUB_BENCH_SECS=0.5 STUB_TL="5 0 5 0 5"
+eq "itest isolated zero seconds pass" "$it_rc" 0
+itest zero1s EXP=it_zero1s DURATION=5s STUB_BENCH_SECS=0.5 STUB_TL="5 0 5 0 5" VALID_ZERO_RUN_SECS=1
+eq "itest VALID_ZERO_RUN_SECS=1 rejects one zero second" "$it_rc" 3
+itest zerow EXP=it_zerow WARMUP=2s DURATION=3s STUB_BENCH_SECS=0.5 STUB_TL="0 0 0 5 5 5"
+eq "itest zero seconds in the warmup do not count" "$it_rc" 0
+itest short EXP=it_short DURATION=6s STUB_BENCH_SECS=0.5 STUB_TL="5 5 5"
+eq "itest timeline shorter than the window rc" "$it_rc" 3
+
+# Q: fatal node log lines.
+itest fatal EXP=it_fatal DURATION=2s STUB_BENCH_SECS=0.5 STUB_LOG_NODE=node3 STUB_LOG_LINE="core: node 3: FATAL apply at height 9, stopping node: boom"
+eq "itest FATAL apply rc" "$it_rc" 3
+contains "itest FATAL apply msg" "$it_err" "node3 log has"
+itest buf EXP=it_buf BACKEND=tendermint DURATION=2s STUB_BENCH_SECS=0.5 STUB_LOG_NODE=node2 STUB_LOG_LINE="abci: buffer is full"
+eq "itest buffer is full rc" "$it_rc" 3
+itest bft2f EXP=it_bft2f BACKEND=bft2 DURATION=2s STUB_BENCH_SECS=0.5 STUB_LOG_NODE=node4 STUB_LOG_LINE="bft2-node 4: replica failed, exiting"
+eq "itest bft2 replica failed rc" "$it_rc" 3
+itest okl EXP=it_okl DURATION=2s STUB_BENCH_SECS=0.5 STUB_LOG_NODE=node2 STUB_LOG_LINE="core: node 2: applied block"
+eq "itest harmless log line" "$it_rc" 0
+
+# R: auditor --once: DIVERGENT three times fails, once is retried, no verdict warns.
+itest div EXP=it_div DURATION=2s STUB_BENCH_SECS=0.5 STUB_AUDIT_DIVERGE=3
+eq "itest persistent DIVERGENT rc" "$it_rc" 3
+contains "itest persistent DIVERGENT msg" "$it_err" "auditor --once: DIVERGENT node3 (3 tries)"
+eq "itest DIVERGENT tries" "$(grep -c . "$SB/state/auditor_once" 2>/dev/null)" 3
+itest div1 EXP=it_div1 DURATION=2s STUB_BENCH_SECS=0.5 STUB_AUDIT_DIVERGE=1
+eq "itest one-off DIVERGENT is retried" "$it_rc" 0
+eq "itest one-off DIVERGENT tries" "$(grep -c . "$SB/state/auditor_once" 2>/dev/null)" 2
+itest auf EXP=it_auf DURATION=2s STUB_BENCH_SECS=0.5 STUB_AUDIT_FAIL=1
+eq "itest auditor without verdict: row stands" "$it_rc" 0
+contains "itest auditor without verdict: warning" "$it_err" "gave no verdict"
+
+# S: original backends: validity gate yes, no auditor, no net_bytes_per_block.
+itest orig EXP=it_orig2 BACKEND=kafka-orig DURATION=2s STUB_BENCH_SECS=1
+eq "itest kafka-orig fault-free rc" "$it_rc" 0
+[ -e "$SB/state/auditor_once" ] && bad "itest kafka-orig ran auditor --once" || ok
+eq "itest kafka-orig net_bytes_per_block empty" "$(tail -n 1 "$SB_RAW/it_orig2.csv" | cut -d, -f22)" ""
+grep -q 'kill -USR2' "$SB/state/node_execs" 2>/dev/null && bad "itest kafka-orig got SIGUSR2" || ok
+
+# T: a failed snapshot or no stats leaves net_bytes_per_block empty, the row stands.
+itest nosnap EXP=it_nosnap DURATION=2s STUB_BENCH_SECS=1 STUB_SNAP_RC=1
+eq "itest failed snapshot rc" "$it_rc" 0
+eq "itest failed snapshot: net empty" "$(tail -n 1 "$SB_RAW/it_nosnap.csv" | cut -d, -f22)" ""
+contains "itest failed snapshot: warning" "$it_err" "net_bytes_per_block left empty"
+eq "itest failed snapshot: no second snapshot" "$(cut -d, -f1,3 "$(it_tag it_nosnap .snaps)" 2>/dev/null | tr '\n' ' ')" "1,failed "
+itest nostats EXP=it_nostats DURATION=2s STUB_BENCH_SECS=1.5 STUB_STATS_FAIL=1
+eq "itest docker stats failing rc" "$it_rc" 0
+n_stats="$(grep -c '^docker stats' "$SB/state/calls")"
+awk -v n="$n_stats" 'BEGIN { exit !(n >= 1 && n <= 8) }' && ok || bad "itest docker stats failing: $n_stats calls in ~1.5 s (busy loop?)"
+eq "itest docker stats failing: cpu empty" "$(tail -n 1 "$SB_RAW/it_nostats.csv" | cut -d, -f20,22)" ","
+
+# U: raft fault runs record the leader changes.
+itest leaders EXP=it_lead FAULT=F1:node1@0 DURATION=2s STUB_BENCH_SECS=1 STUB_LEADER_LOG=1
+eq "itest leader fault rc" "$it_rc" 0
+grep -q '^node1 node1 | .*entering leader state' "$(it_tag it_lead .leaders)" 2>/dev/null && ok || bad "itest leaders file: $(cat "$(it_tag it_lead .leaders)" 2>/dev/null)"
+itest noleaders EXP=it_nolead FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1
+contains "itest no leader line warns" "$it_err" "no 'entering leader state' line"
 
 # up.sh turns NODE_FAULTS into gen_compose.py --node-fault flags.
 grep -q 'node_fault_args="$node_fault_args --node-fault $nf"' "$HERE/cluster/up.sh" && ok || bad "up.sh --node-fault"

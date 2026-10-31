@@ -417,3 +417,80 @@ def test_main_prints_metrics_and_rejects_bad_input(tmp_path, capsys):
     assert "fault_at_s=30.2" in out and "detect_s=2.8" in out
     assert rq3.main([str(tmp_path / "missing")]) == 2
     assert "no such file" in capsys.readouterr().err
+
+
+# ---- I1: recovery threshold scaled to the surviving nodes' share -----------
+
+def test_threshold_share():
+    assert rq3.threshold_share(4, 1) == 0.75
+    assert rq3.threshold_share(7, 2) == pytest.approx(5 / 7)
+    assert rq3.threshold_share(None, 1) == 1.0
+    assert rq3.threshold_share(4, 0) == 1.0
+
+
+def test_n_from_tag():
+    assert rq3.n_from_tag("results/raw/e6/raft_n7_f2_c64_b100_wa_rtt0_F1_node7+node6@60_sync_r1") == 7
+    assert rq3.n_from_tag("results/raw/e6/r") is None
+
+
+def test_faulty_nodes_counts_stop_and_network_silence_only():
+    rows = [{"action": "docker_stop", "node": "node3+node4"}, {"action": "stopped", "node": "node3+node4"}]
+    assert rq3.faulty_nodes(rows) == ["node3", "node4"]
+    rows = [{"action": "iptables_drop", "node": "node3"}, {"action": "iptables_drop", "node": "node4"}]
+    assert rq3.faulty_nodes(rows) == ["node3", "node4"]
+    assert rq3.faulty_nodes([{"action": "silent_on", "node": "node4"}]) == []
+    assert rq3.faulty_nodes([{"action": "netem_delay", "node": "node1"}]) == []
+
+
+def test_recovery_time_share():
+    # 4 nodes, 1 stopped: 75% of the clients remain -> ~7.5 tps is recovered.
+    tl = [10] * 60 + [0, 7.5, 7.5]
+    assert recovery_time(tl, 60, 10) is None
+    assert recovery_time(tl, 60, 10, share=0.75) == 1
+
+
+def test_load_run_f1_threshold_uses_surviving_share(tmp_path):
+    # F1 on node4 of 4: after the fault the cluster runs at 7.5 of 10 tps.
+    timeline = [5] * 10 + [10] * 20 + [10, 0, 7.5, 7.5, 7.5] + [7.5] * 5
+    tl, fl, _ = write_run(tmp_path, timeline, F1_ROWS)
+    raw = rq3.load_run(tl, fl, None)
+    assert raw["recovery_status"] == "not_recovered" and raw["threshold_share"] == 1.0
+    m = rq3.load_run(tl, fl, None, n=4)
+    assert m["n"] == 4 and m["faulty_nodes"] == 1 and m["threshold_share"] == 0.75
+    assert m["recovery_threshold_tps"] == pytest.approx(6.75)
+    assert m["dip_start_s"] == pytest.approx(31 - 30.2)
+    assert m["recovery_status"] == "recovered"
+    assert m["recovery_s"] == pytest.approx(32 - 30.2)
+
+
+def test_load_run_kafka_f2_keeps_full_threshold(tmp_path):
+    rows = [
+        "u,1000000000,-10.000,0.000,F2:node4@20,run_phase_start,,x",
+        "u,1000030300,20.300,30.300,F2:node4@20,silent_on,node4,SIGUSR1 to veritas (--fault=silent)",
+    ]
+    tl, fl, _ = write_run(tmp_path, [10] * 40, rows)
+    m = rq3.load_run(tl, fl, None, n=4)
+    assert m["faulty_nodes"] == 0 and m["threshold_share"] == 1.0
+    assert m["recovery_threshold_tps"] == pytest.approx(9.0)
+
+
+def test_load_run_f5_f2_counts_every_silenced_node(tmp_path):
+    spec = "F5-F2:node3+node4@20"
+    rows = [
+        "u,1000000000,-10.000,0.000,%s,run_phase_start,,x" % spec,
+        "u,1000030300,20.300,30.300,%s,iptables_drop,node3,d" % spec,
+        "u,1000030700,20.700,30.700,%s,iptables_drop,node4,d" % spec,
+    ]
+    tl, fl, _ = write_run(tmp_path, [10] * 40, rows)
+    assert rq3.load_run(tl, fl, None, n=4)["threshold_share"] == 0.5
+
+
+def test_main_reads_n_from_the_tag(tmp_path, capsys):
+    d = tmp_path / "e6"
+    d.mkdir()
+    name = "raft_n4_f1_c64_b100_wa_rtt0_F1_node4@20_sync_r1"
+    (d / (name + ".timeline")).write_text("".join("%s\n" % v for v in [10] * 40))
+    (d / (name + ".faults")).write_text(FAULTS_HEADER + "\n" + "".join(r + "\n" for r in F1_ROWS))
+    assert rq3.main([str(d / name)]) == 0
+    out = capsys.readouterr().out
+    assert "n=4" in out and "threshold_share=0.75" in out and "recovery_threshold_tps=6.75" in out

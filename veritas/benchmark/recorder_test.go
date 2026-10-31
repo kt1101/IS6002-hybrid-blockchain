@@ -141,6 +141,85 @@ func TestErrorKindsTruncatesLongMessages(t *testing.T) {
 	}
 }
 
+// C1: reads and writes are summarised apart; the CSV Summary still mixes them.
+func TestOpSummariesSplitReadsAndWrites(t *testing.T) {
+	s0 := time.Unix(0, 0)
+	r := NewRecorder(10*time.Second, 10*time.Second, s0)
+	in := s0.Add(11 * time.Second)
+	for i := 0; i < 30; i++ { // 30 reads of 1 ms
+		r.ObserveGet(in, time.Millisecond, "v", nil)
+	}
+	for i := 0; i < 10; i++ { // 10 writes of 500 ms
+		r.ObserveSet(in, 500*time.Millisecond, nil)
+	}
+	r.ObserveSet(in, time.Second, errors.New("deadline")) // failed write
+	r.ObserveSet(s0.Add(5*time.Second), time.Second, errors.New("warmup")) // not counted
+	r.ObserveGet(in, time.Millisecond, "", errors.New("unavailable"))      // failed read
+	r.Observe(in, 7*time.Millisecond, nil)                                 // OpOther: Summary only
+
+	ops := r.OpSummaries()
+	if len(ops) != 2 || ops[0].Op != "read" || ops[1].Op != "write" {
+		t.Fatalf("ops=%+v", ops)
+	}
+	rd, wr := ops[0], ops[1]
+	if rd.Count != 30 || rd.TPS != 3 || rd.Errors != 1 || rd.LatP50Ms != 1 || rd.LatP99Ms != 1 || rd.LatMeanMs != 1 {
+		t.Fatalf("read=%+v", rd)
+	}
+	if wr.Count != 10 || wr.TPS != 1 || wr.Errors != 1 || wr.LatP50Ms != 500 || wr.LatMeanMs != 500 {
+		t.Fatalf("write=%+v", wr)
+	}
+	s := r.Summary()
+	if s.TPS != 4.1 || s.Errors != 2 { // (30 + 10 + 1) / 10 s; both failures
+		t.Fatalf("summary=%+v", s)
+	}
+	if s.LatP50Ms != 1 { // 41 ops, 30 of them 1 ms reads: the mixed p50 is a read
+		t.Fatalf("summary p50=%v", s.LatP50Ms)
+	}
+}
+
+func TestSetTimelineCountsOnlyWrites(t *testing.T) {
+	s0 := time.Unix(0, 0)
+	r := NewRecorder(2*time.Second, 3*time.Second, s0)
+	r.ObserveSet(s0.Add(500*time.Millisecond), time.Millisecond, nil) // warmup second 0
+	r.ObserveSet(s0.Add(3*time.Second), time.Millisecond, nil)
+	r.ObserveSet(s0.Add(3*time.Second), time.Millisecond, nil)
+	r.ObserveSet(s0.Add(3*time.Second), time.Millisecond, errors.New("x")) // failed: not counted
+	r.ObserveGet(s0.Add(3*time.Second), time.Millisecond, "v", nil)        // read: not counted
+	r.Observe(s0.Add(4*time.Second), time.Millisecond, nil)                // OpOther: not counted
+	wt, tl := r.SetTimeline(), r.Timeline()
+	if len(wt) != 5 || len(tl) != 5 {
+		t.Fatalf("len SetTimeline=%d Timeline=%d, want 5", len(wt), len(tl))
+	}
+	if want := []int64{1, 0, 0, 2, 0}; fmt.Sprint(wt) != fmt.Sprint(want) {
+		t.Fatalf("SetTimeline=%v want %v", wt, want)
+	}
+	if want := []int64{1, 0, 0, 3, 1}; fmt.Sprint(tl) != fmt.Sprint(want) {
+		t.Fatalf("Timeline=%v want %v", tl, want)
+	}
+}
+
+func TestWriteOpsCSV(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.ops.csv")
+	ops := []OpSummary{
+		{Op: "read", Count: 30, TPS: 3, LatMeanMs: 1, LatP50Ms: 1, LatP99Ms: 1.25, Errors: 1},
+		{Op: "write", Count: 0},
+	}
+	if err := WriteOpsCSV(path, ops); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := OpsCSVHeader + "\nread,30,3.00,1.000,1.000,1.250,1\nwrite,0,0.00,0.000,0.000,0.000,0\n"
+	if string(data) != want {
+		t.Fatalf("ops csv=%q want %q", data, want)
+	}
+	if OpsCSVHeader != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors" {
+		t.Fatalf("OpsCSVHeader changed: %q (experiments/run_one.sh parses it)", OpsCSVHeader)
+	}
+}
+
 func TestAppendCSVRowWritesHeaderOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.csv")
 	tags := map[string]string{"exp": "e1", "backend": "kafka", "n": "4"}

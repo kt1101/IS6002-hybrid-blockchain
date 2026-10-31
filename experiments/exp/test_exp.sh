@@ -21,7 +21,9 @@ for v in EXP BACKEND BACKENDS N F CLIENTS BLOCK_SIZE WORKLOAD RTT_MS FAULT REP T
   DURATION WARMUP DRY_RUN BATCH_FLUSH PRE_DOWN_HOOK KAFKA_OPS_CSV KAFKA_OPS_WAIT LOAD_THREADS LOAD_TIMEOUT \
   LOAD_OP_TIMEOUT SETTLE_TIMEOUT HEALTH_TIMEOUT CPUS MEM KEEP_LOGS YCSB_DIR FAULT_SLOW_MS FAULT_CONFIRM_MS \
   HBDB_NET_DEV NET_BASE_DELAY_MS NET_LIMIT_PKTS STUB_RC STUB_BACKEND STUB_NOISY_REP2 STUB_FAIL_ONCE \
-  DOCKER_STUB_LOG DOCKER_STUB_FAIL DOCKER_STUB_NOLINE DOCKER_STUB_DASH PART NS_B; do
+  DOCKER_STUB_LOG DOCKER_STUB_FAIL DOCKER_STUB_NOLINE DOCKER_STUB_DASH PART NS_B \
+  E6_LEADER E6_LEADER_BACKENDS HBDB_CAFFEINATED NO_CAFFEINATE EXP_MIN_FREE_GB EXP_ALLOW_COMMIT_CHANGE DF_STUB_AVAIL_KB \
+  VALID_MAX_WRITE_ERR_PCT VALID_ZERO_RUN_SECS AUDIT_WAIT_SECS; do
   unset "$v"
 done
 
@@ -48,6 +50,25 @@ STUB
 chmod +x "$TMP_ROOT/bin/docker"
 export TMP_ROOT_DOCKER_LOG="$TMP_ROOT/unexpected-docker.log"
 : >"$TMP_ROOT_DOCKER_LOG"
+# caffeinate stub (the real one exists on macOS): log the call, run the
+# command without the -dims flags argument.
+cat >"$TMP_ROOT/bin/caffeinate" <<'STUB'
+#!/usr/bin/env bash
+echo "caffeinate $*" >>"${CAFFEINATE_LOG:?}"
+shift
+exec "$@"
+STUB
+chmod +x "$TMP_ROOT/bin/caffeinate"
+export CAFFEINATE_LOG="$TMP_ROOT/caffeinate.log"
+: >"$CAFFEINATE_LOG"
+# df stub: DF_STUB_AVAIL_KB free (default 100 GiB), so the disk guard never
+# depends on the machine running the tests.
+cat >"$TMP_ROOT/bin/df" <<'STUB'
+#!/usr/bin/env bash
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/stub 999999999 1 ${DF_STUB_AVAIL_KB:-104857600} 1% /"
+STUB
+chmod +x "$TMP_ROOT/bin/df"
 export PATH="$TMP_ROOT/bin:$PATH"
 pass=0
 fail=0
@@ -130,7 +151,7 @@ e1_rows() {
 
 # ---------------------------------------------------------------- dry runs --
 newtree dry
-for spec in "e1_clients.sh 48" "e3_block.sh 36" "e4_workload.sh 36" "e5_rtt.sh 36" "e2_nodes.sh 24" "e6_faults.sh 120"; do
+for spec in "e1_clients.sh 48" "e3_block.sh 36" "e4_workload.sh 36" "e5_rtt.sh 36" "e2_nodes.sh 24" "e6_faults.sh 144"; do
   set -- $spec
   OUT="$("$ROOT/experiments/exp/$1" --dry-run 2>/dev/null)"
   RC=$?
@@ -147,7 +168,25 @@ eq "DRY_RUN=1 is --dry-run" "$OUT" 48
 OUT="$(BACKENDS="raft bft2" "$ROOT/experiments/exp/e1_clients.sh" --dry-run 2>/dev/null | grep -c '^DRY_RUN: ')"
 eq "BACKENDS narrows the plan" "$OUT" 24
 OUT="$(F5_KINDS="F5-F4" "$ROOT/experiments/exp/e6_faults.sh" --dry-run 2>/dev/null | grep -c '^DRY_RUN: ')"
-eq "F5_KINDS=F5-F4 leaves 36 configs... 108 runs" "$OUT" 108
+eq "F5_KINDS=F5-F4 leaves 44 configs... 132 runs" "$OUT" 132
+OUT="$(E6_LEADER=0 "$ROOT/experiments/exp/e6_faults.sh" --dry-run 2>/dev/null | grep -c '^DRY_RUN: ')"
+eq "E6_LEADER=0: the 120 runs of the plan" "$OUT" 120
+OUT="$("$ROOT/experiments/exp/e6_faults.sh" --dry-run 2>/dev/null)"
+eq "E6 leader faults: raft+kafka x F1/F3 x 2 (N,f) x 3 reps" "$(printf '%s\n' "$OUT" | grep -cE 'FAULT=F[13]:node1@60 ')" 24
+eq "E6 leader faults only for raft and kafka" "$(printf '%s\n' "$OUT" | grep -E 'FAULT=F[13]:node1@60 ' | grep -vcE 'BACKEND=(raft|kafka) ')" 0
+contains "E6 leader fault N=7" "$OUT" "BACKEND=raft N=7 F=2 CLIENTS=best-of-e1 BLOCK_SIZE=100 WORKLOAD=a RTT_MS=0 FAULT=F1:node1@60 REP=1"
+OUT="$(E6_LEADER_BACKENDS="raft bft2" "$ROOT/experiments/exp/e6_faults.sh" --dry-run 2>/dev/null | grep -cE 'FAULT=F[13]:node1@60 ')"
+eq "E6_LEADER_BACKENDS selects the backends" "$OUT" 24
+E6_LEADER_BACKENDS="kafka-orig" "$ROOT/experiments/exp/e6_faults.sh" --dry-run >/dev/null 2>&1
+eq "E6_LEADER_BACKENDS rejects a non E1-E6 backend" "$?" 1
+E6_LEADER=2 "$ROOT/experiments/exp/e6_faults.sh" --dry-run >/dev/null 2>&1
+eq "E6_LEADER must be 0 or 1" "$?" 1
+# I9: rep is the outermost loop of the plan.
+OUT="$("$ROOT/experiments/exp/e1_clients.sh" --dry-run 2>/dev/null)"
+eq "dry run: the first 16 runs are rep 1 of every config" "$(printf '%s\n' "$OUT" | head -n 16 | grep -c ' REP=1 ')" 16
+eq "dry run: rep 3 last" "$(printf '%s\n' "$OUT" | tail -n 16 | grep -c ' REP=3 ')" 16
+eq "dry run: rep 1 order follows the plan" "$(printf '%s\n' "$OUT" | head -n 5 | sed 's/.*BACKEND=\([a-z0-9]*\) .*CLIENTS=\([0-9]*\) .*/\1\/\2/' | tr '\n' ' ')" "kafka/4 kafka/16 kafka/64 kafka/256 raft/4 "
+eq "dry run: no caffeinate" "$(grep -c . "$CAFFEINATE_LOG")" 0
 OUT="$("$ROOT/experiments/exp/e6_faults.sh" --dry-run 2>/dev/null)"
 eq "F5 only for tendermint and bft2" "$(printf '%s\n' "$OUT" | grep 'FAULT=F5-' | grep -vcE 'BACKEND=(tendermint|bft2) ')" 0
 contains "E6 N=7 fault nodes" "$OUT" "N=7 F=2 CLIENTS=best-of-e1 BLOCK_SIZE=100 WORKLOAD=a RTT_MS=0 FAULT=F1:node7,node6@60"
@@ -176,7 +215,11 @@ eq "E1 rows" "$(rows e1)" 48
 eq "E1 run_one calls" "$(calls)" 48
 eq "E1 always sync" "$(grep -vc 'COMMIT_MODE=sync' "$ROOT/stub.log")" 0
 eq "E1 N=4 block 100 workload a rtt 0 no fault" "$(grep -vc 'N=4 F=0 CLIENTS=[0-9]* BLOCK_SIZE=100 WORKLOAD=a RTT_MS=0 FAULT=none' "$ROOT/stub.log")" 0
-eq "E1 clients" "$(grep 'BACKEND=raft ' "$ROOT/stub.log" | sed 's/.*CLIENTS=\([0-9]*\) .*REP=\([0-9]\) .*/\1\/\2/' | tr '\n' ' ')" "4/1 4/2 4/3 16/1 16/2 16/3 64/1 64/2 64/3 256/1 256/2 256/3 "
+eq "E1 clients" "$(grep 'BACKEND=raft ' "$ROOT/stub.log" | sed 's/.*CLIENTS=\([0-9]*\) .*REP=\([0-9]\) .*/\1\/\2/' | tr '\n' ' ')" "4/1 16/1 64/1 256/1 4/2 16/2 64/2 256/2 4/3 16/3 64/3 256/3 "
+eq "E1 rep outermost across backends" "$(sed -n '1p;16p;17p' "$ROOT/stub.log" | sed 's/.*BACKEND=\([a-z0-9]*\) .*REP=\([0-9]\) .*/\1\/\2/' | tr '\n' ' ')" "kafka/1 bft2/1 kafka/2 "
+eq "E1 re-executed once under caffeinate -dims" "$(grep -c "^caffeinate -dims $ROOT/experiments/exp/e1_clients.sh$" "$CAFFEINATE_LOG")" 1
+eq "E1 params file" "$(cut -d= -f1 "$ROOT/results/raw/e1.params" | tr '\n' ' ')" "DURATION WARMUP CPUS MEM LOAD_THREADS BATCH_FLUSH commit "
+contains "E1 params values" "$(cat "$ROOT/results/raw/e1.params")" "DURATION=60s"
 eq "E1 no hook" "$(grep -vc 'HOOK=$' "$ROOT/stub.log")" 0
 contains "E1 summary" "$OUT" "rows present: 48 / 48 planned"
 contains "E1 summary: no failures" "$OUT" "failures in this run: none"
@@ -291,10 +334,10 @@ eq "E5 rows" "$(rows e5)" 36
 newtree e6
 FIXED_CLIENTS=64 REPS=1 BACKENDS="tendermint kafka" drv e6_faults.sh
 eq "E6 exit" "$RC" 0
-eq "E6 runs (tendermint 12 + kafka 8)" "$(calls)" 20
+eq "E6 runs (tendermint 12 + kafka 8 + kafka leader 4)" "$(calls)" 24
 eq "E6 DURATION=180s" "$(grep -vc 'DURATION=180s' "$ROOT/stub.log")" 0
 contains "E6 F5 N=7" "$(cat "$ROOT/stub.log")" "BACKEND=tendermint N=7 F=2 CLIENTS=64 BLOCK_SIZE=100 WORKLOAD=a RTT_MS=0 FAULT=F5-F4:node7,node6,node5@60 REP=1"
-eq "E6 CSV fault column uses +" "$(awk -F, 'NR > 1 && $5 == 7 && $4 == "kafka" { print $11 }' "$ROOT/results/raw/e6.csv" | sort | tr '\n' ' ')" "F1:node7+node6@60 F2:node7+node6@60 F3:node7+node6@60 F4:node7+node6@60 "
+eq "E6 CSV fault column uses +" "$(awk -F, 'NR > 1 && $5 == 7 && $4 == "kafka" { print $11 }' "$ROOT/results/raw/e6.csv" | sort | tr '\n' ' ')" "F1:node1@60 F1:node7+node6@60 F2:node7+node6@60 F3:node1@60 F3:node7+node6@60 F4:node7+node6@60 "
 : >"$ROOT/stub.log"
 FIXED_CLIENTS=64 REPS=1 BACKENDS="tendermint kafka" drv e6_faults.sh
 eq "E6 resumed: nothing re-run (the fault string with + matches)" "$(calls)" 0
@@ -352,6 +395,48 @@ rm -f "$ROOT/results/ycsb/c.run.dat"
 FIXED_CLIENTS=8 BACKENDS=raft drv e4_workload.sh
 eq "missing YCSB data is refused before any run" "$RC" 1
 eq "missing YCSB data: nothing ran" "$(calls)" 0
+
+# ------------------------------------- params guard, disk guard, caffeinate ----
+newtree params
+BACKENDS=raft REPS=1 drv e1_clients.sh
+eq "params: first run ok" "$RC" 0
+[ -s "$ROOT/results/raw/e1.params" ] && ok || bad "params: no e1.params"
+: >"$ROOT/stub.log"
+DURATION=30s BACKENDS=raft REPS=1 drv e1_clients.sh
+eq "params: other DURATION refused" "$RC" 1
+contains "params: message names the setting" "$OUT" "DURATION=30s (EXP started with 60s)"
+eq "params: nothing ran" "$(calls)" 0
+CPUS=1 BACKENDS=raft REPS=1 drv e1_clients.sh --dry-run
+eq "params: also in --dry-run" "$RC" 1
+LOAD_THREADS=128 BACKENDS=raft REPS=2 drv e1_clients.sh
+eq "params: LOAD_THREADS refused" "$RC" 1
+sed -i.bak 's/^commit=.*/commit=0000000/' "$ROOT/results/raw/e1.params"
+BACKENDS=raft REPS=2 drv e1_clients.sh
+eq "params: other commit refused" "$RC" 1
+contains "params: commit message" "$OUT" "(EXP started with 0000000)"
+EXP_ALLOW_COMMIT_CHANGE=1 BACKENDS=raft REPS=2 drv e1_clients.sh
+eq "params: EXP_ALLOW_COMMIT_CHANGE=1 goes on" "$RC" 0
+eq "params: ... and runs rep 2" "$(calls)" 4
+EXP=e1other DURATION=30s BACKENDS=raft REPS=1 drv e1_clients.sh
+eq "params: a new EXP may use other settings" "$RC" 0
+newtree disk
+DF_STUB_AVAIL_KB=4194304 BACKENDS=raft drv e1_clients.sh
+eq "disk: < 5 GiB free stops the batch" "$RC" 1
+contains "disk: message" "$OUT" "MiB free on the disk"
+eq "disk: no run" "$(calls)" 0
+DF_STUB_AVAIL_KB=4194304 EXP_MIN_FREE_GB=2 BACKENDS=raft REPS=1 drv e1_clients.sh
+eq "disk: EXP_MIN_FREE_GB lowers the limit" "$RC" 0
+DF_STUB_AVAIL_KB=4194304 BACKENDS=raft drv e1_clients.sh --dry-run
+eq "disk: not checked in --dry-run" "$RC" 0
+newtree caff
+: >"$CAFFEINATE_LOG"
+NO_CAFFEINATE=1 BACKENDS=raft REPS=1 drv e1_clients.sh
+eq "NO_CAFFEINATE=1: no re-exec" "$(grep -c . "$CAFFEINATE_LOG")" 0
+HBDB_CAFFEINATED=1 BACKENDS=raft REPS=1 EXP=e1b drv e1_clients.sh
+eq "already under caffeinate: no second re-exec" "$(grep -c . "$CAFFEINATE_LOG")" 0
+STUB_RC=3 BACKENDS=raft REPS=1 EXP=e1c drv e1_clients.sh
+eq "caffeinate keeps the driver's exit code" "$RC" 4
+eq "caffeinate re-exec logged once" "$(grep -c . "$CAFFEINATE_LOG")" 1
 
 # ---------------------------------------------------- kafka_ops.sh hook --------
 newtree ops

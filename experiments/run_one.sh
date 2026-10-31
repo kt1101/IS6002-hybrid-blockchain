@@ -61,8 +61,10 @@
 #
 # RTT_MS > 0 (E5): after health.sh passes and before ycsbbench starts (so the
 # load and settle phases run with it too), every node gets netem delay
-# RTT_MS/2 on its egress (net_set_rtt, experiments/net.sh): node <-> node RTT
-# = RTT_MS, client <-> node RTT = RTT_MS/2.
+# RTT_MS/2 on its egress (net_set_rtt, experiments/net.sh), and so do the
+# Kafka broker (kafka-orig, kafka) and the TSO (kafka-orig, kafka, raft):
+# node <-> node and node <-> broker RTT = RTT_MS, client <-> node and
+# client <-> TSO RTT = RTT_MS/2 (the client container is not delayed).
 # FAULT (RQ3, experiments/faults.sh; e.g. F1:node4@60, F1:node3,node4@60,
 # F2:node4@60, F3:node1@60; FAULT_SLOW_MS=200 is the F3 delay): injected AT
 # seconds after the start of the MEASUREMENT window, i.e. WARMUP after the
@@ -95,6 +97,50 @@
 # every exit path; down.sh removes the client container anyway. kafka-orig and
 # tm-orig are not audited (their Verify races with commits / returns nothing,
 # see check_consistency.sh). A missing or empty .audit file is only a warning.
+#
+# Per-run sidecars in results/raw/<EXP>/ (the CSV keeps its 22 columns):
+#   <tag>.ops.csv    ycsbbench --ops: `op,count,tps,lat_mean_ms,lat_p50_ms,
+#                    lat_p99_ms,errors`, one line for read (Get) and one for
+#                    write (Set), measurement window only (the CSV row mixes
+#                    both: on a sync backend a Get is a local read, a Set waits
+#                    for a block)
+#   <tag>.wtimeline  ycsbbench --wtimeline: successful Sets per second, same
+#                    t=0 and length as <tag>.timeline (warmup included)
+#   <tag>.stats      every docker stats sample of every cluster container from
+#                    the run-phase marker on (HBDB_STATS_HEADER in lib.sh: host
+#                    epoch ms and UTC, name, CPU%, memory used/limit, cumulative
+#                    NetIO rx/tx, the same parsed to bytes); host_cpu_max_pct
+#                    is derived from the same samples as before
+#   <tag>.breakdown/ also breakdown-node<i>.snap1.json / .snap2.json: core
+#                    breakdown snapshots (veritas SIGUSR2) at the start of the
+#                    measurement window (run-phase marker + WARMUP) and right
+#                    after the bench ends; their epoch ms are in <tag>.snaps
+#   <tag>.final_audit  FAULT=none, core backends: output of `auditor --once`
+#   <tag>.leaders    BACKEND=raft with a FAULT: every "entering leader state"
+#                    line of every node log (docker timestamps), to tell who
+#                    led at the fault time
+# net_bytes_per_block (core backends kafka, raft, tendermint, bft2): the sum
+# of the NetIO tx bytes of node1..nodeN (+ the Kafka broker, the kafka
+# backend's consensus path) in the stats sample closest to snapshot 2 minus
+# that in the sample closest to snapshot 1, divided by the blocks node1
+# applied between its two snapshots (hbdb_net_bytes_per_block in lib.sh). The
+# samples are ~1-1.5 s apart, so the window edges are approximate to about a
+# second; node tx also carries the replies to clients (Get values). Empty
+# (with a warning) when a snapshot or sample is missing, and always for
+# kafka-orig and tm-orig (no block count).
+#
+# Validity (FAULT=none only; any failure is exit 3, no CSV row, retried by the
+# drivers): the write errors of <tag>.ops.csv must be at most
+# VALID_MAX_WRITE_ERR_PCT=1 % of the writes (ok + failed); the measurement
+# window of <tag>.timeline must not contain VALID_ZERO_RUN_SECS=3 or more
+# consecutive seconds with 0 successful ops (1 = no zero second at all; the
+# P0 tm-orig c4 runs had single zero seconds, so 1 would reject valid
+# latency-bound runs); no node log may contain "FATAL apply" (core apply
+# failure), "buffer is full" (tendermint ABCI queue overflow) or "replica
+# failed, exiting" / "can no longer commit" (bft2-node gave up); and, for the
+# core backends, `auditor --once` (after AUDIT_WAIT_SECS=5, retried twice
+# AUDIT_WAIT_SECS apart while it says DIVERGENT) must not end DIVERGENT. An
+# auditor that gives no verdict is only a warning.
 #
 # Durations accept the suffixes ms, s, m and h (e.g. 500ms, 30s, 20m, 1h).
 # Watchdog: ycsbbench is killed if it runs longer than LOAD_TIMEOUT +
@@ -145,6 +191,9 @@ SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-10m}"
 KEEP_LOGS="${KEEP_LOGS:-0}"
 BATCH_FLUSH="${BATCH_FLUSH:-}"
 PRE_DOWN_HOOK="${PRE_DOWN_HOOK:-}"
+VALID_MAX_WRITE_ERR_PCT="${VALID_MAX_WRITE_ERR_PCT:-1}"
+VALID_ZERO_RUN_SECS="${VALID_ZERO_RUN_SECS:-3}"
+AUDIT_WAIT_SECS="${AUDIT_WAIT_SECS:-5}"
 
 # ---- validate input (nothing touches Docker before this passes) ----
 case "$EXP" in
@@ -160,6 +209,10 @@ hbdb_require_uint BLOCK_SIZE "$BLOCK_SIZE"
 hbdb_require_uint REP "$REP"
 hbdb_require_uint RTT_MS "$RTT_MS"
 hbdb_require_uint HEALTH_TIMEOUT "$HEALTH_TIMEOUT"
+hbdb_require_uint VALID_MAX_WRITE_ERR_PCT "$VALID_MAX_WRITE_ERR_PCT"
+hbdb_require_uint VALID_ZERO_RUN_SECS "$VALID_ZERO_RUN_SECS"
+[ "$VALID_ZERO_RUN_SECS" -ge 1 ] || die "VALID_ZERO_RUN_SECS must be >= 1"
+hbdb_require_uint AUDIT_WAIT_SECS "$AUDIT_WAIT_SECS"
 case "$WORKLOAD" in
   '' | *[!A-Za-z0-9_-]*) die "WORKLOAD must match [A-Za-z0-9_-]+, got '$WORKLOAD'" ;;
 esac
@@ -260,6 +313,13 @@ audit_file="$exp_dir/$tag.audit"         # periodic auditor output (kept)
 audit_pidfile="$exp_dir/.$tag.audit.pid" # pid of the auditor in the client container
 audit_stop="$exp_dir/.$tag.audit.stop"   # asks the audit supervisor to stop the auditor
 audit_err="$exp_dir/.$tag.audit.err"     # stdout/stderr of the audit supervisor
+ops_file="$exp_dir/$tag.ops.csv"         # per-op-kind summary (kept)
+wtimeline_file="$exp_dir/$tag.wtimeline" # successful Sets per second (kept)
+stats_file="$exp_dir/$tag.stats"         # every docker stats sample (kept)
+snaps_file="$exp_dir/$tag.snaps"         # "k,epoch_ms,node1 status" per breakdown snapshot (kept)
+snap_stop="$exp_dir/.$tag.snap.stop"     # aborts a pending window-start snapshot
+final_audit_file="$exp_dir/$tag.final_audit" # auditor --once output, FAULT=none (kept)
+leaders_file="$exp_dir/$tag.leaders"     # raft leader changes, FAULT != none (kept)
 lock_dir="$HBDB_RESULTS_RAW/.hbdb.lock"
 mkdir -p "$exp_dir"
 
@@ -282,6 +342,7 @@ fault_pid=""
 fault_rc=0
 audit_pid=""
 audit_started=""
+snap_pid=""
 lock_held=0
 
 # acquire_lock: one run at a time on compose project hbdb (see header).
@@ -404,6 +465,74 @@ start_audit() {
   audit_pid=$!
 }
 
+# snapshot_signal_script: shell run in a node container that sends SIGUSR2
+# to its veritas server (cmd/veritas writes breakdown-node<i>.snap<k>.json).
+snapshot_signal_script() {
+  printf '%s\n' "p=\"\$(cat $HBDB_VERITAS_PIDFILE)\" && [ -n \"\$p\" ] && kill -USR2 \"\$p\""
+}
+
+# window_snapshot K: breakdown snapshot K of every core node (SIGUSR2, in
+# parallel); appends "K,epoch_ms,ok|failed" (node1's signal) to $snaps_file.
+# A failed signal (e.g. a node F1 stopped) is only a warning.
+window_snapshot() {
+  local k="$1" i=1 pids="" p ms st=ok
+  ms="$(hbdb_epoch_ms)"
+  while [ "$i" -le "$N" ]; do
+    hbdb_compose exec -T "node$i" sh -c "$(snapshot_signal_script)" >/dev/null 2>&1 &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  i=1
+  for p in $pids; do
+    if ! wait "$p"; then
+      [ "$i" != 1 ] || st=failed
+      log "warning: breakdown snapshot $k: SIGUSR2 to node$i failed"
+    fi
+    i=$((i + 1))
+  done
+  echo "$k,$ms,$st" >>"$snaps_file"
+}
+
+# start_window_snapshot: background job (pid in snap_pid) that takes
+# snapshot 1 at the start of the measurement window (run-phase marker +
+# WARMUP); it gives up once $snap_stop exists or this run_one.sh is gone.
+start_window_snapshot() {
+  local parent=$$
+  (
+    set +e
+    while ! grep -q "$FAULT_RUN_MARKER" "$bench_log" 2>/dev/null; do
+      [ ! -e "$snap_stop" ] && kill -0 "$parent" 2>/dev/null || exit 0
+      sleep 0.1
+    done
+    t0=$(($(hbdb_epoch_ms) + $(dur_ms "$WARMUP")))
+    while [ "$(hbdb_epoch_ms)" -lt "$t0" ]; do
+      [ ! -e "$snap_stop" ] && kill -0 "$parent" 2>/dev/null || exit 0
+      sleep 0.1
+    done
+    window_snapshot 1
+  ) &
+  snap_pid=$!
+}
+
+stop_window_snapshot() {
+  if [ -n "$snap_pid" ]; then
+    : >"$snap_stop"
+    wait "$snap_pid" 2>/dev/null || true
+    snap_pid=""
+  fi
+}
+
+# snapshot_field K KEY: integer KEY of node1's snapshot K, waiting up to ~5 s
+# for the file (veritas writes it asynchronously after the signal).
+snapshot_field() {
+  local f="$HBDB_RESULTS_RAW/breakdown-node1.snap$1.json" k=0
+  while [ ! -s "$f" ] && [ "$k" -lt 50 ]; do
+    sleep 0.1
+    k=$((k + 1))
+  done
+  hbdb_json_int "$f" "$2"
+}
+
 stop_watchdog() {
   if [ -n "$watchdog_pid" ]; then
     kill "$watchdog_pid" 2>/dev/null || true
@@ -484,6 +613,7 @@ cleanup() {
   fi
   stop_watchdog
   stop_sampler
+  stop_window_snapshot
   stop_audit
   stop_faults
   stop_events
@@ -496,7 +626,7 @@ cleanup() {
   fi
   "$HBDB_CLUSTER_DIR/down.sh"
   collect_breakdown "$exp_dir/$tag.breakdown"
-  rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$events_file" "$fault_stopped" "$fault_stop" "$audit_pidfile" "$audit_stop" "$audit_err"
+  rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$events_file" "$fault_stopped" "$fault_stop" "$audit_pidfile" "$audit_stop" "$audit_err" "$snap_stop"
   release_lock
   if [ "$rc" -eq 0 ]; then
     log "done: $EXP/$tag"
@@ -565,7 +695,7 @@ if [ "$RTT_MS" -gt 0 ]; then
     log "could not apply netem for RTT_MS=$RTT_MS"
     exit 1
   fi
-  fault_log netem_rtt "node1-node$N" "egress delay ${NET_BASE_DELAY_MS}ms on every node (RTT_MS=$RTT_MS)"
+  fault_log netem_rtt "node1-node$N" "egress delay ${NET_BASE_DELAY_MS}ms on every node${NET_RTT_EXTRA:+ and on $NET_RTT_EXTRA} (RTT_MS=$RTT_MS)"
 fi
 
 # ---- benchmark + docker stats sampling ----
@@ -582,8 +712,10 @@ fi
 
 rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$exp_dir/$tag.timeline"
 rm -f "$audit_file" "$audit_pidfile" "$audit_stop" "$audit_err"
+rm -f "$ops_file" "$wtimeline_file" "$stats_file" "$snaps_file" "$snap_stop" "$final_audit_file" "$leaders_file"
 : >"$bench_log"
 : >"$samples"
+echo "$HBDB_STATS_HEADER" >"$stats_file"
 
 ncpu="$(docker info --format '{{.NCPU}}')"
 hbdb_require_uint NCPU "$ncpu"
@@ -599,15 +731,23 @@ hbdb_compose exec -T client ycsbbench \
   --veritas-addrs="$addrs" "$tso_arg" --mode="$(hbdb_bench_mode "$BACKEND")" \
   --warmup="$WARMUP" --duration="$DURATION" \
   --out="/results/$EXP/.$tag.row.csv" --tags="$tags" \
-  --timeline="/results/$EXP/$tag.timeline" >"$bench_log" 2>&1 &
+  --timeline="/results/$EXP/$tag.timeline" --wtimeline="/results/$EXP/$tag.wtimeline" \
+  --ops="/results/$EXP/$tag.ops.csv" >"$bench_log" 2>&1 &
 bench_pid=$!
+# Core backends: breakdown snapshot 1 at the start of the measurement window
+# (snapshot 2 follows when the bench ends), for net_bytes_per_block.
+if hbdb_backend_has_fault_policy "$BACKEND"; then
+  start_window_snapshot
+fi
 
 # Watchdog: kill ycsbbench (the background subshell and its docker compose
 # exec child) once it has run for watchdog_secs.
 (
   set +e
+  parent=$$
   end=$(($(date +%s) + watchdog_secs))
   while [ "$(date +%s)" -lt "$end" ]; do
+    kill -0 "$parent" 2>/dev/null || exit 0 # run_one.sh is gone: no orphan
     sleep 1
   done
   : >"$watchdog_fired"
@@ -637,27 +777,137 @@ if [ "$FAULT" != none ]; then
   esac
 fi
 
-# Sample host CPU use once the run phase (warmup + measurement) has started:
-# sum of all cluster containers' CPU% / (100 * NCPU) * 100. There is no sleep
-# between samples: each `docker stats --no-stream` call itself takes about
-# 1 s, so the cadence is roughly one sample per second.
+# Sample every cluster container once the run phase (warmup + measurement)
+# has started: each `docker stats --no-stream` call goes, one line per
+# container, to $stats_file (HBDB_STATS_HEADER), and host CPU use = sum of
+# all containers' CPU% / (100 * NCPU) * 100 to $samples (host_cpu_max_pct).
+# There is no sleep between samples: each call itself takes about 1 s, so the
+# cadence is roughly one sample per second; a call that prints nothing (e.g.
+# the daemon is down) is followed by a 0.5 s pause instead of a busy loop.
+# The loop exits once this run_one.sh is gone (no orphan after a SIGKILL).
 (
   set +e
+  parent=$$
   started=0
   while [ ! -e "$sampler_stop" ]; do
+    kill -0 "$parent" 2>/dev/null || exit 0
     if [ "$started" = 0 ] && grep -q 'ycsbbench: run phase started' "$bench_log" 2>/dev/null; then
       started=1
     fi
     if [ "$started" = 1 ]; then
+      ms="$(hbdb_epoch_ms)"
+      utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       # shellcheck disable=SC2086
-      docker stats --no-stream --format '{{.CPUPerc}}' $container_ids 2>/dev/null |
-        awk -v n="$ncpu" '{ gsub(/%/, ""); s += $1 } END { if (NR > 0) printf "%.2f\n", s / (100 * n) * 100 }' >>"$samples"
+      out="$(docker stats --no-stream --format "$HBDB_STATS_FORMAT" $container_ids 2>/dev/null)"
+      if [ -z "$out" ]; then
+        sleep 0.5
+        continue
+      fi
+      printf '%s\n' "$out" | hbdb_stats_lines "$ms" "$utc" >>"$stats_file"
+      printf '%s\n' "$out" |
+        awk -F, -v n="$ncpu" 'NF >= 2 { gsub(/[% ]/, "", $2); s += $2; c++ } END { if (c > 0) printf "%.2f\n", s / (100 * n) * 100 }' >>"$samples"
     else
       sleep 0.5 # waiting for the run-phase marker
     fi
   done
 ) &
 sampler_pid=$!
+
+# Node-log lines that make a fault-free run invalid (see the header).
+VALID_LOG_PATTERN='FATAL apply|buffer is full|replica failed, exiting|can no longer commit'
+
+# final_audit: `auditor --once` on every node (core backends, FAULT=none),
+# AUDIT_WAIT_SECS after the bench and retried twice while DIVERGENT (a node
+# may still apply the last blocks). Output in $final_audit_file. Returns 0
+# CONSISTENT, 1 DIVERGENT, 2 no verdict.
+final_audit() {
+  local k=0 rc
+  while :; do
+    sleep "$AUDIT_WAIT_SECS"
+    rc=0
+    hbdb_compose exec -T client auditor --addrs="$addrs" --once >"$final_audit_file" 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ] && grep -qx 'CONSISTENT' "$final_audit_file"; then
+      return 0
+    fi
+    if [ "$rc" -eq 1 ] && grep -q '^DIVERGENT ' "$final_audit_file"; then
+      k=$((k + 1))
+      [ "$k" -lt 3 ] || return 1
+      log "auditor --once: $(grep '^DIVERGENT ' "$final_audit_file" | head -n 1); retrying in ${AUDIT_WAIT_SECS}s ($k/3)"
+      continue
+    fi
+    return 2
+  done
+}
+
+# check_validity: the FAULT=none sanity gate of the header. Logs every
+# reason and returns 1 if the run must not get a row.
+check_validity() {
+  local line wok werr w d zero i hits bad=0 arc
+  if [ ! -s "$ops_file" ] || [ "$(head -n 1 "$ops_file")" != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors" ]; then
+    log "invalid run: ycsbbench wrote no usable $ops_file (image older than this harness? rebuild with experiments/build.sh)"
+    return 1
+  fi
+  line="$(awk -F, '$1 == "write" { print $2 " " $7; exit }' "$ops_file")"
+  wok="${line%% *}"
+  werr="${line##* }"
+  case "$wok$werr" in
+    '' | *[!0-9]*) log "invalid run: no write line in $ops_file"; return 1 ;;
+  esac
+  if awk -v ok="$wok" -v e="$werr" -v p="$VALID_MAX_WRITE_ERR_PCT" 'BEGIN { t = ok + e; exit !(t > 0 && e * 100 > p * t) }'; then
+    log "invalid run: $werr of $((wok + werr)) writes failed (> ${VALID_MAX_WRITE_ERR_PCT}%, VALID_MAX_WRITE_ERR_PCT)"
+    bad=1
+  fi
+  w="$(dur_seconds "$WARMUP")"
+  d="$(dur_seconds "$DURATION")"
+  # Longest run of zero seconds inside the window; seconds missing at the
+  # end of the timeline count as zero.
+  zero="$(awk -v a="$w" -v b="$((w + d))" '
+    NR > a && NR <= b { n++; if ($1 + 0 == 0) { run++; if (run > m) m = run } else run = 0 }
+    END { miss = (b - a) - n; if (miss > 0) { run += miss; if (run > m) m = run }; print m + 0 }' "$exp_dir/$tag.timeline" 2>/dev/null || true)"
+  [ -n "$zero" ] || zero="$d"
+  if [ "$zero" -ge "$VALID_ZERO_RUN_SECS" ]; then
+    log "invalid run: $zero consecutive measurement second(s) with 0 successful ops in $exp_dir/$tag.timeline (>= VALID_ZERO_RUN_SECS=$VALID_ZERO_RUN_SECS)"
+    bad=1
+  fi
+  i=1
+  while [ "$i" -le "$N" ]; do
+    hits="$(hbdb_compose logs --no-color "node$i" 2>/dev/null | grep -E "$VALID_LOG_PATTERN" | head -n 3 || true)"
+    if [ -n "$hits" ]; then
+      log "invalid run: node$i log has: $(printf '%s' "$hits" | tr '\n' '|')"
+      bad=1
+    fi
+    i=$((i + 1))
+  done
+  [ "$bad" = 0 ] || return 1
+  if hbdb_backend_has_fault_policy "$BACKEND"; then
+    log "auditor --once on $addrs (after ${AUDIT_WAIT_SECS}s), output $final_audit_file"
+    arc=0
+    final_audit || arc=$?
+    case "$arc" in
+      0) log "auditor --once: CONSISTENT" ;;
+      1)
+        log "invalid run: auditor --once: $(grep '^DIVERGENT ' "$final_audit_file" | head -n 1) (3 tries)"
+        return 1
+        ;;
+      *) log "warning: auditor --once gave no verdict (see $final_audit_file); the row stands" ;;
+    esac
+  fi
+  return 0
+}
+
+# collect_leaders: raft with a fault: every "entering leader state" line of
+# every node log (docker timestamps) to $leaders_file, to tell who led at the
+# fault time (a warning when there is none).
+collect_leaders() {
+  local i=1
+  : >"$leaders_file"
+  while [ "$i" -le "$N" ]; do
+    hbdb_compose logs --no-color --timestamps "node$i" 2>/dev/null | grep 'entering leader state' |
+      sed "s/^/node$i /" >>"$leaders_file" || true
+    i=$((i + 1))
+  done
+  [ -s "$leaders_file" ] || log "warning: no 'entering leader state' line in the node logs; $leaders_file is empty"
+}
 
 if wait "$bench_pid"; then
   bench_rc=0
@@ -666,6 +916,12 @@ else
 fi
 bench_pid=""
 stop_watchdog
+# Breakdown snapshot 2 right after the bench, while the sampler still runs
+# (a stats sample close to it is needed), if snapshot 1 reached node1.
+stop_window_snapshot
+if [ "$bench_rc" -eq 0 ] && [ -s "$snaps_file" ] && grep -q '^1,[0-9]*,ok$' "$snaps_file"; then
+  window_snapshot 2
+fi
 stop_sampler
 stop_audit
 stop_faults
@@ -695,6 +951,15 @@ grep -q 'ycsbbench: run phase started' "$bench_log" || log "warning: run-phase m
 if [ -n "$audit_started" ] && [ ! -s "$audit_file" ]; then
   log "warning: the auditor wrote no $audit_file (see $audit_err; RQ3 detection latency unavailable)"
 fi
+if [ "$BACKEND" = raft ] && [ "$FAULT" != none ]; then
+  collect_leaders
+fi
+if [ "$FAULT" = none ]; then
+  if ! check_validity; then
+    log "the run failed the validity checks; no CSV row written"
+    exit 3
+  fi
+fi
 
 # ---- assemble the final row ----
 [ -s "$row_tmp" ] || die "ycsbbench wrote no row to $row_tmp"
@@ -710,7 +975,25 @@ else
   log "warning: no docker stats samples; host_cpu_max_pct and saturated left empty"
   saturated=""
 fi
-net_bytes_per_block="" # original backends expose no committed-block count
+# net_bytes_per_block (core backends; the originals expose no block count):
+# see the header and hbdb_net_bytes_per_block in lib.sh.
+net_bytes_per_block=""
+if hbdb_backend_has_fault_policy "$BACKEND"; then
+  snap_t1="$(awk -F, '$1 == 1 && $3 == "ok" { print $2; exit }' "$snaps_file" 2>/dev/null || true)"
+  snap_t2="$(awk -F, '$1 == 2 && $3 == "ok" { print $2; exit }' "$snaps_file" 2>/dev/null || true)"
+  snap_b1=""
+  snap_b2=""
+  if [ -n "$snap_t1" ] && [ -n "$snap_t2" ]; then
+    snap_b1="$(snapshot_field 1 blocks)"
+    snap_b2="$(snapshot_field 2 blocks)"
+  fi
+  if net_bytes_per_block="$(hbdb_net_bytes_per_block "$stats_file" "$snap_t1" "$snap_t2" "$snap_b1" "$snap_b2")"; then
+    log "net_bytes_per_block=$net_bytes_per_block (node1 applied $((snap_b2 - snap_b1)) blocks between the window snapshots)"
+  else
+    net_bytes_per_block=""
+    log "warning: net_bytes_per_block left empty (snapshot epochs '$snap_t1'/'$snap_t2', node1 blocks '$snap_b1'/'$snap_b2', $(($(wc -l <"$stats_file") - 1)) stats lines)"
+  fi
+fi
 
 final="$(echo "$row" | cut -d, -f1-19),$host_cpu_max_pct,$saturated,$net_bytes_per_block"
 if [ ! -s "$csv" ]; then
@@ -718,7 +1001,7 @@ if [ ! -s "$csv" ]; then
 fi
 echo "$final" >>"$csv"
 host_state end
-log "row appended to $csv (host_cpu_max_pct=$host_cpu_max_pct saturated=$saturated)"
+log "row appended to $csv (host_cpu_max_pct=$host_cpu_max_pct saturated=$saturated net_bytes_per_block=$net_bytes_per_block)"
 # Hook (E2: Kafka offsets) while the cluster is still up; cleanup's down.sh
 # comes after. A failing hook is a warning, never a failed run.
 if [ -n "$PRE_DOWN_HOOK" ]; then

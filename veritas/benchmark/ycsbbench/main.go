@@ -28,6 +28,10 @@ var (
 	outPath           = kingpin.Flag("out", "CSV file to append one result row to").Default("").String()
 	tagsFlag          = kingpin.Flag("tags", "Extra CSV columns as k=v,k=v").Default("").String()
 	timelinePath      = kingpin.Flag("timeline", "File to write per-second successful request counts to").Default("").String()
+	wtimelinePath     = kingpin.Flag("wtimeline", "File to write per-second successful Set counts to (same t=0 as --timeline)").Default("").String()
+	opsPath           = kingpin.Flag("ops", "File to write the per-op-kind (read, write) summary CSV to: count, tps, lat_mean_ms, lat_p50_ms, lat_p99_ms, errors").Default("").String()
+	errBackoffMin     = kingpin.Flag("error-backoff", "Pause of a run-phase worker after a failed request, doubled on each further failure up to --error-backoff-max, reset by a success (0: no pause)").Default("50ms").Duration()
+	errBackoffMax     = kingpin.Flag("error-backoff-max", "Longest pause of a run-phase worker after consecutive failed requests").Default("1s").Duration()
 	mode              = kingpin.Flag("mode", "Backend mode: kafka (uses TSO if given) or tm (never uses TSO)").Default("kafka").Enum("kafka", "tm")
 	loadThreads       = kingpin.Flag("load-threads", "Concurrent Sets during the data-load phase (all through the first driver)").Default("10").Int()
 	loadTimeout       = kingpin.Flag("load-timeout", "Deadline of the data-load phase; exceeding it or any failed load Set aborts the run").Default("20m").Duration()
@@ -89,6 +93,9 @@ func main() {
 	}
 	if *loadOpTimeout <= 0 {
 		kingpin.Fatalf("--load-op-timeout must be > 0")
+	}
+	if *errBackoffMin < 0 || *errBackoffMax < *errBackoffMin {
+		kingpin.Fatalf("want 0 <= --error-backoff <= --error-backoff-max, got %v and %v", *errBackoffMin, *errBackoffMax)
 	}
 	if *mode == "tm" {
 		*tsoAddr = ""
@@ -221,6 +228,9 @@ func main() {
 			wg.Add(1)
 			go func(seq int) {
 				defer wg.Done()
+				// A worker whose node is stopped or unreachable (F1, F2)
+				// would otherwise fail fast in a loop; it pauses instead.
+				bo := benchmark.Backoff{Min: *errBackoffMin, Max: *errBackoffMax}
 				for {
 					select {
 					case <-runCtx.Done():
@@ -230,15 +240,22 @@ func main() {
 							return
 						}
 						t0 := time.Now()
+						var err error
 						switch op.ReqType {
 						case benchmark.GetOp:
-							val, err := clis[seq].Get(runCtx, op.Key)
+							var val string
+							val, err = clis[seq].Get(runCtx, op.Key)
 							rec.ObserveGet(time.Now(), time.Since(t0), val, err)
 						case benchmark.SetOp:
-							err := clis[seq].Set(runCtx, op.Key, op.Val)
-							rec.Observe(time.Now(), time.Since(t0), err)
+							err = clis[seq].Set(runCtx, op.Key, op.Val)
+							rec.ObserveSet(time.Now(), time.Since(t0), err)
 						default:
 							panic(fmt.Sprintf("invalid operation: %v", op.ReqType))
+						}
+						if err == nil {
+							bo.Success()
+						} else if *errBackoffMin > 0 {
+							benchmark.SleepCtx(runCtx, bo.Failure())
 						}
 					}
 				}
@@ -254,6 +271,10 @@ func main() {
 		*driverNum, *driverConcurrency, s.TPS)
 	fmt.Printf("Latency mean/p50/p99: %.3f / %.3f / %.3f ms; errors: %d; wrong gets: %d\n",
 		s.LatMeanMs, s.LatP50Ms, s.LatP99Ms, s.Errors, s.WrongGets)
+	for _, o := range rec.OpSummaries() {
+		fmt.Printf("  %-5s %d ok (%.2f req/s), latency mean/p50/p99: %.3f / %.3f / %.3f ms; errors: %d\n",
+			o.Op, o.Count, o.TPS, o.LatMeanMs, o.LatP50Ms, o.LatP99Ms, o.Errors)
+	}
 	if kinds := rec.ErrorKinds(); len(kinds) > 0 {
 		fmt.Printf("Errors by message (measurement window, at most %d distinct):\n", benchmark.MaxErrorKinds)
 		for _, k := range kinds {
@@ -268,6 +289,16 @@ func main() {
 	}
 	if *timelinePath != "" {
 		if err := writeTimeline(*timelinePath, rec.Timeline()); err != nil {
+			panic(err)
+		}
+	}
+	if *wtimelinePath != "" {
+		if err := writeTimeline(*wtimelinePath, rec.SetTimeline()); err != nil {
+			panic(err)
+		}
+	}
+	if *opsPath != "" {
+		if err := benchmark.WriteOpsCSV(*opsPath, rec.OpSummaries()); err != nil {
 			panic(err)
 		}
 	}

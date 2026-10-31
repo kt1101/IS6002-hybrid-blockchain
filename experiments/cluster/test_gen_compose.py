@@ -35,6 +35,18 @@ def test_kafka_compose_has_n_nodes_and_broker():
     assert "advertised.listeners=PLAINTEXT://172.28.0.2:9092" in c["services"]["kafka"]["command"][-1]
 
 
+@pytest.mark.parametrize("backend", ["kafka-orig", "kafka", "raft"])
+def test_broker_and_tso_can_take_netem(backend):
+    # E5: experiments/net.sh delays the broker's and the TSO's egress too.
+    c = gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    assert c["services"]["tso"]["cap_add"] == ["NET_ADMIN"]
+    if backend != "raft":
+        assert c["services"]["kafka"]["cap_add"] == ["NET_ADMIN"]
+    else:
+        assert "kafka" not in c["services"]
+    assert "cap_add" not in c["services"]["client"]
+
+
 def test_tendermint_compose_has_no_kafka_or_tso():
     c = gen(backend="tm-orig", n=7, block_size=50, commit_mode="sync", cpus=1, mem="1g",
             tm_dir="/gen/tm")

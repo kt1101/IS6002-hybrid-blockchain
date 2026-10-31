@@ -131,3 +131,30 @@ func TestWriteFileAtomic(t *testing.T) {
 		t.Fatalf("write into a missing directory succeeded")
 	}
 }
+
+func TestSnapshotPath(t *testing.T) {
+	if got := snapshotPath("/results/breakdown-node3.json", 2); got != "/results/breakdown-node3.snap2.json" {
+		t.Fatalf("snapshotPath=%q", got)
+	}
+	if got := snapshotPath("/tmp/b", 1); got != "/tmp/b.snap1.json" {
+		t.Fatalf("snapshotPath without .json=%q", got)
+	}
+}
+
+func TestSnapshotSignalWritesNumberedSnapshots(t *testing.T) {
+	paths := make(chan string, 4)
+	watchSnapshotSignal(func(p string) error { paths <- p; return nil }, "/results/breakdown-node1.json")
+	for k := 1; k <= 2; k++ {
+		if err := syscall.Kill(syscall.Getpid(), syscall.SIGUSR2); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case p := <-paths:
+			if want := snapshotPath("/results/breakdown-node1.json", k); p != want {
+				t.Fatalf("snapshot %d written to %q, want %q", k, p, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("snapshot %d not written 5 s after SIGUSR2", k)
+		}
+	}
+}

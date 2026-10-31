@@ -11,14 +11,35 @@
 #   }
 #   exp_main
 #
-# exp_main calls exp_plan twice: first with EXP_VALIDATE_ONLY=1 (exp_cfg only
-# validates its configuration: fault string, tendermint limits, YCSB files),
-# so a bad plan dies before the first run and before any --dry-run output;
-# then for real, followed by exp_finish.
+# exp_main calls exp_plan several times: first with EXP_VALIDATE_ONLY=1
+# (exp_cfg only validates its configuration: fault string, tendermint limits,
+# YCSB files), so a bad plan dies before the first run and before any
+# --dry-run output; then once per rep (EXP_PASS=1..REPS: exp_cfg runs only
+# that rep of its configuration), then once per extra rep of the noise rule
+# (EXP_PASS=x1..x<EXTRA_REPS>), followed by exp_finish. So rep is the
+# OUTERMOST loop: every configuration gets rep 1 before any gets rep 2, and
+# host drift during a long batch is spread over all backends instead of
+# landing on the ones planned last (the resume key is unchanged).
 #
-# exp_cfg runs one configuration for REPS=1..3 (plus the noise-rule reps), each
-# through experiments/run_one.sh with COMMIT_MODE=sync, appending to
+# exp_cfg runs one configuration (the rep of the current pass) through
+# experiments/run_one.sh with COMMIT_MODE=sync, appending to
 # results/raw/<EXP>.csv.
+#
+# Keep-awake: a real (not --dry-run) driver re-executes itself once under
+# `caffeinate -dims` when that command exists (macOS), so the host does not
+# sleep (which pauses the Docker VM) during a batch; HBDB_CAFFEINATED=1 marks
+# the re-executed process. Elsewhere it is a no-op. NO_CAFFEINATE=1 skips it.
+#
+# Params guard: results/raw/<EXP>.params records DURATION, WARMUP, CPUS, MEM,
+# LOAD_THREADS, BATCH_FLUSH and the code commit (git describe --dirty, as
+# run_one.sh's commit column) of the first real invocation of an EXP; a later
+# invocation (or --dry-run) with any other value dies before running anything
+# (the CSV has no columns for them, so a resumed EXP would silently mix
+# settings). Use a new EXP, or delete the .params file on purpose. Only for
+# the commit, EXP_ALLOW_COMMIT_CHANGE=1 lets a batch go on (e.g. after a
+# docs-only commit; logged). Disk guard: before every run the free space of
+# the disk holding results/raw (df) must be at least EXP_MIN_FREE_GB=5 GiB,
+# else the batch stops (exit 1) before the run.
 #
 # Common env (every driver):
 #   REPS=3        base repetitions per configuration
@@ -47,12 +68,15 @@
 # rep numbers, so resuming works unchanged. The summary prints every CV and
 # flags those still above 10% (informational, not an error). An extra rep that
 # runs joins the planned runs, so the summary's planned count includes it.
+# The extra reps run after every configuration has its REPS reps (pass x1
+# gives rep REPS+1 to every noisy configuration, pass x2 rep REPS+2 to those
+# still noisy).
 #
 # Resumable: a run whose row (backend, n, f, clients, block_size, workload,
 # rtt_ms, fault, rep) is already in results/raw/<EXP>.csv is skipped; a run
 # that failed leaves no row, so the next invocation tries it again. Never
 # reuse an EXP with a different DURATION, WARMUP, BATCH_FLUSH or CPUS/MEM: the
-# existing rows would be taken as done.
+# existing rows would be taken as done (the params guard refuses it).
 #
 # Failures: run_one.sh exit 2 (cluster unhealthy) or 3 (bench failed, a
 # container died, a fault was not injected) is retried once on a fresh
@@ -88,6 +112,7 @@ EXP_SKIPPED=""               # backends skipped (no usable E1 best), one line ea
 EXP_DRY=0
 EXP_RESOLVED_CLIENTS=""
 EXP_VALIDATE_ONLY=0
+EXP_PASS=""                  # the exp_plan pass: rep number, or x<k> for extra rep k
 EXP_BEST_PLACEHOLDER="best-of-e1"
 
 # exp_dur_seconds D: whole seconds of a duration like 60s, 500ms, 3m, 1h.
@@ -112,6 +137,86 @@ exp_hook_for() {
   return 0
 }
 
+# exp_keep_awake ARGS...: re-execute the driver ($0 ARGS) under
+# `caffeinate -dims` (see the header); returns when there is nothing to do.
+exp_keep_awake() {
+  [ "$EXP_DRY" != 1 ] || return 0
+  [ -z "${HBDB_CAFFEINATED:-}" ] || return 0
+  [ "${NO_CAFFEINATE:-0}" = 0 ] || return 0
+  command -v caffeinate >/dev/null 2>&1 || return 0
+  export HBDB_CAFFEINATED=1
+  log "re-executing under caffeinate -dims (keeps the host and the Docker VM awake for the batch)"
+  exec caffeinate -dims "$0" "$@"
+}
+
+# exp_commit: the code commit as run_one.sh records it (git describe --dirty).
+exp_commit() {
+  local c
+  c="$(git -C "$HBDB_ROOT" describe --always --dirty --abbrev=7 2>/dev/null | tr -d ',' || true)"
+  echo "${c:-unknown}"
+}
+
+# exp_params_current: the guarded settings of this invocation, one key=value
+# per line (unset = run_one.sh's default; LOAD_THREADS "default" = the
+# backend's default from lib.sh).
+exp_params_current() {
+  printf 'DURATION=%s\nWARMUP=%s\nCPUS=%s\nMEM=%s\nLOAD_THREADS=%s\nBATCH_FLUSH=%s\ncommit=%s\n' \
+    "$DURATION" "$WARMUP" "${CPUS:-0.5}" "${MEM:-768m}" "${LOAD_THREADS:-default}" "${BATCH_FLUSH:-1s}" "$(exp_commit)"
+}
+
+# exp_params_record: write results/raw/<EXP>.params before the first run of
+# the EXP (exp_run; a plan that is refused or a --dry-run writes nothing).
+exp_params_record() {
+  local f="$HBDB_RESULTS_RAW/$EXP.params"
+  [ ! -s "$f" ] || return 0
+  if [ -s "$EXP_CSV" ]; then
+    log "note: $EXP_CSV has rows but there is no $f: recording this invocation's settings; the earlier rows are not checked"
+  fi
+  exp_params_current >"$f"
+}
+
+# exp_params_check: the params guard of the header: dies when the EXP was
+# started (exp_params_record) with other settings.
+exp_params_check() {
+  local f="$HBDB_RESULTS_RAW/$EXP.params" cur line key want had diff=""
+  [ -s "$f" ] || return 0
+  cur="$(exp_params_current)"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key="${line%%=*}"
+    want="${line#*=}"
+    had="$(sed -n "s/^$key=//p" "$f" | head -n 1)"
+    [ "$had" != "$want" ] || continue
+    if [ "$key" = commit ] && [ "${EXP_ALLOW_COMMIT_CHANGE:-0}" = 1 ]; then
+      log "note: commit $want differs from $had in $f; going on (EXP_ALLOW_COMMIT_CHANGE=1)"
+      continue
+    fi
+    diff="$diff $key=$want (EXP started with ${had:-<none>})"
+  done <<EOT
+$cur
+EOT
+  if [ -n "$diff" ]; then
+    die "$EXP was started with other settings ($f):$diff. Use a new EXP, or delete $f on purpose; for a commit change only, EXP_ALLOW_COMMIT_CHANGE=1 (after rebuilding the images with experiments/build.sh)"
+  fi
+}
+
+# exp_check_disk: the disk guard of the header (exits 1 with the summary).
+exp_check_disk() {
+  local avail_kb min_kb=$((EXP_MIN_FREE_GB * 1024 * 1024))
+  avail_kb="$(df -Pk "$HBDB_RESULTS_RAW" 2>/dev/null | awk 'NR == 2 { print $4 }' || true)"
+  case "$avail_kb" in
+    '' | *[!0-9]*)
+      log "warning: could not read the free disk space of $HBDB_RESULTS_RAW (df); not checked"
+      return 0
+      ;;
+  esac
+  if [ "$avail_kb" -lt "$min_kb" ]; then
+    log "only $((avail_kb / 1024)) MiB free on the disk of $HBDB_RESULTS_RAW (< EXP_MIN_FREE_GB=$EXP_MIN_FREE_GB GiB): stopping the batch before the next run"
+    exp_summary
+    exit 1
+  fi
+}
+
 # exp_begin DEFAULT_EXP ARGS...: parse the arguments, validate the environment
 # and set EXP, REPS, EXTRA_REPS, EXP_CSV, EXP_BACKEND_LIST, ... A driver that
 # needs a duration other than 60s sets DURATION before calling it.
@@ -133,6 +238,7 @@ exp_begin() {
     1) EXP_DRY=1 ;;
     *) die "DRY_RUN must be 0 or 1, got '$DRY_RUN'" ;;
   esac
+  exp_keep_awake "$@"
   EXP="${EXP:-$default_exp}"
   EXP_DEFAULT="$default_exp"
   case "$EXP" in
@@ -143,6 +249,8 @@ exp_begin() {
   hbdb_require_uint REPS "$REPS"
   [ "$REPS" -ge 1 ] || die "REPS must be >= 1"
   hbdb_require_uint EXTRA_REPS "$EXTRA_REPS"
+  EXP_MIN_FREE_GB="${EXP_MIN_FREE_GB:-5}"
+  hbdb_require_uint EXP_MIN_FREE_GB "$EXP_MIN_FREE_GB"
   E1_EXP="${E1_EXP:-e1}"
   case "$E1_EXP" in
     '' | *[!A-Za-z0-9._-]*) die "E1_EXP must match [A-Za-z0-9._-]+, got '$E1_EXP'" ;;
@@ -176,6 +284,7 @@ exp_begin() {
     [ "$(head -n 1 "$EXP_CSV")" = "$HBDB_CSV_HEADER" ] || die "$EXP_CSV has a different header"
   fi
   [ "$EXP_DRY" = 1 ] || mkdir -p "$HBDB_RESULTS_RAW"
+  exp_params_check
   log "$EXP: backends {$EXP_BACKEND_LIST}, REPS=$REPS, EXTRA_REPS=$EXTRA_REPS, COMMIT_MODE=sync, DURATION=$DURATION, WARMUP=$WARMUP${BATCH_FLUSH:+, BATCH_FLUSH=$BATCH_FLUSH}$([ "$EXP_DRY" = 1 ] && echo ', DRY RUN')"
 }
 
@@ -269,8 +378,10 @@ exp_run() {
     echo "DRY_RUN: EXP=$EXP $desc COMMIT_MODE=sync experiments/run_one.sh"
     return 0
   fi
+  exp_params_record
   rc=0
   for attempt in 1 2; do
+    exp_check_disk
     log "run $desc (attempt $attempt/2)"
     rc=0
     EXP="$EXP" BACKEND="$b" N="$n" F="$f" CLIENTS="$c" BLOCK_SIZE="$blk" WORKLOAD="$w" RTT_MS="$rtt" FAULT="$fault" REP="$r" \
@@ -299,39 +410,40 @@ exp_run() {
   return 0
 }
 
-# exp_cfg BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT: REPS reps, then the
-# noise rule's extra reps.
+# exp_cfg BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT: the configuration's
+# run of the current pass (EXP_PASS): rep EXP_PASS, or for pass x<k> the
+# noise rule's extra rep k (see the header).
 exp_cfg() {
-  local r=1
   exp_validate_cfg "$@"
   [ "$EXP_VALIDATE_ONLY" != 1 ] || return 0
   if ! printf '%s\n' "$EXP_CFGS" | grep -Fxq "$*"; then
     EXP_CFGS="${EXP_CFGS:+$EXP_CFGS
 }$*"
   fi
-  while [ "$r" -le "$REPS" ]; do
-    exp_run "$@" "$r"
-    r=$((r + 1))
-  done
-  exp_extra_reps "$@"
+  case "$EXP_PASS" in
+    x*) exp_extra_rep "${EXP_PASS#x}" "$@" ;;
+    *) exp_run "$@" "$EXP_PASS" ;;
+  esac
 }
 
-# exp_extra_reps BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT: the noise rule.
-exp_extra_reps() {
-  local r=1 k=1 cv rows
+# exp_extra_rep K BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT: the noise
+# rule's extra rep K (rep REPS+K) of the configuration, if it has all its
+# REPS base rows and the CV of its rows is still above EXP_CV_MAX. (Pass x<K>
+# only finds the CV high if it was high in pass x<K-1> too, which then ran
+# rep REPS+K-1: the same rule as running the extra reps back to back.)
+exp_extra_rep() {
+  local k="$1" r=1 cv rows
+  shift
   while [ "$r" -le "$REPS" ]; do
     exp_has_row "$EXP_CSV" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$r" || return 0
     r=$((r + 1))
   done
-  while [ "$k" -le "$EXTRA_REPS" ]; do
-    read -r cv rows <<EOT
+  read -r cv rows <<EOT
 $(exp_cfg_cv "$@")
 EOT
-    exp_cv_high "$cv" || return 0
-    log "CV $cv > $EXP_CV_MAX over $rows rows of $1 n=$2 f=$3 clients=$4 block=$5 workload=$6 rtt=$7 fault=$8: extra rep $k/$EXTRA_REPS (rep $((REPS + k)))"
-    exp_run "$@" "$((REPS + k))"
-    k=$((k + 1))
-  done
+  exp_cv_high "$cv" || return 0
+  log "CV $cv > $EXP_CV_MAX over $rows rows of $1 n=$2 f=$3 clients=$4 block=$5 workload=$6 rtt=$7 fault=$8: extra rep $k/$EXTRA_REPS (rep $((REPS + k)))"
+  exp_run "$@" "$((REPS + k))"
 }
 
 # exp_resolve_clients BACKEND: set EXP_RESOLVED_CLIENTS to the CLIENTS of the
@@ -363,12 +475,13 @@ exp_resolve_clients() {
     done
   done
   if [ -z "$missing" ] && EXP_RESOLVED_CLIENTS="$(python3 "$EXP_BEST_PY" "$EXP_E1_CSV" "$b")"; then
-    [ "$EXP_VALIDATE_ONLY" = 1 ] || log "$b: best CLIENTS from $EXP_E1_CSV = $EXP_RESOLVED_CLIENTS"
+    # Logged (and skips recorded) once, in the first rep pass.
+    [ "$EXP_PASS" != 1 ] || log "$b: best CLIENTS from $EXP_E1_CSV = $EXP_RESOLVED_CLIENTS"
     return 0
   fi
   EXP_RESOLVED_CLIENTS=""
   if [ "$EXP_DRY" = 1 ]; then
-    if [ "$EXP_VALIDATE_ONLY" != 1 ]; then
+    if [ "$EXP_PASS" = 1 ]; then
       if [ -n "$missing" ]; then
         log "$b: best CLIENTS of E1 not known yet (E1 rows missing, clients/rep: $missing); the dry run lists CLIENTS=$EXP_BEST_PLACEHOLDER"
       else
@@ -378,7 +491,7 @@ exp_resolve_clients() {
     EXP_RESOLVED_CLIENTS="$EXP_BEST_PLACEHOLDER"
     return 0
   fi
-  if [ "$EXP_VALIDATE_ONLY" != 1 ]; then
+  if [ "$EXP_PASS" = 1 ]; then
     if [ -n "$missing" ]; then
       log "$b skipped: $EXP_E1_CSV lacks E1 rows at N=4 (clients/rep): $missing(run E1 first, or set BEST_CLIENTS_$up / FIXED_CLIENTS)"
       EXP_SKIPPED="${EXP_SKIPPED:+$EXP_SKIPPED
@@ -456,12 +569,24 @@ EOT3
   EXP_SUMMARY_PRESENT=$present
 }
 
-# exp_main: validate the whole plan, then run it (see the header).
+# exp_main: validate the whole plan, then run it one rep at a time, then the
+# extra reps (see the header).
 exp_main() {
+  local r=1 k=1
   EXP_VALIDATE_ONLY=1
+  EXP_PASS=validate
   exp_plan
   EXP_VALIDATE_ONLY=0
-  exp_plan
+  while [ "$r" -le "$REPS" ]; do
+    EXP_PASS="$r"
+    exp_plan
+    r=$((r + 1))
+  done
+  while [ "$k" -le "$EXTRA_REPS" ]; do
+    EXP_PASS="x$k"
+    exp_plan
+    k=$((k + 1))
+  done
   exp_finish
 }
 
