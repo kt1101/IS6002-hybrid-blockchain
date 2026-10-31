@@ -29,7 +29,7 @@ var (
 	tagsFlag          = kingpin.Flag("tags", "Extra CSV columns as k=v,k=v").Default("").String()
 	timelinePath      = kingpin.Flag("timeline", "File to write per-second successful request counts to").Default("").String()
 	wtimelinePath     = kingpin.Flag("wtimeline", "File to write per-second successful Set counts to (same t=0 as --timeline)").Default("").String()
-	opsPath           = kingpin.Flag("ops", "File to write the per-op-kind (read, write) summary CSV to: count, tps, lat_mean_ms, lat_p50_ms, lat_p99_ms, errors").Default("").String()
+	opsPath           = kingpin.Flag("ops", "File to write the per-op-kind (read, write) summary CSV to: count, tps, lat_mean_ms, lat_p50_ms, lat_p99_ms, errors (not aborted), aborted (gRPC Aborted)").Default("").String()
 	errBackoffMin     = kingpin.Flag("error-backoff", "Pause of a run-phase worker after a failed request, doubled on each further failure up to --error-backoff-max, reset by a success (0: no pause)").Default("50ms").Duration()
 	errBackoffMax     = kingpin.Flag("error-backoff-max", "Longest pause of a run-phase worker after consecutive failed requests").Default("1s").Duration()
 	mode              = kingpin.Flag("mode", "Backend mode: kafka (uses TSO if given) or tm (never uses TSO)").Default("kafka").Enum("kafka", "tm")
@@ -272,8 +272,8 @@ func main() {
 	fmt.Printf("Latency mean/p50/p99: %.3f / %.3f / %.3f ms; errors: %d; wrong gets: %d\n",
 		s.LatMeanMs, s.LatP50Ms, s.LatP99Ms, s.Errors, s.WrongGets)
 	for _, o := range rec.OpSummaries() {
-		fmt.Printf("  %-5s %d ok (%.2f req/s), latency mean/p50/p99: %.3f / %.3f / %.3f ms; errors: %d\n",
-			o.Op, o.Count, o.TPS, o.LatMeanMs, o.LatP50Ms, o.LatP99Ms, o.Errors)
+		fmt.Printf("  %-5s %d ok (%.2f req/s), latency mean/p50/p99: %.3f / %.3f / %.3f ms; errors: %d; aborted: %d\n",
+			o.Op, o.Count, o.TPS, o.LatMeanMs, o.LatP50Ms, o.LatP99Ms, o.Errors, o.Aborted)
 	}
 	if kinds := rec.ErrorKinds(); len(kinds) > 0 {
 		fmt.Printf("Errors by message (measurement window, at most %d distinct):\n", benchmark.MaxErrorKinds)

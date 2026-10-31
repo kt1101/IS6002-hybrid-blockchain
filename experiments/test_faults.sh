@@ -336,35 +336,15 @@ eq "json blocks (not batch_blocks)" "$(hbdb_json_int "$JS" blocks)" 1234
 eq "json dropped" "$(hbdb_json_int "$JS" dropped_blocks)" 3
 eq "json missing key" "$(hbdb_json_int "$JS" nope)" ""
 eq "json missing file" "$(hbdb_json_int "$TMP_ROOT/none.json" blocks)" ""
-ST="$TMP_ROOT/stats.csv"
-{
-  echo "$HBDB_STATS_HEADER"
-  # sample at 1000: node tx 1000+2000, kafka 500, client/tso ignored
-  echo "1000,u,hbdb-node1-1,1,a,b,c,d,1,0,1000"
-  echo "1000,u,hbdb-node2-1,1,a,b,c,d,1,0,2000"
-  echo "1000,u,hbdb-kafka-1,1,a,b,c,d,1,0,500"
-  echo "1000,u,hbdb-client-1,1,a,b,c,d,1,0,99999"
-  echo "1000,u,hbdb-tso-1,1,a,b,c,d,1,0,77777"
-  # sample at 2500
-  echo "2500,u,hbdb-node1-1,1,a,b,c,d,1,0,1500"
-  echo "2500,u,hbdb-node2-1,1,a,b,c,d,1,0,2500"
-  echo "2500,u,hbdb-kafka-1,1,a,b,c,d,1,0,700"
-  # sample at 9000: +10000 node bytes
-  echo "9000,u,hbdb-node1-1,1,a,b,c,d,1,0,11500"
-  echo "9000,u,hbdb-node2-1,1,a,b,c,d,1,0,2500"
-  echo "9000,u,hbdb-kafka-1,1,a,b,c,d,1,0,1700"
-  echo "9000,u,hbdb-client-1,1,a,b,c,d,1,0,0"
-} >"$ST"
-# t1=1200 -> sample 1000 (3500 bytes), t2=8000 -> sample 9000 (15700): 12200 / 4 blocks
-eq "net bytes per block" "$(hbdb_net_bytes_per_block "$ST" 1200 8000 6 10)" 3050
-eq "net bytes per block: closest samples" "$(hbdb_net_bytes_per_block "$ST" 2400 2600 0 2)" ""
-eq "net bytes per block: one sample apart" "$(hbdb_net_bytes_per_block "$ST" 1000 2600 0 2)" 600
-hbdb_net_bytes_per_block "$ST" 1000 9000 5 5 >/dev/null && bad "net bytes per block with 0 blocks" || ok
-hbdb_net_bytes_per_block "$ST" 1000 9000 "" 5 >/dev/null && bad "net bytes per block without a snapshot" || ok
-hbdb_net_bytes_per_block "$TMP_ROOT/none.csv" 1000 9000 1 5 >/dev/null && bad "net bytes per block without stats" || ok
-printf '%s\n%s\n' "$HBDB_STATS_HEADER" "1000,u,hbdb-node1-1,1,a,b,c,d,1,0," >"$TMP_ROOT/stats1.csv"
-echo "2000,u,hbdb-node1-1,1,a,b,c,d,1,0,99" >>"$TMP_ROOT/stats1.csv"
-hbdb_net_bytes_per_block "$TMP_ROOT/stats1.csv" 1000 2000 1 5 >/dev/null && bad "net bytes per block from an unparsed sample" || ok
+# N4: exact tx counters of the two snapshots / node1's blocks between them.
+eq "net bytes per block" "$(hbdb_net_bytes_per_block 3500 15700 6 10)" 3050
+eq "net bytes per block rounds" "$(hbdb_net_bytes_per_block 0 10 0 3)" 3
+eq "net bytes per block: large counters" "$(hbdb_net_bytes_per_block 98765432100 98766432100 1000 1100)" 10000
+hbdb_net_bytes_per_block 1000 9000 5 5 >/dev/null && bad "net bytes per block with 0 blocks" || ok
+hbdb_net_bytes_per_block 1000 9000 "" 5 >/dev/null && bad "net bytes per block without a snapshot" || ok
+hbdb_net_bytes_per_block "" 9000 1 5 >/dev/null && bad "net bytes per block without a tx counter" || ok
+hbdb_net_bytes_per_block 9000 1000 1 5 >/dev/null && bad "net bytes per block with shrinking counters" || ok
+hbdb_net_bytes_per_block 1x 9000 1 5 >/dev/null && bad "net bytes per block with junk" || ok
 
 # ---- wait arithmetic ----
 reset
@@ -815,6 +795,14 @@ case "$1" in
               echo "$k" >"$STUB_STATE/snap_$svc"
               printf '{\n  "node": %s,\n  "batch_ns": 5,\n  "blocks": %d,\n  "batch_blocks": 99\n}\n' "${svc#node}" $((k * 10)) \
                 >"$STUB_RESULTS/breakdown-$svc.snap$k.json"
+              # its eth0 tx counter: 1 MB more per snapshot (+ node index)
+              echo $((k * 1000000 + ${svc#node}))
+              exit 0 ;;
+            *statistics/tx_bytes*)
+              # the kafka broker's counter: 0.5 MB more per read
+              k=$(($(cat "$STUB_STATE/tx_$svc" 2>/dev/null || echo 0) + 1))
+              echo "$k" >"$STUB_STATE/tx_$svc"
+              echo $((k * 500000))
               exit 0 ;;
           esac
           exit "${STUB_EXEC_RC:-0}"
@@ -861,11 +849,11 @@ case "$1" in
         # STUB_TL: the timeline, space-separated (default 5 5 5).
         printf '%s\n' ${STUB_TL:-5 5 5} >"$tl"
         printf '2\n2\n2\n' >"$wtl"
-        # STUB_WERR: failed writes in the ops sidecar (of 200 ok);
-        # STUB_NO_OPS=1: no sidecar (an old ycsbbench).
+        # STUB_WERR / STUB_WABORT: failed / aborted writes in the ops sidecar
+        # (of 200 ok); STUB_NO_OPS=1: no sidecar (an old ycsbbench).
         [ -n "${STUB_NO_OPS:-}" ] ||
-          printf 'op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors\nread,300,150.00,1.000,1.000,2.000,0\nwrite,200,100.00,500.000,450.000,900.000,%s\n' \
-            "${STUB_WERR:-0}" >"$ops"
+          printf 'op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted\nread,300,150.00,1.000,1.000,2.000,0,0\nwrite,200,100.00,500.000,450.000,900.000,%s,%s\n' \
+            "${STUB_WERR:-0}" "${STUB_WABORT:-0}" >"$ops"
         vals="$(echo "$tags" | tr ',' '\n' | sed 's/^[^=]*=//' | tr '\n' ',' | sed 's/,$//')"
         printf '%s\n%s,100.0,1.0,1.0,2.0,0,0,,,\n' "$STUB_HEADER" "$vals" >"$out"
         exit "${STUB_BENCH_RC:-0}" ;;
@@ -1041,7 +1029,7 @@ grep -q ',silent_confirmed,node4,' "$(raw_tag it_kf2)" 2>/dev/null && ok || bad 
 itest sidecars EXP=it_side DURATION=2s STUB_BENCH_SECS=2
 eq "itest sidecars rc" "$it_rc" 0
 o="$(it_tag it_side .ops.csv)"
-eq "itest ops.csv header" "$(head -n 1 "$o" 2>/dev/null)" "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors"
+eq "itest ops.csv header" "$(head -n 1 "$o" 2>/dev/null)" "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted"
 eq "itest ops.csv kinds" "$(cut -d, -f1 "$o" 2>/dev/null | tr '\n' ' ')" "op read write "
 grep -q -- '--wtimeline=/results/it_side/.*\.wtimeline --ops=/results/it_side/.*\.ops\.csv' "$SB/state/calls" && ok || bad "itest: ycsbbench --wtimeline/--ops"
 [ -s "$(it_tag it_side .wtimeline)" ] && ok || bad "itest: no .wtimeline"
@@ -1053,26 +1041,46 @@ grep -q ',hbdb-client-1,' "$s" 2>/dev/null && ok || bad "itest stats: client con
 eq "itest stats: one line per container per sample" "$(($(grep -c . "$s") - 1))" "$((5 * $(cat "$SB/state/stats_n" 2>/dev/null || echo 0)))"
 p="$(it_tag it_side .snaps)"
 eq "itest snaps" "$(cut -d, -f1,3 "$p" 2>/dev/null | tr '\n' ' ')" "1,ok 2,ok "
-eq "itest snapshots signalled on every node twice" "$(grep -c '^node[1-4] sh -c .*cat /tmp/hbdb-veritas.pid.*kill -USR2' "$SB/state/node_execs" 2>/dev/null)" 8
+# N4: exact eth0 tx counters read in the same exec as the SIGUSR2.
+eq "itest snaps tx" "$(cut -d, -f4,5 "$p" 2>/dev/null | tr '\n' ' ')" \
+  "4000010,node1=1000001+node2=1000002+node3=1000003+node4=1000004 8000010,node1=2000001+node2=2000002+node3=2000003+node4=2000004 "
+eq "itest snapshots signalled on every node twice" "$(grep -c '^node[1-4] sh -c t=.*cat /sys/class/net/eth0/statistics/tx_bytes.*cat /tmp/hbdb-veritas.pid.*kill -USR2' "$SB/state/node_execs" 2>/dev/null)" 8
 eq "itest snapshots collected" "$(ls "$SB_RAW/it_side/"*.breakdown/ 2>/dev/null | grep -c 'snap[12]\.json$')" 8
 nb="$(tail -n 1 "$SB_RAW/it_side.csv" 2>/dev/null | cut -d, -f22)"
-awk -v v="$nb" 'BEGIN { exit !(v ~ /^[0-9]+$/ && v > 0 && v % 40000 == 0) }' && ok ||
-  bad "itest net_bytes_per_block='$nb' (want a positive multiple of 40000: 4 nodes x 100 kB per sample / 10 blocks)"
+eq "itest net_bytes_per_block (4 x 1 MB / 10 blocks)" "$nb" 400000
 eq "itest row has 22 fields" "$(tail -n 1 "$SB_RAW/it_side.csv" | awk -F, '{ print NF }')" 22
 eq "itest final audit" "$(cat "$(it_tag it_side .final_audit)" 2>/dev/null)" "CONSISTENT"
 grep -q '^auditor --addrs=172.28.0.11:1990,172.28.0.12:1990,172.28.0.13:1990,172.28.0.14:1990 --once$' "$SB/state/auditor_once" 2>/dev/null && ok ||
   bad "itest auditor --once call: $(cat "$SB/state/auditor_once" 2>/dev/null)"
-contains "itest sampler/net log" "$it_err" "net_bytes_per_block=$nb"
+contains "itest sampler/net log" "$it_err" "net_bytes_per_block=400000 (4000000 tx bytes, node1 applied 10 blocks"
+# kafka: the broker's counter joins the sum (read in the same snapshot step).
+itest kside EXP=it_kside BACKEND=kafka DURATION=2s STUB_BENCH_SECS=1
+eq "itest kafka nbpb rc" "$it_rc" 0
+eq "itest kafka nbpb includes the broker (4.5 MB / 10 blocks)" "$(tail -n 1 "$SB_RAW/it_kside.csv" | cut -d, -f22)" 450000
+contains "itest kafka snaps detail" "$(cat "$(it_tag it_kside .snaps)" 2>/dev/null)" "+kafka=500000"
+# N2: no net_bytes_per_block for a fault run.
+itest nbf EXP=it_nbf FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1
+eq "itest fault run rc" "$it_rc" 0
+eq "itest fault run: net_bytes_per_block empty" "$(tail -n 1 "$SB_RAW/it_nbf.csv" | cut -d, -f22)" ""
+contains "itest fault run: nbpb note" "$it_err" "net_bytes_per_block left empty: FAULT=F1:node4@0"
 grep -q 'kill -0 "$parent" 2>/dev/null || exit 0$' "$HERE/run_one.sh" && ok || bad "run_one sampler parent guard"
 grep -q 'kill -0 "$parent" 2>/dev/null || exit 0 # run_one.sh is gone' "$HERE/run_one.sh" && ok || bad "run_one watchdog parent guard"
 
-# O: write errors above 1 % of the writes fail a fault-free run; 1 % passes.
+# O: write errors above 1 % of the writes fail a fault-free run; 1 % passes;
+# aborted writes (gRPC Aborted, by design) never count (N1).
 itest werr EXP=it_werr DURATION=2s STUB_BENCH_SECS=0.5 STUB_WERR=3
 eq "itest write errors 3/203 rc" "$it_rc" 3
-contains "itest write errors msg" "$it_err" "3 of 203 writes failed"
+contains "itest write errors msg" "$it_err" "3 of 203 writes failed (not counting 0 aborted"
 [ -e "$SB_RAW/it_werr.csv" ] && bad "itest write errors wrote a row" || ok
 itest werr2 EXP=it_werr2 DURATION=2s STUB_BENCH_SECS=0.5 STUB_WERR=2
 eq "itest write errors 2/202 rc" "$it_rc" 0
+itest wab EXP=it_wab DURATION=2s STUB_BENCH_SECS=0.5 STUB_WABORT=40
+eq "itest 40 aborted of 240 writes pass" "$it_rc" 0
+contains "itest aborted note" "$it_err" "40 of 240 writes were aborted"
+itest wab2 EXP=it_wab2 DURATION=2s STUB_BENCH_SECS=0.5 STUB_WABORT=40 STUB_WERR=2
+eq "itest 2 errors + 40 aborted of 242: 0.8% passes" "$it_rc" 0
+itest wab3 EXP=it_wab3 DURATION=2s STUB_BENCH_SECS=0.5 STUB_WABORT=40 STUB_WERR=3
+eq "itest 3 errors + 40 aborted of 243: 1.2% fails" "$it_rc" 3
 itest werrf EXP=it_werrf FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1 STUB_WERR=150
 eq "itest write errors in a fault run are not checked" "$it_rc" 0
 [ -e "$SB/state/auditor_once" ] && bad "itest fault run ran auditor --once" || ok
@@ -1081,16 +1089,23 @@ eq "itest missing ops sidecar rc" "$it_rc" 3
 contains "itest missing ops sidecar msg" "$it_err" "wrote no usable"
 
 # P: zero seconds in the measurement window.
+# N3: the default is 5 consecutive zero seconds.
 itest zero3 EXP=it_zero3 DURATION=5s STUB_BENCH_SECS=0.5 STUB_TL="5 0 0 0 5"
-eq "itest 3 zero seconds rc" "$it_rc" 3
-contains "itest 3 zero seconds msg" "$it_err" "3 consecutive measurement second(s) with 0 successful ops"
+eq "itest 3 zero seconds pass at the default 5" "$it_rc" 0
+itest zero4 EXP=it_zero4 DURATION=6s STUB_BENCH_SECS=0.5 STUB_TL="5 0 0 0 0 5"
+eq "itest 4 zero seconds pass at the default 5" "$it_rc" 0
+itest zero5 EXP=it_zero5 DURATION=7s STUB_BENCH_SECS=0.5 STUB_TL="5 0 0 0 0 0 5"
+eq "itest 5 zero seconds rc" "$it_rc" 3
+contains "itest 5 zero seconds msg" "$it_err" "5 consecutive measurement second(s) with 0 successful ops"
+itest zero3s EXP=it_zero3s DURATION=5s STUB_BENCH_SECS=0.5 STUB_TL="5 0 0 0 5" VALID_ZERO_RUN_SECS=3
+eq "itest VALID_ZERO_RUN_SECS=3 rejects 3 zero seconds" "$it_rc" 3
 itest zero1 EXP=it_zero1 DURATION=5s STUB_BENCH_SECS=0.5 STUB_TL="5 0 5 0 5"
 eq "itest isolated zero seconds pass" "$it_rc" 0
 itest zero1s EXP=it_zero1s DURATION=5s STUB_BENCH_SECS=0.5 STUB_TL="5 0 5 0 5" VALID_ZERO_RUN_SECS=1
 eq "itest VALID_ZERO_RUN_SECS=1 rejects one zero second" "$it_rc" 3
 itest zerow EXP=it_zerow WARMUP=2s DURATION=3s STUB_BENCH_SECS=0.5 STUB_TL="0 0 0 5 5 5"
 eq "itest zero seconds in the warmup do not count" "$it_rc" 0
-itest short EXP=it_short DURATION=6s STUB_BENCH_SECS=0.5 STUB_TL="5 5 5"
+itest short EXP=it_short DURATION=8s STUB_BENCH_SECS=0.5 STUB_TL="5 5 5"
 eq "itest timeline shorter than the window rc" "$it_rc" 3
 
 # Q: fatal node log lines.
@@ -1133,7 +1148,7 @@ itest nostats EXP=it_nostats DURATION=2s STUB_BENCH_SECS=1.5 STUB_STATS_FAIL=1
 eq "itest docker stats failing rc" "$it_rc" 0
 n_stats="$(grep -c '^docker stats' "$SB/state/calls")"
 awk -v n="$n_stats" 'BEGIN { exit !(n >= 1 && n <= 8) }' && ok || bad "itest docker stats failing: $n_stats calls in ~1.5 s (busy loop?)"
-eq "itest docker stats failing: cpu empty" "$(tail -n 1 "$SB_RAW/it_nostats.csv" | cut -d, -f20,22)" ","
+eq "itest docker stats failing: cpu empty, nbpb from the exact counters" "$(tail -n 1 "$SB_RAW/it_nostats.csv" | cut -d, -f20,22)" ",400000"
 
 # U: raft fault runs record the leader changes.
 itest leaders EXP=it_lead FAULT=F1:node1@0 DURATION=2s STUB_BENCH_SECS=1 STUB_LEADER_LOG=1

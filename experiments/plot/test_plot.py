@@ -381,3 +381,74 @@ def test_main_notes_exp_without_varying_axis(tmp_path, capsys):
     assert rc == 0
     assert "exp flat: neither clients nor n varies, no figure produced" in stdout
     assert list(out.glob("*.png")) == []
+
+
+# ---- write latency from the ops sidecars (final-review C1) ----------------
+
+OPS_HEADER = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted"
+
+
+def write_ops(path, write_line):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(OPS_HEADER + "\nread,300,150.00,1.000,0.700,2.000,0,0\n" + write_line + "\n")
+
+
+def test_run_tag_matches_run_one():
+    row = {"backend": "kafka", "n": 7.0, "f": 2, "clients": 64, "block_size": 100, "workload": "a",
+           "rtt_ms": 0, "fault": "F5-F4:node7+node6+node5@60", "commit_mode": "sync", "rep": 1}
+    assert plot.run_tag(row) == "kafka_n7_f2_c64_b100_wa_rtt0_F5-F4_node7_node6_node5_60_sync_r1"
+
+
+def test_read_write_latency(tmp_path):
+    p = tmp_path / "x.ops.csv"
+    write_ops(p, "write,200,100.00,510.000,450.000,990.000,1,3")
+    assert plot.read_write_latency(p) == (510.0, 450.0, 990.0)
+    write_ops(p, "write,0,0.00,0.000,0.000,0.000,5,0")
+    assert plot.read_write_latency(p) is None  # no successful write
+    p.write_text("junk\n")
+    assert plot.read_write_latency(p) is None
+    assert plot.read_write_latency(tmp_path / "missing.ops.csv") is None
+
+
+def test_apply_write_latency_uses_sidecar_else_csv(tmp_path):
+    df = make_df([100, 100], exp="e1", backend="raft", clients=16)
+    df["rep"] = [1, 2]
+    df["lat_p50_ms"] = [3.0, 3.0]
+    tag1 = plot.run_tag(df.iloc[0])
+    write_ops(tmp_path / "e1" / (tag1 + ".ops.csv"), "write,200,100.00,510.000,450.000,990.000,0,0")
+    out = plot.apply_write_latency(df, [str(tmp_path)])
+    assert list(out["lat_source"]) == ["write", "csv"]
+    assert out.iloc[0]["lat_p50_ms"] == 450.0 and out.iloc[0]["lat_p99_ms"] == 990.0
+    assert out.iloc[1]["lat_p50_ms"] == 3.0
+    assert "lat_source" not in plot.config_columns(out)
+    # a non-default BATCH_FLUSH tag suffix is found too
+    tag2 = plot.run_tag(df.iloc[1])
+    write_ops(tmp_path / "e1" / (tag2 + "_bf100ms.ops.csv"), "write,10,5.00,90.000,80.000,150.000,0,0")
+    out = plot.apply_write_latency(df, [str(tmp_path)])
+    assert list(out["lat_source"]) == ["write", "write"] and out.iloc[1]["lat_p50_ms"] == 80.0
+
+
+def test_main_latency_figures_use_write_latency(tmp_path, capsys):
+    raw_dir = tmp_path / "results" / "raw"
+    raw_dir.mkdir(parents=True)
+    csv = raw_dir / "e1.csv"
+    frames = []
+    for c in (4, 16):
+        d = make_df([100, 110, 105], exp="e1", backend="raft", clients=c)
+        d["rep"] = [1, 2, 3]
+        frames.append(d)
+    df = pd.concat(frames, ignore_index=True)
+    df[plot.EXPECTED_COLUMNS].to_csv(csv, index=False)
+    for _, row in df.iterrows():
+        write_ops(raw_dir / "e1" / (plot.run_tag(row) + ".ops.csv"), "write,200,100.00,510.000,450.000,990.000,0,0")
+    out = tmp_path / "results" / "figs"
+    rc, stdout, err = run_main(capsys, [str(csv), "--out", str(out)])
+    assert rc == 0
+    assert (out / "e1_lat_vs_clients.png").read_bytes().startswith(PNG_MAGIC)
+    assert "write latency from ops sidecars for 6 of 6 rows" in stdout
+    raw = plot.apply_write_latency(plot.load_csvs([csv]), [str(raw_dir)])
+    agg = plot.aggregate(raw)
+    assert set(agg["lat_p50_ms_mean"]) == {450.0}
+    fig = plot.plot_latency(agg, "e1", "clients", out / "again.png")
+    assert len([l for l in fig.axes[0].get_lines() if l.get_gid() == "p50"]) == 1
+    plt.close(fig)

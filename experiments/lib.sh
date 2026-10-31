@@ -181,7 +181,9 @@ HBDB_STATS_FORMAT='{{.Name}},{{.CPUPerc}},{{.MemUsage}},{{.NetIO}}'
 # (every container of one call shares them); cpu_pct as docker prints it
 # without '%'; mem_used/mem_limit/net_rx/net_tx: docker's strings (MemUsage
 # in KiB/MiB/GiB, NetIO in decimal kB/MB/GB, cumulative since the container
-# started, about 3-4 significant digits); *_bytes: the same parsed to bytes.
+# started, only 3 significant digits, e.g. 33.5MB); *_bytes: the same parsed
+# to bytes. Samples are ~2 s apart. For resources only: net_bytes_per_block
+# uses the exact tx counters read with the breakdown snapshots.
 HBDB_STATS_HEADER="epoch_ms,utc,name,cpu_pct,mem_used,mem_limit,net_rx,net_tx,mem_used_bytes,net_rx_bytes,net_tx_bytes"
 
 # hbdb_stats_lines EPOCH_MS UTC: turn `docker stats` lines in
@@ -226,34 +228,18 @@ hbdb_json_int() {
   awk -v k="\"$2\":" '$1 == k { v = $2; gsub(/[^0-9-]/, "", v); print v; exit }' "$1"
 }
 
-# hbdb_net_bytes_per_block STATS T1_MS T2_MS BLOCKS1 BLOCKS2: net_bytes_per_block
-# of a run: the sum of net_tx_bytes of the node containers (name nodeK) and of
-# the Kafka broker (name kafka; part of the kafka backends' consensus path) in
-# the sample closest to T2_MS minus the same sum in the sample closest to
-# T1_MS, divided by BLOCKS2 - BLOCKS1 (blocks applied on node1 between the two
-# breakdown snapshots), rounded to whole bytes. Client, TSO and other
-# containers are not counted. Prints nothing (and returns 1) when the stats
-# lack a sample, both instants map to the same sample, or no block was applied.
+# hbdb_net_bytes_per_block TX1 TX2 BLOCKS1 BLOCKS2: net_bytes_per_block of a
+# run: (TX2 - TX1) / (BLOCKS2 - BLOCKS1), rounded to whole bytes. TX1/TX2 are
+# the sums of the exact eth0 tx byte counters of the node containers (and the
+# Kafka broker for BACKEND=kafka) read with breakdown snapshots 1 and 2
+# (run_one.sh window_snapshot, <tag>.snaps), BLOCKS1/BLOCKS2 node1's applied
+# blocks in those snapshots. Prints nothing (and returns 1) when a value is
+# missing or not an integer, no block was applied, or the bytes went down.
 hbdb_net_bytes_per_block() {
-  local stats="$1" t1="$2" t2="$3" b1="$4" b2="$5"
-  [ -s "$stats" ] && [ -n "$t1" ] && [ -n "$t2" ] && [ -n "$b1" ] && [ -n "$b2" ] || return 1
-  [ $((b2 - b1)) -gt 0 ] || return 1
-  awk -F, -v t1="$t1" -v t2="$t2" -v db="$((b2 - b1))" '
-    NR == 1 && $1 == "epoch_ms" { next }
-    $3 ~ /(^|[-_])node[0-9]+([-_]|$)/ || $3 ~ /(^|[-_])kafka([-_]|$)/ {
-      if ($11 == "") { bad[$1] = 1; next }
-      tx[$1] += $11; seen[$1] = 1
-    }
-    function absd(a) { return a < 0 ? -a : a }
-    END {
-      for (t in seen) {
-        if (t in bad) continue
-        if (s1 == "" || absd(t - t1) < absd(s1 - t1)) s1 = t
-        if (s2 == "" || absd(t - t2) < absd(s2 - t2)) s2 = t
-      }
-      if (s1 == "" || s2 == "" || s1 == s2) exit 1
-      v = (tx[s2] - tx[s1]) / db
-      if (v < 0) exit 1
-      printf "%.0f\n", v
-    }' "$stats"
+  local x1="$1" x2="$2" b1="$3" b2="$4" a
+  for a in "$x1" "$x2" "$b1" "$b2"; do
+    case "$a" in '' | *[!0-9]*) return 1 ;; esac
+  done
+  [ $((10#$b2 - 10#$b1)) -gt 0 ] && [ $((10#$x2 - 10#$x1)) -ge 0 ] || return 1
+  awk -v dx="$((10#$x2 - 10#$x1))" -v db="$((10#$b2 - 10#$b1))" 'BEGIN { printf "%.0f\n", dx / db }'
 }

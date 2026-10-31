@@ -390,7 +390,7 @@ def test_bft2_backend_runs_sidecar_and_core_server_without_kafka_or_tso():
         # Replica i of the static set 1..4, every node gets the same peers.
         assert ("\nGOMEMLIMIT=153MiB bft2-node --id=%d --peers=%s --listen=0.0.0.0:7200 --api=127.0.0.1:7201 &"
                 % (i, BFT2_PEERS_4)) in cmd
-        assert ("GOMEMLIMIT=537MiB veritas-kafka --consensus=bft2 --commit-mode=sync"
+        assert ("GOMEMLIMIT=430MiB veritas-kafka --consensus=bft2 --commit-mode=sync"
                 " --version-mode=ordered --node-id=%d --signature=node%d " % (i, i)) in cmd
         assert "--parties=node1,node2,node3,node4 --blk-size=50 --addr=:1990" in cmd
         assert " --bft2-api=127.0.0.1:7201 " in cmd
@@ -569,3 +569,20 @@ def test_cli_batch_flush(tmp_path):
     assert main(["--backend", "kafka", "--n", "4", "--batch-flush", "100ms", "--out", str(out)]) == 0
     c = json.loads(out.read_text())
     assert _veritas_line(c, "node2").endswith(" --batch-flush=100ms &")
+
+
+def test_bft2_memory_limits_fit_the_node_cap():
+    from gen_compose import bft2_veritas_gomemlimit, gomemlimit, BFT2_GOMEMLIMIT_SHARE
+    assert bft2_veritas_gomemlimit("768m") == "430MiB"
+    assert bft2_veritas_gomemlimit("2g") == "1147MiB"  # (2048 - 409) * 0.7 = 1147.3
+    for mem, cap in (("768m", 768), ("1g", 1024), ("2g", 2048)):
+        side = int(gomemlimit(mem, BFT2_GOMEMLIMIT_SHARE)[:-3])
+        ver = int(bft2_veritas_gomemlimit(mem)[:-3])
+        assert side + ver < cap
+    c = gen(backend="bft2", n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    cmd = c["services"]["node1"]["command"][-1]
+    assert "GOMEMLIMIT=153MiB bft2-node " in cmd and "GOMEMLIMIT=430MiB veritas-kafka " in cmd
+    assert "GOMEMLIMIT=537MiB" not in cmd
+    # the other core backends keep 70% of the whole cap
+    c = gen(backend="raft", n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    assert "GOMEMLIMIT=537MiB veritas-kafka " in c["services"]["node1"]["command"][-1]

@@ -100,10 +100,13 @@
 #
 # Per-run sidecars in results/raw/<EXP>/ (the CSV keeps its 22 columns):
 #   <tag>.ops.csv    ycsbbench --ops: `op,count,tps,lat_mean_ms,lat_p50_ms,
-#                    lat_p99_ms,errors`, one line for read (Get) and one for
-#                    write (Set), measurement window only (the CSV row mixes
-#                    both: on a sync backend a Get is a local read, a Set waits
-#                    for a block)
+#                    lat_p99_ms,errors,aborted`, one line for read (Get) and
+#                    one for write (Set), measurement window only (the CSV row
+#                    mixes both: on a sync backend a Get is a local read, a Set
+#                    waits for a block); errors = failed ops other than gRPC
+#                    Aborted, aborted = the Aborted ones (by-design aborts: a
+#                    stale TSO version, a block dropped by a Kafka Abort vote).
+#                    The CSV errors column still counts both.
 #   <tag>.wtimeline  ycsbbench --wtimeline: successful Sets per second, same
 #                    t=0 and length as <tag>.timeline (warmup included)
 #   <tag>.stats      every docker stats sample of every cluster container from
@@ -114,28 +117,42 @@
 #   <tag>.breakdown/ also breakdown-node<i>.snap1.json / .snap2.json: core
 #                    breakdown snapshots (veritas SIGUSR2) at the start of the
 #                    measurement window (run-phase marker + WARMUP) and right
-#                    after the bench ends; their epoch ms are in <tag>.snaps
+#                    after the bench ends. <tag>.snaps has one line per
+#                    snapshot: `k,epoch_ms,node1 signal ok|failed,tx_bytes`,
+#                    tx_bytes = the sum of the exact eth0 tx byte counters
+#                    (/sys/class/net/eth0/statistics/tx_bytes) of node1..nodeN
+#                    (+ the kafka broker for BACKEND=kafka), each read in the
+#                    same `docker compose exec` that sends the SIGUSR2 (empty
+#                    when any counter could not be read), then the per-
+#                    container counters (`node1=...+node2=...`)
 #   <tag>.final_audit  FAULT=none, core backends: output of `auditor --once`
 #   <tag>.leaders    BACKEND=raft with a FAULT: every "entering leader state"
 #                    line of every node log (docker timestamps), to tell who
 #                    led at the fault time
-# net_bytes_per_block (core backends kafka, raft, tendermint, bft2): the sum
-# of the NetIO tx bytes of node1..nodeN (+ the Kafka broker, the kafka
-# backend's consensus path) in the stats sample closest to snapshot 2 minus
-# that in the sample closest to snapshot 1, divided by the blocks node1
-# applied between its two snapshots (hbdb_net_bytes_per_block in lib.sh). The
-# samples are ~1-1.5 s apart, so the window edges are approximate to about a
-# second; node tx also carries the replies to clients (Get values). Empty
-# (with a warning) when a snapshot or sample is missing, and always for
-# kafka-orig and tm-orig (no block count).
+# net_bytes_per_block (core backends kafka, raft, tendermint, bft2, FAULT=none
+# only): (tx_bytes of snapshot 2 - tx_bytes of snapshot 1) / (blocks node1
+# applied between its two snapshots), from <tag>.snaps and node1's snap
+# files (hbdb_net_bytes_per_block in lib.sh): exact byte counters at the
+# snapshot instants. What it includes: every byte the nodes (and the broker)
+# send in the window, i.e. consensus traffic, the empty heights of tendermint
+# (create-empty-blocks) and the empty views of bft2 (~20 ms IdleWait), which
+# inflate it at low load, and the replies to the clients (Get values; the
+# client container's rx in <tag>.stats is an offline estimate of them). TSO
+# and client sends are not counted. Empty (with a warning) when a snapshot or
+# counter is missing, always for kafka-orig and tm-orig (no block count), and
+# always when FAULT != none (a stopped node's counters vanish, and the window
+# mixes pre- and post-fault traffic).
 #
 # Validity (FAULT=none only; any failure is exit 3, no CSV row, retried by the
-# drivers): the write errors of <tag>.ops.csv must be at most
-# VALID_MAX_WRITE_ERR_PCT=1 % of the writes (ok + failed); the measurement
-# window of <tag>.timeline must not contain VALID_ZERO_RUN_SECS=3 or more
-# consecutive seconds with 0 successful ops (1 = no zero second at all; the
-# P0 tm-orig c4 runs had single zero seconds, so 1 would reject valid
-# latency-bound runs); no node log may contain "FATAL apply" (core apply
+# drivers): the non-aborted write errors of <tag>.ops.csv must be at most
+# VALID_MAX_WRITE_ERR_PCT=1 % of all writes (ok + errors + aborted; gRPC
+# Aborted writes are by-design outcomes, e.g. kafka c256 has ~1% of them,
+# and do not count); the measurement window of <tag>.timeline must not
+# contain VALID_ZERO_RUN_SECS=5 or more consecutive seconds with 0 successful
+# ops (1 = no zero second at all; the P0 tm-orig c4 runs had single zero
+# seconds and tendermint c16 has isolated ones, so a small value would reject
+# valid latency-bound runs; a halt of 30 s or more also shows up as timed-out
+# writes); no node log may contain "FATAL apply" (core apply
 # failure), "buffer is full" (tendermint ABCI queue overflow) or "replica
 # failed, exiting" / "can no longer commit" (bft2-node gave up); and, for the
 # core backends, `auditor --once` (after AUDIT_WAIT_SECS=5, retried twice
@@ -192,7 +209,7 @@ KEEP_LOGS="${KEEP_LOGS:-0}"
 BATCH_FLUSH="${BATCH_FLUSH:-}"
 PRE_DOWN_HOOK="${PRE_DOWN_HOOK:-}"
 VALID_MAX_WRITE_ERR_PCT="${VALID_MAX_WRITE_ERR_PCT:-1}"
-VALID_ZERO_RUN_SECS="${VALID_ZERO_RUN_SECS:-3}"
+VALID_ZERO_RUN_SECS="${VALID_ZERO_RUN_SECS:-5}"
 AUDIT_WAIT_SECS="${AUDIT_WAIT_SECS:-5}"
 
 # ---- validate input (nothing touches Docker before this passes) ----
@@ -465,32 +482,59 @@ start_audit() {
   audit_pid=$!
 }
 
-# snapshot_signal_script: shell run in a node container that sends SIGUSR2
-# to its veritas server (cmd/veritas writes breakdown-node<i>.snap<k>.json).
+# tx_bytes_script: shell that prints the container's exact eth0 tx byte
+# counter (the interface of network hbdb).
+tx_bytes_script() {
+  printf '%s\n' "cat /sys/class/net/$NET_DEV/statistics/tx_bytes"
+}
+
+# snapshot_signal_script: shell run in a node container that reads its tx
+# byte counter, sends SIGUSR2 to its veritas server (cmd/veritas writes
+# breakdown-node<i>.snap<k>.json) and, if the signal was sent, prints the
+# counter: bytes and blocks are taken at the same instant.
 snapshot_signal_script() {
-  printf '%s\n' "p=\"\$(cat $HBDB_VERITAS_PIDFILE)\" && [ -n \"\$p\" ] && kill -USR2 \"\$p\""
+  printf '%s\n' "t=\"\$($(tx_bytes_script))\"; p=\"\$(cat $HBDB_VERITAS_PIDFILE)\" && [ -n \"\$p\" ] && kill -USR2 \"\$p\" && echo \"\$t\""
 }
 
 # window_snapshot K: breakdown snapshot K of every core node (SIGUSR2, in
-# parallel); appends "K,epoch_ms,ok|failed" (node1's signal) to $snaps_file.
-# A failed signal (e.g. a node F1 stopped) is only a warning.
+# parallel), with the tx byte counters of the nodes (and of the kafka broker
+# for BACKEND=kafka) read in the same execs; appends
+# "K,epoch_ms,ok|failed,tx_sum,node1=..+node2=..[+kafka=..]" to $snaps_file
+# (ok|failed: node1's signal; tx_sum empty if any counter is missing). A
+# failed signal (e.g. a node F1 stopped) is only a warning.
 window_snapshot() {
-  local k="$1" i=1 pids="" p ms st=ok
+  local k="$1" i=1 pids="" p ms st=ok svcs="" svc v sum=0 detail="" miss=0
   ms="$(hbdb_epoch_ms)"
   while [ "$i" -le "$N" ]; do
-    hbdb_compose exec -T "node$i" sh -c "$(snapshot_signal_script)" >/dev/null 2>&1 &
+    hbdb_compose exec -T "node$i" sh -c "$(snapshot_signal_script)" >"$exp_dir/.$tag.snaptx.node$i" 2>/dev/null &
     pids="$pids $!"
+    svcs="$svcs node$i"
     i=$((i + 1))
   done
-  i=1
+  if [ "$BACKEND" = kafka ]; then
+    hbdb_compose exec -T kafka sh -c "$(tx_bytes_script)" >"$exp_dir/.$tag.snaptx.kafka" 2>/dev/null &
+    pids="$pids $!"
+    svcs="$svcs kafka"
+  fi
+  set -- $svcs
   for p in $pids; do
+    svc="$1"
+    shift
     if ! wait "$p"; then
-      [ "$i" != 1 ] || st=failed
-      log "warning: breakdown snapshot $k: SIGUSR2 to node$i failed"
+      [ "$svc" != node1 ] || st=failed
+      log "warning: breakdown snapshot $k: SIGUSR2 / tx counter of $svc failed"
     fi
-    i=$((i + 1))
+    v="$(tr -dc '0-9' <"$exp_dir/.$tag.snaptx.$svc" 2>/dev/null || true)"
+    rm -f "$exp_dir/.$tag.snaptx.$svc"
+    if [ -n "$v" ]; then
+      sum=$((sum + 10#$v))
+    else
+      miss=1
+    fi
+    detail="${detail:+$detail+}$svc=$v"
   done
-  echo "$k,$ms,$st" >>"$snaps_file"
+  [ "$miss" = 0 ] || sum=""
+  echo "$k,$ms,$st,$sum,$detail" >>"$snaps_file"
 }
 
 # start_window_snapshot: background job (pid in snap_pid) that takes
@@ -626,7 +670,7 @@ cleanup() {
   fi
   "$HBDB_CLUSTER_DIR/down.sh"
   collect_breakdown "$exp_dir/$tag.breakdown"
-  rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$events_file" "$fault_stopped" "$fault_stop" "$audit_pidfile" "$audit_stop" "$audit_err" "$snap_stop"
+  rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$events_file" "$fault_stopped" "$fault_stop" "$audit_pidfile" "$audit_stop" "$audit_err" "$snap_stop" "$exp_dir/.$tag.snaptx."*
   release_lock
   if [ "$rc" -eq 0 ]; then
     log "done: $EXP/$tag"
@@ -842,20 +886,26 @@ final_audit() {
 # check_validity: the FAULT=none sanity gate of the header. Logs every
 # reason and returns 1 if the run must not get a row.
 check_validity() {
-  local line wok werr w d zero i hits bad=0 arc
-  if [ ! -s "$ops_file" ] || [ "$(head -n 1 "$ops_file")" != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors" ]; then
+  local line wok werr wab w d zero i hits bad=0 arc
+  if [ ! -s "$ops_file" ] || [ "$(head -n 1 "$ops_file")" != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted" ]; then
     log "invalid run: ycsbbench wrote no usable $ops_file (image older than this harness? rebuild with experiments/build.sh)"
     return 1
   fi
-  line="$(awk -F, '$1 == "write" { print $2 " " $7; exit }' "$ops_file")"
-  wok="${line%% *}"
-  werr="${line##* }"
-  case "$wok$werr" in
-    '' | *[!0-9]*) log "invalid run: no write line in $ops_file"; return 1 ;;
+  line="$(awk -F, '$1 == "write" { print $2 " " $7 " " $8; exit }' "$ops_file")"
+  set -- $line
+  wok="${1:-}"
+  werr="${2:-}"
+  wab="${3:-}"
+  case "$wok,$werr,$wab" in
+    *,,* | ,* | *, | *[!0-9,]*) log "invalid run: no write line in $ops_file"; return 1 ;;
   esac
-  if awk -v ok="$wok" -v e="$werr" -v p="$VALID_MAX_WRITE_ERR_PCT" 'BEGIN { t = ok + e; exit !(t > 0 && e * 100 > p * t) }'; then
-    log "invalid run: $werr of $((wok + werr)) writes failed (> ${VALID_MAX_WRITE_ERR_PCT}%, VALID_MAX_WRITE_ERR_PCT)"
+  # gRPC Aborted writes are by-design outcomes (see the header): only the
+  # other write errors count, over all writes.
+  if awk -v ok="$wok" -v e="$werr" -v a="$wab" -v p="$VALID_MAX_WRITE_ERR_PCT" 'BEGIN { t = ok + e + a; exit !(t > 0 && e * 100 > p * t) }'; then
+    log "invalid run: $werr of $((wok + werr + wab)) writes failed (not counting $wab aborted; > ${VALID_MAX_WRITE_ERR_PCT}%, VALID_MAX_WRITE_ERR_PCT)"
     bad=1
+  elif [ "$wab" -gt 0 ]; then
+    log "note: $wab of $((wok + werr + wab)) writes were aborted (gRPC Aborted, not a validity failure)"
   fi
   w="$(dur_seconds "$WARMUP")"
   d="$(dur_seconds "$DURATION")"
@@ -919,7 +969,7 @@ stop_watchdog
 # Breakdown snapshot 2 right after the bench, while the sampler still runs
 # (a stats sample close to it is needed), if snapshot 1 reached node1.
 stop_window_snapshot
-if [ "$bench_rc" -eq 0 ] && [ -s "$snaps_file" ] && grep -q '^1,[0-9]*,ok$' "$snaps_file"; then
+if [ "$bench_rc" -eq 0 ] && [ -s "$snaps_file" ] && grep -q '^1,[0-9]*,ok,' "$snaps_file"; then
   window_snapshot 2
 fi
 stop_sampler
@@ -978,20 +1028,23 @@ fi
 # net_bytes_per_block (core backends; the originals expose no block count):
 # see the header and hbdb_net_bytes_per_block in lib.sh.
 net_bytes_per_block=""
-if hbdb_backend_has_fault_policy "$BACKEND"; then
-  snap_t1="$(awk -F, '$1 == 1 && $3 == "ok" { print $2; exit }' "$snaps_file" 2>/dev/null || true)"
-  snap_t2="$(awk -F, '$1 == 2 && $3 == "ok" { print $2; exit }' "$snaps_file" 2>/dev/null || true)"
+if hbdb_backend_has_fault_policy "$BACKEND" && [ "$FAULT" != none ]; then
+  log "net_bytes_per_block left empty: FAULT=$FAULT (a fault window mixes pre- and post-fault traffic, and a stopped node's counters vanish)"
+elif hbdb_backend_has_fault_policy "$BACKEND"; then
+  # Exact eth0 tx counters taken in the snapshot execs (see the header).
+  snap_x1="$(awk -F, '$1 == 1 && $3 == "ok" { print $4; exit }' "$snaps_file" 2>/dev/null || true)"
+  snap_x2="$(awk -F, '$1 == 2 && $3 == "ok" { print $4; exit }' "$snaps_file" 2>/dev/null || true)"
   snap_b1=""
   snap_b2=""
-  if [ -n "$snap_t1" ] && [ -n "$snap_t2" ]; then
+  if [ -n "$snap_x1" ] && [ -n "$snap_x2" ]; then
     snap_b1="$(snapshot_field 1 blocks)"
     snap_b2="$(snapshot_field 2 blocks)"
   fi
-  if net_bytes_per_block="$(hbdb_net_bytes_per_block "$stats_file" "$snap_t1" "$snap_t2" "$snap_b1" "$snap_b2")"; then
-    log "net_bytes_per_block=$net_bytes_per_block (node1 applied $((snap_b2 - snap_b1)) blocks between the window snapshots)"
+  if net_bytes_per_block="$(hbdb_net_bytes_per_block "$snap_x1" "$snap_x2" "$snap_b1" "$snap_b2")"; then
+    log "net_bytes_per_block=$net_bytes_per_block ($((snap_x2 - snap_x1)) tx bytes, node1 applied $((snap_b2 - snap_b1)) blocks between the window snapshots)"
   else
     net_bytes_per_block=""
-    log "warning: net_bytes_per_block left empty (snapshot epochs '$snap_t1'/'$snap_t2', node1 blocks '$snap_b1'/'$snap_b2', $(($(wc -l <"$stats_file") - 1)) stats lines)"
+    log "warning: net_bytes_per_block left empty (snapshot tx bytes '$snap_x1'/'$snap_x2', node1 blocks '$snap_b1'/'$snap_b2'; see $snaps_file)"
   fi
 fi
 

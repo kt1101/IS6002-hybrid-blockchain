@@ -13,7 +13,11 @@
 // leader's forward HTTP endpoint (http://<ForwardAddr>/submit), which calls
 // Apply the same way; the leader is found with raft.Leader() -> RaftAddr ->
 // ForwardAddr via Peers. A failed attempt is retried, after waiting for the
-// leader to change, up to forwardRetries times. An accepted block can still
+// leader to change, up to forwardRetries times. A forward connects with a
+// forwardDialTimeout (1 s) dial timeout and is cancelled as soon as
+// raft.Leader() stops naming its target, so a crashed leader (whose address
+// black-holes packets once its container is gone) costs about the election
+// time, not the whole forwardTimeout. An accepted block can still
 // be lost (leader change before commit) or, after a retry, delivered twice;
 // the core tolerates both.
 //
@@ -66,6 +70,11 @@ const (
 	// forwardTimeout bounds one forward POST. It exceeds applyTimeout, since
 	// the leader answers only once its Apply call has returned.
 	forwardTimeout = applyTimeout + 5*time.Second
+	// forwardDialTimeout bounds the TCP connect of a forward: on the
+	// experiment bridge a connect takes well under a millisecond, while a
+	// stopped node's address may never answer (the default transport would
+	// wait up to 30 s, then forwardTimeout cuts it at 15 s).
+	forwardDialTimeout = time.Second
 	// leaderWait bounds the wait for a known leader before an attempt.
 	leaderWait = 10 * time.Second
 	// leaderChangeWait bounds the wait, after a failed attempt, for the
@@ -157,7 +166,7 @@ func New(cfg Config) (*Raft, error) {
 		fsm:     f,
 		closeCh: closeCh,
 		served:  make(chan struct{}),
-		httpCli: &http.Client{Timeout: forwardTimeout},
+		httpCli: newForwardClient(),
 	}
 
 	// cleanup undoes what New has built so far when a later step fails.
@@ -423,8 +432,65 @@ func (r *Raft) waitLeaderChange(ctx context.Context, old string) {
 	}
 }
 
-// forward POSTs data to p's forward endpoint.
+// newForwardClient is the HTTP client of the forwards: overall bound
+// forwardTimeout, TCP connect bound forwardDialTimeout.
+func newForwardClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = (&net.Dialer{Timeout: forwardDialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	return &http.Client{Timeout: forwardTimeout, Transport: tr}
+}
+
+// forward POSTs data to p's forward endpoint; the POST is cancelled once
+// raft.Leader() no longer names p (see forwardTo).
 func (r *Raft) forward(ctx context.Context, p Peer, data []byte) error {
+	return forwardTo(ctx, r.httpCli, p, data, func() string { return string(r.raft.Leader()) })
+}
+
+// forwardTo POSTs data to p's forward endpoint with cli. While the request
+// is in flight, leader() is polled every pollInterval; once it returns
+// anything but p.RaftAddr (a new leader, or "" during an election) the
+// request is cancelled and an error saying so is returned, so Submit can
+// retry towards the new leader at once. A pooled keep-alive connection to a
+// crashed leader would otherwise hang until forwardTimeout. (The old leader
+// may still have applied the block: a retry can then deliver it twice,
+// which the core tolerates.)
+func forwardTo(ctx context.Context, cli *http.Client, p Peer, data []byte, leader func() string) error {
+	fctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	changed := make(chan struct{})
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		t := time.NewTicker(pollInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-fctx.Done():
+				return
+			case <-t.C:
+				if leader() != p.RaftAddr {
+					close(changed)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	err := postBlock(fctx, cli, p, data)
+	if err != nil {
+		select {
+		case <-changed:
+			return fmt.Errorf("raft consensus: forward to %s: leader changed during the forward: %w", p.ID, err)
+		default:
+		}
+	}
+	return err
+}
+
+// postBlock is one forward POST of data to p.
+func postBlock(ctx context.Context, cli *http.Client, p Peer, data []byte) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+p.ForwardAddr+submitPath, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("raft consensus: forward to %s: %w", p.ID, err)
@@ -437,7 +503,7 @@ func (r *Raft) forward(ctx context.Context, p Peer, data []byte) error {
 		}
 		req.Header.Set(submitTimeoutHeader, strconv.FormatInt(left, 10))
 	}
-	resp, err := r.httpCli.Do(req)
+	resp, err := cli.Do(req)
 	if err != nil {
 		return fmt.Errorf("raft consensus: forward to %s: %w", p.ID, err)
 	}

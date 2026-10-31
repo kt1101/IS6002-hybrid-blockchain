@@ -5,11 +5,15 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // CorruptMarker is the suffix a faulty replica appends to a value; a Get whose
@@ -43,8 +47,9 @@ const (
 
 // kindStats are the in-window observations of one OpKind.
 type kindStats struct {
-	lats   []time.Duration // successful ops inside the window
-	errors int64           // failed ops inside the window
+	lats    []time.Duration // successful ops inside the window
+	errors  int64           // failed ops inside the window (aborted ones included)
+	aborted int64           // of errors: gRPC codes.Aborted (a by-design abort, e.g. a stale version)
 }
 
 // Recorder collects per-request observations of a time-based run. Only
@@ -112,6 +117,9 @@ func (r *Recorder) observe(kind OpKind, at time.Time, lat time.Duration, err err
 	if err != nil {
 		if inWindow {
 			k.errors++
+			if status.Code(err) == codes.Aborted {
+				k.aborted++
+			}
 			r.countErrorKind(err.Error())
 		}
 		return
@@ -146,8 +154,13 @@ type ErrorKind struct {
 	Count int64
 }
 
+// seqRE matches the per-request "seq <n>" of the core's error messages; it is
+// replaced by "seq N" so that messages of the same cause count together.
+var seqRE = regexp.MustCompile(`\bseq [0-9]+`)
+
 // countErrorKind must be called with r.mu held.
 func (r *Recorder) countErrorKind(msg string) {
+	msg = seqRE.ReplaceAllString(msg, "seq N")
 	if len(msg) > maxErrorMsgLen {
 		msg = msg[:maxErrorMsgLen]
 	}
@@ -229,7 +242,10 @@ func (r *Recorder) Summary() Summary {
 
 // OpSummary is the measurement-window result of one operation kind: Count
 // successful ops (TPS = Count / duration), their latency mean, p50 and p99,
-// and Errors failed ops.
+// Errors failed ops other than aborts, and Aborted failed ops with gRPC code
+// Aborted (by design: a stale version, or a block the consensus dropped,
+// e.g. a Kafka Abort vote). Errors + Aborted = every failed op of the kind
+// (Summary.Errors, the CSV errors column, counts both).
 type OpSummary struct {
 	Op        string // "read" or "write"
 	Count     int64
@@ -238,6 +254,7 @@ type OpSummary struct {
 	LatP50Ms  float64
 	LatP99Ms  float64
 	Errors    int64
+	Aborted   int64
 }
 
 // OpSummaries returns the read (ObserveGet) and the write (ObserveSet)
@@ -253,9 +270,10 @@ func (r *Recorder) OpSummaries() []OpSummary {
 		lats := make([]time.Duration, len(r.kinds[k.kind].lats))
 		copy(lats, r.kinds[k.kind].lats)
 		errs := r.kinds[k.kind].errors
+		aborted := r.kinds[k.kind].aborted
 		r.mu.Unlock()
 		st := summarize(lats)
-		o := OpSummary{Op: k.name, Count: int64(st.n), Errors: errs,
+		o := OpSummary{Op: k.name, Count: int64(st.n), Errors: errs - aborted, Aborted: aborted,
 			LatMeanMs: st.meanMs, LatP50Ms: st.p50Ms, LatP99Ms: st.p99Ms}
 		if r.duration > 0 {
 			o.TPS = float64(st.n) / r.duration.Seconds()
@@ -266,7 +284,7 @@ func (r *Recorder) OpSummaries() []OpSummary {
 }
 
 // OpsCSVHeader is the header line of the per-run ops sidecar (WriteOpsCSV).
-const OpsCSVHeader = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors"
+const OpsCSVHeader = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted"
 
 // WriteOpsCSV writes ops (OpSummaries) to path as a small CSV: the
 // OpsCSVHeader line, then one line per kind (experiments/run_one.sh keeps it
@@ -276,12 +294,12 @@ func WriteOpsCSV(path string, ops []OpSummary) error {
 	sb.WriteString(OpsCSVHeader)
 	sb.WriteByte('\n')
 	for _, o := range ops {
-		fmt.Fprintf(&sb, "%s,%d,%s,%s,%s,%s,%d\n", o.Op, o.Count,
+		fmt.Fprintf(&sb, "%s,%d,%s,%s,%s,%s,%d,%d\n", o.Op, o.Count,
 			strconv.FormatFloat(o.TPS, 'f', 2, 64),
 			strconv.FormatFloat(o.LatMeanMs, 'f', 3, 64),
 			strconv.FormatFloat(o.LatP50Ms, 'f', 3, 64),
 			strconv.FormatFloat(o.LatP99Ms, 'f', 3, 64),
-			o.Errors)
+			o.Errors, o.Aborted)
 	}
 	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }

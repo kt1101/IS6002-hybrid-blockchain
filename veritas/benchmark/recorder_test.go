@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestRecorderCountsOnlySuccessInWindow(t *testing.T) {
@@ -202,7 +205,7 @@ func TestWriteOpsCSV(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.ops.csv")
 	ops := []OpSummary{
 		{Op: "read", Count: 30, TPS: 3, LatMeanMs: 1, LatP50Ms: 1, LatP99Ms: 1.25, Errors: 1},
-		{Op: "write", Count: 0},
+		{Op: "write", Count: 0, Aborted: 7},
 	}
 	if err := WriteOpsCSV(path, ops); err != nil {
 		t.Fatal(err)
@@ -211,12 +214,53 @@ func TestWriteOpsCSV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := OpsCSVHeader + "\nread,30,3.00,1.000,1.000,1.250,1\nwrite,0,0.00,0.000,0.000,0.000,0\n"
+	want := OpsCSVHeader + "\nread,30,3.00,1.000,1.000,1.250,1,0\nwrite,0,0.00,0.000,0.000,0.000,0,7\n"
 	if string(data) != want {
 		t.Fatalf("ops csv=%q want %q", data, want)
 	}
-	if OpsCSVHeader != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors" {
+	if OpsCSVHeader != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted" {
 		t.Fatalf("OpsCSVHeader changed: %q (experiments/run_one.sh parses it)", OpsCSVHeader)
+	}
+}
+
+// N1: gRPC Aborted errors are counted apart from the other errors in the
+// per-kind summaries; Summary.Errors (the CSV column) still counts both.
+func TestOpSummariesSplitAborted(t *testing.T) {
+	s0 := time.Unix(0, 0)
+	r := NewRecorder(0, 10*time.Second, s0)
+	in := s0.Add(time.Second)
+	for i := 0; i < 100; i++ {
+		r.ObserveSet(in, time.Millisecond, nil)
+	}
+	for i := 0; i < 3; i++ {
+		r.ObserveSet(in, time.Millisecond, status.Errorf(codes.Aborted, "core: aborted: seq %d", 1000+i))
+	}
+	r.ObserveSet(in, time.Millisecond, status.Error(codes.DeadlineExceeded, "context deadline exceeded"))
+	r.ObserveSet(in, time.Millisecond, errors.New("plain error"))
+	r.ObserveGet(in, time.Millisecond, "", status.Error(codes.Aborted, "x"))
+	ops := r.OpSummaries()
+	rd, wr := ops[0], ops[1]
+	if wr.Count != 100 || wr.Errors != 2 || wr.Aborted != 3 {
+		t.Fatalf("write=%+v, want 100 ok, 2 errors, 3 aborted", wr)
+	}
+	if rd.Errors != 0 || rd.Aborted != 1 {
+		t.Fatalf("read=%+v, want 0 errors, 1 aborted", rd)
+	}
+	if s := r.Summary(); s.Errors != 6 {
+		t.Fatalf("Summary.Errors=%d, want all 6 failures", s.Errors)
+	}
+}
+
+// N6: the per-request seq is stripped, so one cause is one error kind.
+func TestErrorKindsMergeSeq(t *testing.T) {
+	s0 := time.Unix(0, 0)
+	r := NewRecorder(0, 10*time.Second, s0)
+	for i := 0; i < 50; i++ {
+		r.ObserveSet(s0.Add(time.Second), time.Millisecond, status.Errorf(codes.Aborted, "core: aborted: seq %d", i))
+	}
+	kinds := r.ErrorKinds()
+	if len(kinds) != 1 || kinds[0].Count != 50 || !strings.Contains(kinds[0].Msg, "seq N") {
+		t.Fatalf("kinds=%+v, want one kind with 50 errors and 'seq N'", kinds)
 	}
 }
 

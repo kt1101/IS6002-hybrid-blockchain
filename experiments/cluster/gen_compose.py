@@ -44,7 +44,8 @@ SIGUSR1 at the injection time. Every core node writes its server's pid to
 
 The veritas server of every node runs with GOMEMLIMIT = 70% of the node's
 memory cap (768m -> 537MiB), so the Go GC works harder before the cap is hit
-instead of letting the heap overshoot into an OOM kill.
+instead of letting the heap overshoot into an OOM kill. On a bft2 node it is 70% of
+what the bft2-node sidecar's own limit (20%) leaves (768m -> 430MiB + 153MiB).
 
 Every service runs with ``init: true`` (so SIGTERM reaches the real process)
 and every container of the hbdb-node image mounts a named volume on /data
@@ -159,6 +160,24 @@ def gomemlimit(mem, share=GOMEMLIMIT_SHARE):
     limit = int(mib * share)  # rounds down
     if limit < 1:
         raise ValueError("invalid --mem %r: too small for a GOMEMLIMIT of at least 1MiB" % (mem,))
+    return "%dMiB" % limit
+
+
+def bft2_veritas_gomemlimit(mem):
+    """GOMEMLIMIT of the veritas server on a bft2 node: GOMEMLIMIT_SHARE (70%)
+    of what the node cap leaves after the bft2-node sidecar's own limit
+    (BFT2_GOMEMLIMIT_SHARE of the cap), so the two Go processes' limits sum to
+    less than the container's cap (768m: 430 + 153 = 583 MiB; 70% of the
+    whole cap for veritas, 537 MiB, plus 153 MiB would leave redis 78 MiB).
+
+    >>> bft2_veritas_gomemlimit("768m")
+    '430MiB'
+    """
+    side = int(gomemlimit(mem, BFT2_GOMEMLIMIT_SHARE)[:-3])
+    total = int(gomemlimit(mem, decimal.Decimal(1))[:-3])
+    limit = int(decimal.Decimal(total - side) * GOMEMLIMIT_SHARE)  # rounds down
+    if limit < 1:
+        raise ValueError("invalid --mem %r: too small for the bft2 veritas GOMEMLIMIT" % (mem,))
     return "%dMiB" % limit
 
 
@@ -394,8 +413,9 @@ def _bft2_node(i, n, block_size, commit_mode, memlimit, mem, fault=None, batch_f
     connects; if that fails it exits and so does the container. SIGTERM is
     forwarded to veritas as for kafka/raft/tendermint, so the breakdown
     reaches /results; bft2-node is killed with the container. GOMEMLIMIT is
-    70% of the node cap for the veritas server and 20% for bft2-node
-    (BFT2_GOMEMLIMIT_SHARE). bft2-node exits 3 if its replica can no longer
+    20% of the node cap for bft2-node (BFT2_GOMEMLIMIT_SHARE) and 70% of the
+    rest for the veritas server (bft2_veritas_gomemlimit; 768m -> 153 + 430
+    MiB), so both limits fit in the one container. bft2-node exits 3 if its replica can no longer
     commit (it fell behind past its retained blocks), which ends the
     container like any other dead process. fault arms veritas --fault as on
     the other core backends (_forward_sigterm); VERITAS_PIDFILE holds the
@@ -420,7 +440,8 @@ def _bft2_node(i, n, block_size, commit_mode, memlimit, mem, fault=None, batch_f
         " --bft2-api=%s"
         " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
         " --breakdown-out=/results/breakdown-node%d.json &"
-        % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT, BFT2_API_ADDR, i, i), fault, batch_flush
+        % (bft2_veritas_gomemlimit(mem), commit_mode, i, i, parties, block_size, VERITAS_PORT, BFT2_API_ADDR, i, i),
+        fault, batch_flush
     ) + _exit_when_any_exits(["redis-server", "bft2-node", "veritas-kafka"])
 
 
