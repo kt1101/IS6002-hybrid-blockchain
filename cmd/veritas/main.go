@@ -72,6 +72,7 @@ var (
 	consensusName = kingpin.Flag("consensus", "consensus backend: kafka|raft|tendermint|bft2 (empty: the original veritas server)").Default("").String()
 	commitMode    = kingpin.Flag("commit-mode", "core: when Set returns: sync (block applied on this node) or async (queued)").Default("sync").String()
 	versionMode   = kingpin.Flag("version-mode", "core: client (client versions, stale writes abort) or ordered (versions from the consensus order)").Default("client").String()
+	batchFlush    = kingpin.Flag("batch-flush", "core: flush interval of the batcher (a partial block is sent after this long; E1-E6 keep the original 1s)").Default("1s").Duration()
 	nodeID        = kingpin.Flag("node-id", "core: node id in [0, 2^23), unique per deployment (high bits of every SharedLog seq)").Default("-1").Int()
 	breakdownOut  = kingpin.Flag("breakdown-out", "core: breakdown JSON written on SIGTERM/SIGINT (default /results/breakdown-node<node-id>.json)").Default("").String()
 	faultSpec     = kingpin.Flag("fault", "core: injected replica fault: none, silent (--consensus=kafka only: send no votes) or corrupt (append "+benchmark.CorruptMarker+" to every applied value)").Default(core.FaultNone).String()
@@ -195,6 +196,9 @@ func runCore() {
 	default:
 		kingpin.Fatalf("--version-mode must be client or ordered, got %q", *versionMode)
 	}
+	if *batchFlush <= 0 {
+		kingpin.Fatalf("--batch-flush must be > 0, got %v", *batchFlush)
+	}
 	if *nodeID < 0 || *nodeID >= 1<<23 {
 		kingpin.Fatalf("--node-id is required with --consensus and must be in [0, 2^23), got %d", *nodeID)
 	}
@@ -317,11 +321,12 @@ func runCore() {
 	}
 
 	srv := core.NewServer(core.ServerConfig{
-		NodeID:    *nodeID,
-		Signature: *signature,
-		BlockSize: *blockSize,
-		Mode:      vm,
-		Commit:    cm,
+		NodeID:        *nodeID,
+		Signature:     *signature,
+		BlockSize:     *blockSize,
+		Mode:          vm,
+		Commit:        cm,
+		FlushInterval: *batchFlush, // > 0 (checked above)
 	}, cons, ex, l)
 	drops.set(srv.AbortBlock)
 

@@ -11,8 +11,9 @@ Prints one integer on stdout. Exits 1 with a message on stderr when the file
 is missing, lacks a needed column (backend, n, clients, tps), or has no usable
 N=4 row for the backend.
 
-Used by experiments/exp/p0_baseline.sh to pick CLIENTS for part (b); cv.py
-shares read_tps().
+Used by experiments/exp/p0_baseline.sh to pick CLIENTS for part (b) and by
+experiments/exp/exp_lib.sh (E2-E6) to pick the CLIENTS of each backend from
+the E1 rows; cv.py shares read_tps().
 Standard library only.
 """
 
@@ -24,22 +25,31 @@ BEST_N = "4"
 NEEDED = ("backend", "n", "clients", "tps")
 
 
-def read_tps(path, backend, n):
+def read_tps(path, backend, n, where=None):
     """Return {clients: [tps, ...]} for the rows of backend at N=n.
 
-    Raises ValueError if a needed column is missing from the header. Rows with
-    a non-integer clients or an empty/non-numeric/non-finite tps are skipped.
+    where ({column: value}, optional) keeps only the rows whose column (by
+    header name, compared as stripped text) equals value, e.g.
+    {"block_size": "10", "fault": "none"}; the E3-E6 configurations differ in
+    columns other than backend, n and clients.
+
+    Raises ValueError if a needed column (or a column named in where) is
+    missing from the header. Rows with a non-integer clients or an
+    empty/non-numeric/non-finite tps are skipped.
     """
     out = {}
+    where = dict(where or {})
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
-        missing = [c for c in NEEDED if c not in (reader.fieldnames or [])]
+        missing = [c for c in NEEDED + tuple(sorted(where)) if c not in (reader.fieldnames or [])]
         if missing:
             raise ValueError("%s has no column %s (header: %s)" % (
                 path, ", ".join("'%s'" % c for c in missing),
                 ",".join(reader.fieldnames or []) or "<empty>"))
         for row in reader:
             if row["backend"] != backend or (row["n"] or "").strip() != str(n):
+                continue
+            if any((row[k] or "").strip() != str(v) for k, v in where.items()):
                 continue
             try:
                 clients = int(row["clients"])

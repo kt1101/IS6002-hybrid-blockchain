@@ -510,3 +510,50 @@ def test_bft2_fault_goes_to_veritas_not_the_sidecar():
         assert lines[pid[0] - 1] == "veritas_pid=$$!"
         assert lines.index(sidecar[0]) < lines.index(_veritas_line(c, k))
     assert "--fault" not in c["services"]["node1"]["command"][-1]
+
+
+# ---- BATCH_FLUSH (Task 17: veritas --batch-flush, the core batcher's flush interval) ----
+
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint", "bft2"])
+def test_batch_flush_goes_to_veritas_of_every_core_node(backend):
+    c = gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
+            batch_flush="250ms")
+    for k in _nodes(c):
+        line = _veritas_line(c, k)
+        assert line.endswith(" --breakdown-out=/results/breakdown-%s.json --batch-flush=250ms &" % k)
+        # only veritas gets it: not the sidecar, redis or the pid file
+        assert "--batch-flush" not in c["services"][k]["command"][-1].replace(line, "")
+
+
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint", "bft2"])
+def test_default_has_no_batch_flush_flag(backend):
+    # Unchanged compose when the knob is off: the binary's default (1 s) applies.
+    c = gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    assert all("--batch-flush" not in c["services"][k]["command"][-1] for k in _nodes(c))
+    same = gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m", batch_flush=None)
+    assert same == c
+
+
+def test_batch_flush_after_fault_flags():
+    c = gen(backend="raft", n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m",
+            node_faults={4: "corrupt"}, batch_flush="1s")
+    assert _veritas_line(c, "node4").endswith(" --fault=corrupt --fault-after=87600h --batch-flush=1s &")
+    assert _veritas_line(c, "node1").endswith(" --batch-flush=1s &")
+
+
+def test_bad_batch_flush_is_rejected(capsys):
+    for bad in ("0s", "0ms", "1", "s", "1.5s", "-1s", "1 s", "", "1d"):
+        with pytest.raises(ValueError):
+            gen(backend="raft", n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m", batch_flush=bad)
+    for backend in ("kafka-orig", "tm-orig"):
+        with pytest.raises(ValueError, match="core backend"):
+            gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m", batch_flush="1s")
+    assert main(["--backend", "raft", "--n", "4", "--batch-flush", "bogus"]) == 1
+    assert "invalid --batch-flush" in capsys.readouterr().err
+
+
+def test_cli_batch_flush(tmp_path):
+    out = tmp_path / "compose.json"
+    assert main(["--backend", "kafka", "--n", "4", "--batch-flush", "100ms", "--out", str(out)]) == 0
+    c = json.loads(out.read_text())
+    assert _veritas_line(c, "node2").endswith(" --batch-flush=100ms &")

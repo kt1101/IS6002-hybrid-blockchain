@@ -39,6 +39,23 @@
 #                 LOAD_THREADS <= 256 (hbdb_check_tendermint_limits in lib.sh:
 #                 Tendermint's 256-request ABCI queue per block)
 #
+# BATCH_FLUSH (default empty = the veritas default, 1 s as in the original
+#                 code): flush interval of the core batcher, veritas
+#                 --batch-flush (a partial block is sent after this long),
+#                 e.g. BATCH_FLUSH=100ms; core backends only (kafka, raft,
+#                 tendermint, bft2; the original servers have no such flag).
+#                 Not a CSV column (the 22-column schema is fixed): a value
+#                 other than the default adds "_bf<value>" to the run tag
+#                 (file names) and is in the "run ..." log line, and the CSV
+#                 rows of different BATCH_FLUSH values must go to different
+#                 EXPs.
+# PRE_DOWN_HOOK (default empty): path of an executable run once, after a
+#                 successful run's CSV row was appended and BEFORE the cluster
+#                 is torn down (down.sh), with EXP, BACKEND, N, F, CLIENTS,
+#                 BLOCK_SIZE, WORKLOAD, REP, TAG in its environment (e.g.
+#                 experiments/exp/kafka_ops.sh, E2). A hook failure is only a
+#                 warning: the run and its row stand. Unset: nothing changes.
+#
 # CLIENTS = number of concurrent client workers: ycsbbench --ndrivers=CLIENTS
 # --nthreads=1; driver k talks to node (k mod N)+1.
 #
@@ -126,6 +143,8 @@ LOAD_TIMEOUT="${LOAD_TIMEOUT:-20m}"
 LOAD_OP_TIMEOUT="${LOAD_OP_TIMEOUT:-30s}"
 SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-10m}"
 KEEP_LOGS="${KEEP_LOGS:-0}"
+BATCH_FLUSH="${BATCH_FLUSH:-}"
+PRE_DOWN_HOOK="${PRE_DOWN_HOOK:-}"
 
 # ---- validate input (nothing touches Docker before this passes) ----
 case "$EXP" in
@@ -147,6 +166,15 @@ esac
 case "$FAULT" in
   '' | *[!A-Za-z0-9._:@,+-]*) die "FAULT must match [A-Za-z0-9._:@,+-]+, got '$FAULT'" ;;
 esac
+if [ -n "$BATCH_FLUSH" ]; then
+  echo "$BATCH_FLUSH" | grep -Eq '^[0-9]+(ms|s|m|h)$' && [ "$(echo "$BATCH_FLUSH" | tr -dc '0-9' | sed 's/^0*//')" != "" ] ||
+    die "BATCH_FLUSH must be a positive duration like 1s, 100ms, 2m; got '$BATCH_FLUSH'"
+  hbdb_backend_has_fault_policy "$BACKEND" ||
+    die "BATCH_FLUSH is a veritas --batch-flush flag of the core backends (kafka, raft, tendermint, bft2); BACKEND=$BACKEND is an original server without it"
+fi
+if [ -n "$PRE_DOWN_HOOK" ]; then
+  [ -f "$PRE_DOWN_HOOK" ] && [ -x "$PRE_DOWN_HOOK" ] || die "PRE_DOWN_HOOK '$PRE_DOWN_HOOK' is not an executable file"
+fi
 for d in "$DURATION" "$WARMUP" "$LOAD_TIMEOUT" "$LOAD_OP_TIMEOUT" "$SETTLE_TIMEOUT"; do
   echo "$d" | grep -Eq '^[0-9]+(ms|s|m|h)$' || die "DURATION/WARMUP/LOAD_TIMEOUT/LOAD_OP_TIMEOUT/SETTLE_TIMEOUT must look like 60s, 500ms, 2m; got '$d'"
 done
@@ -207,9 +235,13 @@ run_file="$HBDB_YCSB_DIR/$WORKLOAD.run.dat"
 [ -s "$load_file" ] || die "missing $load_file (run experiments/ycsb/gen.sh)"
 [ -s "$run_file" ] || die "missing $run_file (run experiments/ycsb/gen.sh)"
 
-export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS YCSB_DIR="$HBDB_YCSB_DIR"
+export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS BATCH_FLUSH YCSB_DIR="$HBDB_YCSB_DIR"
 
 tag="${BACKEND}_n${N}_f${F}_c${CLIENTS}_b${BLOCK_SIZE}_w${WORKLOAD}_rtt${RTT_MS}_${FAULT}_${COMMIT_MODE}_r${REP}"
+# A non-default BATCH_FLUSH is told apart in the file names (not in the CSV).
+if [ -n "$BATCH_FLUSH" ] && [ "$BATCH_FLUSH" != 1s ]; then
+  tag="${tag}_bf${BATCH_FLUSH}"
+fi
 tag="$(echo "$tag" | tr -c 'A-Za-z0-9._\n-' '_')"
 exp_dir="$HBDB_RESULTS_RAW/$EXP"
 csv="$HBDB_RESULTS_RAW/$EXP.csv"
@@ -499,7 +531,7 @@ host_state() {
 acquire_lock
 [ -s "$exp_dir/host.log" ] || echo "ts,tag,phase,load1,load5,load15,free_mb,compressor_mb,swapouts" >"$exp_dir/host.log"
 host_state start
-log "run $EXP/$tag (duration $DURATION, warmup $WARMUP, load threads $LOAD_THREADS, load timeout $LOAD_TIMEOUT, load op timeout $LOAD_OP_TIMEOUT, settle timeout $SETTLE_TIMEOUT, watchdog ${watchdog_secs}s)"
+log "run $EXP/$tag (batch flush ${BATCH_FLUSH:-default 1s}, duration $DURATION, warmup $WARMUP, load threads $LOAD_THREADS, load timeout $LOAD_TIMEOUT, load op timeout $LOAD_OP_TIMEOUT, settle timeout $SETTLE_TIMEOUT, watchdog ${watchdog_secs}s)"
 "$HBDB_CLUSTER_DIR/down.sh" || exit 1
 # Files left by an earlier cluster (e.g. check_consistency.sh) are not this run's.
 collect_breakdown "$HBDB_RESULTS_RAW/breakdown-stale.$(date -u +%Y%m%dT%H%M%SZ)"
@@ -687,4 +719,12 @@ fi
 echo "$final" >>"$csv"
 host_state end
 log "row appended to $csv (host_cpu_max_pct=$host_cpu_max_pct saturated=$saturated)"
+# Hook (E2: Kafka offsets) while the cluster is still up; cleanup's down.sh
+# comes after. A failing hook is a warning, never a failed run.
+if [ -n "$PRE_DOWN_HOOK" ]; then
+  log "running PRE_DOWN_HOOK $PRE_DOWN_HOOK"
+  EXP="$EXP" BACKEND="$BACKEND" N="$N" F="$F" CLIENTS="$CLIENTS" BLOCK_SIZE="$BLOCK_SIZE" \
+    WORKLOAD="$WORKLOAD" REP="$REP" TAG="$tag" "$PRE_DOWN_HOOK" >&2 ||
+    log "warning: PRE_DOWN_HOOK exited $?; the run's CSV row stands"
+fi
 echo "$final"

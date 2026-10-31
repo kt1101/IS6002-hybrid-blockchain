@@ -9,6 +9,8 @@
 #      NODE_FAULTS="" (space-separated node<i>=silent|corrupt, from
 #      run_one.sh / faults.sh fault_node_faults: those nodes' veritas runs
 #      with --fault armed, see gen_compose.py --node-fault).
+#      BATCH_FLUSH="" (empty: veritas default 1s; else a duration like 250ms:
+#      veritas --batch-flush of every node of a core backend).
 # Writes experiments/cluster/generated/{compose.json,tm/}.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
@@ -19,6 +21,7 @@ COMMIT_MODE="${COMMIT_MODE:-sync}"
 CPUS="${CPUS:-0.5}"
 MEM="${MEM:-768m}"
 NODE_FAULTS="${NODE_FAULTS:-}"
+BATCH_FLUSH="${BATCH_FLUSH:-}"
 
 hbdb_check_backend
 hbdb_check_n "$N"
@@ -30,6 +33,12 @@ for nf in $NODE_FAULTS; do
   echo "$nf" | grep -Eq '^node[1-9][0-9]*=[a-z]+$' || die "NODE_FAULTS item '$nf': want node<i>=<fault>, e.g. node4=corrupt"
   node_fault_args="$node_fault_args --node-fault $nf"
 done
+
+batch_flush_args=""
+if [ -n "$BATCH_FLUSH" ]; then
+  echo "$BATCH_FLUSH" | grep -Eq '^[0-9]+(ms|s|m|h)$' || die "BATCH_FLUSH='$BATCH_FLUSH': want a duration like 1s, 250ms, 2m"
+  batch_flush_args="--batch-flush $BATCH_FLUSH"
+fi
 
 mkdir -p "$HBDB_GEN_DIR" "$HBDB_RESULTS_RAW" "$HBDB_YCSB_DIR"
 
@@ -45,11 +54,11 @@ if [ "$BACKEND" = tm-orig ] || [ "$BACKEND" = tendermint ]; then
   python3 "$HBDB_CLUSTER_DIR/tm_config.py" --dir "$HBDB_GEN_DIR/tm" --n "$N" --backend "$BACKEND"
 fi
 
-log "generating compose: backend=$BACKEND n=$N block_size=$BLOCK_SIZE commit_mode=$COMMIT_MODE cpus=$CPUS mem=$MEM${NODE_FAULTS:+ node_faults=$NODE_FAULTS}"
+log "generating compose: backend=$BACKEND n=$N block_size=$BLOCK_SIZE commit_mode=$COMMIT_MODE cpus=$CPUS mem=$MEM${NODE_FAULTS:+ node_faults=$NODE_FAULTS}${BATCH_FLUSH:+ batch_flush=$BATCH_FLUSH}"
 # shellcheck disable=SC2086
 python3 "$HBDB_CLUSTER_DIR/gen_compose.py" \
   --backend "$BACKEND" --n "$N" --block-size "$BLOCK_SIZE" --commit-mode "$COMMIT_MODE" \
-  --cpus "$CPUS" --mem "$MEM" $node_fault_args \
+  --cpus "$CPUS" --mem "$MEM" $node_fault_args $batch_flush_args \
   --tm-dir "$HBDB_GEN_DIR/tm" --ycsb-dir "$HBDB_YCSB_DIR" --results-dir "$HBDB_RESULTS_RAW" \
   --out "$HBDB_COMPOSE_FILE"
 
