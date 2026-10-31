@@ -1,12 +1,17 @@
 package ledger
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"hybrid/veritas/ledger/merkletree"
 )
 
 func TestStateDigestComputation(t *testing.T) {
@@ -49,4 +54,46 @@ func TestStateDigestComputation(t *testing.T) {
 	assert.Equal(t, ledger3Digest, ledger2AfterAppendingBlkDigest)
 	ledger3.Close()
 	defer os.RemoveAll(dir)
+}
+
+// The ledger's (pruned) tree yields the same digests and verifiable proofs as
+// an unpruned tree under repeated overwrites, also after a reload.
+func TestLedgerPrunedMatchesUnpruned(t *testing.T) {
+	dir := t.TempDir()
+	l, err := NewLedger(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := merkletree.NewSparseMerkleTree(merkletree.NewSimpleMap(), sha256.New())
+	for i := 0; i < 2000; i++ {
+		k := []byte(fmt.Sprintf("user%03d", i%37))
+		v := []byte(fmt.Sprintf("val-%d", i%11)) // identical values across keys
+		if err := l.Append(k, v); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ref.Update(k, v); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(l.GetRootDigest(), ref.Root()) {
+			t.Fatalf("append %d: digest %x, unpruned %x", i, l.GetRootDigest(), ref.Root())
+		}
+	}
+	for i := 1963; i < 2000; i++ {
+		k := []byte(fmt.Sprintf("user%03d", i%37))
+		v := []byte(fmt.Sprintf("val-%d", i%11))
+		p, err := l.ProveKey(k)
+		if err != nil || !merkletree.VerifyProof(p, l.GetRootDigest(), k, v, sha256.New()) {
+			t.Fatalf("proof for %s does not verify (err %v)", k, err)
+		}
+	}
+	digest := l.GetRootDigest()
+	l.Close()
+	l2, err := NewLedger(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+	if !bytes.Equal(l2.GetRootDigest(), digest) {
+		t.Fatalf("digest after reload %x, want %x", l2.GetRootDigest(), digest)
+	}
 }

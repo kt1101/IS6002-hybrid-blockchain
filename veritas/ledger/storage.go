@@ -40,7 +40,10 @@ func NewLedger(ledgerPath string, withMerkleTree bool) (*LogLedger, error) {
 			smt:   nil,
 		}, nil
 	}
-	tree := merkletree.NewSparseMerkleTree(merkletree.NewSimpleMap(), sha256.New())
+	// Pruned: the tree deletes the leaf, value and path nodes an update
+	// orphans, so memory is O(live keys) rather than O(writes). Only the
+	// current root is ever read (Root, Prove); see NewPrunedSparseMerkleTree.
+	tree := merkletree.NewPrunedSparseMerkleTree(merkletree.NewSimpleMap(), sha256.New())
 	l := &LogLedger{
 		store: db,
 		smt:   tree,
@@ -51,7 +54,9 @@ func NewLedger(ledgerPath string, withMerkleTree bool) (*LogLedger, error) {
 		for it.Seek(kStatePrefix); it.ValidForPrefix(kStatePrefix); it.Next() {
 			item := it.Item()
 			if err := item.Value(func(v []byte) error {
-				if _, err := tree.Update(StripPrefix(kStatePrefix, item.Key()), v); err != nil {
+				// v is only valid inside this callback and SimpleMap keeps
+				// the slice it is given, so store a copy.
+				if _, err := tree.Update(StripPrefix(kStatePrefix, item.Key()), append([]byte(nil), v...)); err != nil {
 					return err
 				}
 				return nil

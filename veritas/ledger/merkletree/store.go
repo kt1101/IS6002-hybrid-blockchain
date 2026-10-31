@@ -13,6 +13,8 @@ import (
 type KVStore interface {
 	Get(key []byte) ([]byte, error)
 	Set(key []byte, value []byte) error
+	// Delete removes key. Deleting a missing key is not an error.
+	Delete(key []byte) error
 	Close() error
 }
 
@@ -43,6 +45,11 @@ func (sm *SimpleMap) Get(key []byte) ([]byte, error) {
 
 func (sm *SimpleMap) Set(key []byte, value []byte) error {
 	sm.m[string(key)] = value
+	return nil
+}
+
+func (sm *SimpleMap) Delete(key []byte) error {
+	delete(sm.m, string(key))
 	return nil
 }
 
@@ -99,6 +106,13 @@ func (bs *BadgerStore) Set(key []byte, value []byte) error {
 			return err
 		}
 		return nil
+	})
+}
+
+// Delete removes the value for a key (no error if it is missing).
+func (bs *BadgerStore) Delete(key []byte) error {
+	return bs.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(key)
 	})
 }
 
