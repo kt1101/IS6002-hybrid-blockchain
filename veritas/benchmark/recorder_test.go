@@ -152,7 +152,7 @@ func TestOpSummariesSplitReadsAndWrites(t *testing.T) {
 	for i := 0; i < 10; i++ { // 10 writes of 500 ms
 		r.ObserveSet(in, 500*time.Millisecond, nil)
 	}
-	r.ObserveSet(in, time.Second, errors.New("deadline")) // failed write
+	r.ObserveSet(in, time.Second, errors.New("deadline"))                  // failed write
 	r.ObserveSet(s0.Add(5*time.Second), time.Second, errors.New("warmup")) // not counted
 	r.ObserveGet(in, time.Millisecond, "", errors.New("unavailable"))      // failed read
 	r.Observe(in, 7*time.Millisecond, nil)                                 // OpOther: Summary only
