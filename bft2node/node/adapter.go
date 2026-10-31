@@ -22,6 +22,7 @@ type adapter struct {
 	committed atomic.Uint64 // non-empty commands executed
 	proposed  atomic.Uint64 // non-empty commands returned by Get
 	requeued  atomic.Uint64 // own forked commands re-queued
+	failRun   atomic.Int64  // "failed to commit" since the last Exec
 }
 
 var (
@@ -64,6 +65,7 @@ func (a *adapter) Proposed(hotstuff.Command) {}
 // (empty command) are skipped on every replica alike. It blocks while the
 // commit log is over its byte limit (backpressure).
 func (a *adapter) Exec(b *hotstuff.Block) {
+	a.failRun.Store(0) // a commit succeeded (fillers count)
 	cmd := b.Command()
 	if cmd == "" {
 		return

@@ -24,6 +24,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sort"
 	"sync"
@@ -56,11 +57,13 @@ const (
 	DefaultIdleWait         = 20 * time.Millisecond
 	DefaultConnectTimeout   = 120 * time.Second
 	DefaultDialTimeout      = 10 * time.Second
-	DefaultRetainViews      = 256
+	DefaultMinRetainViews   = 64
+	DefaultRetainBytes      = 64 << 20
+	DefaultMaxCommitFails   = 50
 	DefaultEventQueue       = 1000
 	DefaultMaxQueue         = 1024
-	DefaultMaxQueueBytes    = 128 << 20
-	DefaultMaxBacklogBytes  = 64 << 20
+	DefaultMaxQueueBytes    = 16 << 20
+	DefaultMaxBacklogBytes  = 32 << 20
 	DefaultMaxCommandBytes  = 4 << 20
 	grpcMaxMsgBytes         = 4*DefaultMaxCommandBytes + 1<<20
 	peerProbeInterval       = 200 * time.Millisecond
@@ -84,9 +87,9 @@ type Config struct {
 	Listener net.Listener
 	KeySeed  string
 
-	// View timeout: starts at ViewTimeout, adapts to the observed view
-	// durations (library), clamped to [MinViewTimeout, MaxViewTimeout],
-	// multiplied by TimeoutMultiplier after each timeout.
+	// View timeout: max(library estimate of successful views (starts at
+	// ViewTimeout), MinViewTimeout) x TimeoutMultiplier^(consecutive
+	// timeouts), at most MaxViewTimeout (viewduration.go).
 	ViewTimeout       time.Duration
 	MinViewTimeout    time.Duration
 	MaxViewTimeout    time.Duration
@@ -98,10 +101,17 @@ type Config struct {
 	IdleWait time.Duration
 	// ConnectTimeout bounds Start's wait for every peer's server.
 	ConnectTimeout time.Duration
-	// RetainViews: blocks of views older than this below the last committed
-	// height are evicted from memory (a replica lagging further cannot
-	// fetch them any more).
-	RetainViews int
+	// RetainBytes: after each commit the oldest blocks are evicted while
+	// the stored blocks cost more than this (command bytes + ~0.5 KB each),
+	// but never those of the last MinRetainViews views below the committed
+	// height (blockchain.go). A replica lagging further cannot fetch them
+	// any more and stops committing.
+	RetainBytes    int64
+	MinRetainViews int
+	// MaxCommitFailures: after this many "failed to commit" in a row
+	// (without a commit in between) the replica reports itself failed
+	// (Failed, Stats.CommitFailures); bft2-node then exits.
+	MaxCommitFailures int
 	// EventQueue: capacity of the library's event loop (it drops the oldest
 	// event when full).
 	EventQueue int
@@ -139,8 +149,14 @@ func (c *Config) setDefaults() {
 	if c.ConnectTimeout <= 0 {
 		c.ConnectTimeout = DefaultConnectTimeout
 	}
-	if c.RetainViews <= 0 {
-		c.RetainViews = DefaultRetainViews
+	if c.RetainBytes <= 0 {
+		c.RetainBytes = DefaultRetainBytes
+	}
+	if c.MinRetainViews <= 0 {
+		c.MinRetainViews = DefaultMinRetainViews
+	}
+	if c.MaxCommitFailures <= 0 {
+		c.MaxCommitFailures = DefaultMaxCommitFails
 	}
 	if c.EventQueue <= 0 {
 		c.EventQueue = DefaultEventQueue
@@ -203,8 +219,14 @@ type Node struct {
 	log     *CommitLog
 	adapter *adapter
 
-	view     atomic.Uint64 // current view (from the synchronizer's view-change events)
-	timeouts atomic.Uint64 // views ended by a timeout certificate
+	viewDuration *boundedViewDuration
+
+	view           atomic.Uint64 // current view (from the synchronizer's view-change events)
+	timeouts       atomic.Uint64 // views ended by a timeout certificate
+	commitFailures atomic.Uint64 // "failed to commit" warnings of the consensus module
+	dropped        atomic.Uint64 // events the event loop dropped (queue full)
+	failed         chan struct{} // closed once MaxCommitFailures commits failed in a row
+	failOnce       sync.Once
 
 	mu        sync.Mutex
 	started   bool
@@ -257,6 +279,7 @@ func New(cfg Config) (*Node, error) {
 		log:    NewCommitLog(cfg.MaxBacklogBytes),
 		done:   make(chan struct{}),
 		stopCh: make(chan struct{}),
+		failed: make(chan struct{}),
 	}
 
 	// Transport: gorums over gRPC, no TLS (backend.NewConfig uses insecure
@@ -282,12 +305,12 @@ func New(cfg Config) (*Node, error) {
 	n.adapter = &adapter{id: cfg.ID, queue: n.queue, log: n.log, idle: cfg.IdleWait}
 
 	ms := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
-	viewDuration := boundedViewDuration{
-		inner: synchronizer.NewViewDuration(uint64(cfg.DurationSamples),
+	// The library's estimator only sees successful views: the wrapper does
+	// the timeout back-off itself (viewduration.go).
+	n.viewDuration = newBoundedViewDuration(
+		synchronizer.NewViewDuration(uint64(cfg.DurationSamples),
 			ms(cfg.ViewTimeout), ms(cfg.MaxViewTimeout), cfg.TimeoutMultiplier),
-		min: cfg.MinViewTimeout,
-		max: cfg.MaxViewTimeout,
-	}
+		cfg.MinViewTimeout, cfg.MaxViewTimeout, cfg.TimeoutMultiplier)
 
 	builder := modules.NewBuilder(cfg.ID, priv)
 	// Votes are verified on the event loop: the asynchronous path reads
@@ -299,9 +322,13 @@ func New(cfg Config) (*Node, error) {
 		consensus.NewVotingMachine(),
 		crypto.NewCache(hsecdsa.New(), verifiedCryptoCacheSize),
 		newShuffledRoundRobin(len(peers), leaderSeed(cfg.KeySeed)),
-		synchronizer.New(viewDuration),
-		newBlockChain(hotstuff.View(cfg.RetainViews)),
-		logging.New(fmt.Sprintf("hs%d", cfg.ID)),
+		synchronizer.New(n.viewDuration),
+		newBlockChain(hotstuff.View(cfg.MinRetainViews), cfg.RetainBytes),
+		&watchLogger{
+			Logger:          logging.New(fmt.Sprintf("hs%d", cfg.ID)),
+			onCommitFailure: n.commitFailed,
+			onDroppedEvent:  func() { n.dropped.Add(1) },
+		},
 		n.hscfg,
 		n.server,
 		n.adapter,
@@ -359,13 +386,17 @@ func (n *Node) Start(ctx context.Context) error {
 		}
 	}
 
+	// Connect without n.mu (it may take up to the dial timeout), so Stop is
+	// not held up; if Stop ran meanwhile, undo the connection here (Stop
+	// saw connected == false and left hscfg alone).
+	if err := n.hscfg.Connect(n.infos); err != nil {
+		return fmt.Errorf("bft2-node: connect to replicas: %w", err)
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.stopped {
+		n.hscfg.Close()
 		return ErrStopped
-	}
-	if err := n.hscfg.Connect(n.infos); err != nil {
-		return fmt.Errorf("bft2-node: connect to replicas: %w", err)
 	}
 	n.connected = true
 
@@ -432,30 +463,56 @@ func (n *Node) Submit(cmd []byte) error {
 
 // Stats is a snapshot of a replica's progress (for logs and tests).
 type Stats struct {
-	View      uint64 // current view
-	Timeouts  uint64 // views ended by a timeout certificate
-	Committed uint64 // committed non-empty commands (= Veritas blocks)
-	Proposed  uint64 // non-empty commands this replica proposed (re-proposals included)
-	Requeued  uint64 // own forked commands put back in the queue
-	Queued    int    // commands waiting for proposal
+	View           uint64        // current view
+	Timeouts       uint64        // views ended by a timeout certificate
+	ViewTimeout    time.Duration // the view timeout last handed to the synchronizer
+	Committed      uint64        // committed non-empty commands (= Veritas blocks)
+	Proposed       uint64        // non-empty commands this replica proposed (re-proposals included)
+	Requeued       uint64        // own forked commands put back in the queue
+	Queued         int           // commands waiting for proposal
+	CommitFailures uint64        // "failed to commit" (missing ancestor); see Failed
+	Dropped        uint64        // events dropped by the full event queue
 }
 
 func (s Stats) String() string {
-	return fmt.Sprintf("view=%d timeouts=%d committed=%d proposed=%d requeued=%d queued=%d",
-		s.View, s.Timeouts, s.Committed, s.Proposed, s.Requeued, s.Queued)
+	return fmt.Sprintf("view=%d timeouts=%d view_timeout=%v committed=%d proposed=%d requeued=%d queued=%d commit_failures=%d dropped_events=%d",
+		s.View, s.Timeouts, s.ViewTimeout, s.Committed, s.Proposed, s.Requeued, s.Queued, s.CommitFailures, s.Dropped)
 }
 
 // Stats returns a snapshot of the replica's progress.
 func (n *Node) Stats() Stats {
 	return Stats{
-		View:      n.view.Load(),
-		Timeouts:  n.timeouts.Load(),
-		Committed: n.adapter.committed.Load(),
-		Proposed:  n.adapter.proposed.Load(),
-		Requeued:  n.adapter.requeued.Load(),
-		Queued:    n.queue.len(),
+		View:           n.view.Load(),
+		Timeouts:       n.timeouts.Load(),
+		ViewTimeout:    n.viewDuration.lastDuration(),
+		Committed:      n.adapter.committed.Load(),
+		Proposed:       n.adapter.proposed.Load(),
+		Requeued:       n.adapter.requeued.Load(),
+		Queued:         n.queue.len(),
+		CommitFailures: n.commitFailures.Load(),
+		Dropped:        n.dropped.Load(),
 	}
 }
+
+// commitFailed counts a "failed to commit" of the consensus module. After
+// MaxCommitFailures in a row (adapter.Exec resets the run) the replica has
+// lost blocks it cannot fetch any more and will never commit again: it logs
+// an error and closes Failed.
+func (n *Node) commitFailed(msg string) {
+	n.commitFailures.Add(1)
+	run := n.adapter.failRun.Add(1)
+	if run >= int64(n.cfg.MaxCommitFailures) {
+		n.failOnce.Do(func() {
+			log.Printf("bft2-node %d: ERROR: %d commits failed in a row (last: %s); this replica can no longer commit (fell behind past the retained blocks?)",
+				n.cfg.ID, run, msg)
+			close(n.failed)
+		})
+	}
+}
+
+// Failed is closed when the replica can no longer commit (see
+// Config.MaxCommitFailures). bft2-node exits non-zero on it.
+func (n *Node) Failed() <-chan struct{} { return n.failed }
 
 // Log returns the commit log: every committed command, in commit order.
 func (n *Node) Log() *CommitLog { return n.log }

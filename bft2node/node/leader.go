@@ -26,9 +26,14 @@ type shuffledRoundRobin struct {
 	n    int
 	seed int64
 
+	// Cache of the last two epochs' permutations: around an epoch boundary
+	// the library asks for view v and v+1 alternately (OnPropose,
+	// AdvanceView), which would reseed math/rand on every call.
 	mu    sync.Mutex
-	epoch hotstuff.View // epoch of perm (cache)
-	perm  []int
+	cache [2]struct {
+		epoch hotstuff.View
+		perm  []int
+	}
 }
 
 var _ modules.LeaderRotation = (*shuffledRoundRobin)(nil)
@@ -43,9 +48,10 @@ func (s *shuffledRoundRobin) GetLeader(view hotstuff.View) hotstuff.ID {
 	epoch, pos := view/n, view%n
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.perm == nil || s.epoch != epoch {
-		s.perm = rand.New(rand.NewSource(s.seed + int64(epoch))).Perm(s.n)
-		s.epoch = epoch
+	slot := &s.cache[epoch%2]
+	if slot.perm == nil || slot.epoch != epoch {
+		slot.perm = rand.New(rand.NewSource(s.seed + int64(epoch))).Perm(s.n)
+		slot.epoch = epoch
 	}
-	return hotstuff.ID(s.perm[pos] + 1)
+	return hotstuff.ID(slot.perm[pos] + 1)
 }

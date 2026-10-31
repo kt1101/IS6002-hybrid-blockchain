@@ -104,7 +104,8 @@ parse_rc() {
 # ---- lib.sh: consensus ports ----
 eq "ports raft" "$(hbdb_consensus_ports raft)" "7100 7101"
 eq "ports tendermint" "$(hbdb_consensus_ports tendermint)" "26656"
-for b in kafka-orig tm-orig kafka bft2; do
+eq "ports bft2" "$(hbdb_consensus_ports bft2)" "7200"
+for b in kafka-orig tm-orig kafka; do
   eq "ports $b" "$(hbdb_consensus_ports "$b")" ""
 done
 # The constants must match gen_compose.py.
@@ -112,6 +113,7 @@ gc="$HERE/cluster/gen_compose.py"
 eq "RAFT_PORT matches gen_compose" "$(sed -n 's/^RAFT_PORT = \([0-9]*\).*/\1/p' "$gc")" "$HBDB_RAFT_PORT"
 eq "RAFT_FORWARD_PORT matches gen_compose" "$(sed -n 's/^RAFT_FORWARD_PORT = \([0-9]*\).*/\1/p' "$gc")" "$HBDB_RAFT_FORWARD_PORT"
 eq "TM_P2P_PORT matches gen_compose" "$(sed -n 's/^TM_P2P_PORT = \([0-9]*\).*/\1/p' "$gc")" "$HBDB_TM_P2P_PORT"
+eq "BFT2_PORT matches gen_compose" "$(sed -n 's/^BFT2_PORT = \([0-9]*\).*/\1/p' "$gc")" "$HBDB_BFT2_PORT"
 grep -q '"cap_add"\] = \["NET_ADMIN"\]' "$gc" && ok || bad "gen_compose.py no longer gives the nodes NET_ADMIN"
 
 # ---- default fault nodes ----
@@ -142,6 +144,8 @@ fault_parse F2:node4@60 raft 4 180
 eq "F2 raft" "$FAULT_KIND/$FAULT_NODES/$FAULT_BACKEND" "F2/node4/raft"
 fault_parse F2:node4@0 tendermint 4 180
 eq "F2 tendermint at 0" "$FAULT_AT" 0
+fault_parse F2:node4@60 bft2 4 180
+eq "F2 bft2" "$FAULT_KIND/$FAULT_NODES/$FAULT_BACKEND" "F2/node4/bft2"
 fault_parse "F1:$(fault_default_nodes 7 2)@60" raft 7 180
 eq "default nodes round-trip" "$FAULT_NODES" "node7 node6"
 
@@ -163,8 +167,6 @@ r="$(parse_rc F2:node4@20 kafka-orig 4 40)"
 contains "F2 kafka-orig" "$r" "Task 15"
 r="$(parse_rc F2:node4@20 tm-orig 4 40)"
 contains "F2 tm-orig" "$r" "no network-silent mode"
-r="$(parse_rc F2:node4@20 bft2 4 40)"
-contains "F2 bft2 (no port yet)" "$r" "no network-silent mode"
 r="$(parse_rc F4:node4@20 raft 4 40)"
 contains "F4" "$r" "F4 (wrong state) needs Task 15"
 r="$(parse_rc F5:node3,node4@20 tendermint 4 40)"

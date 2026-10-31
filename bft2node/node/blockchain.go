@@ -4,9 +4,9 @@ package node
 // (MIT license). The library's blockChain never deletes from its blocks map,
 // so every block, i.e. every Veritas block, stays in memory for the life of
 // the process (hundreds of MB per run inside a 768m container). This copy is
-// identical except that PruneToHeight also evicts the blocks of views older
-// than retain views below the pruned height, and Get releases its fetch
-// context when the fetch returns.
+// identical except that PruneToHeight also evicts the oldest blocks, by
+// bytes (see newBlockChain), and Get releases its fetch context when the
+// fetch returns.
 
 import (
 	"context"
@@ -25,7 +25,8 @@ type blockChain struct {
 	eventLoop     *eventloop.EventLoop
 	logger        logging.Logger
 
-	retain hotstuff.View
+	minKeep     hotstuff.View // views below the pruned height never evicted
+	retainBytes int64         // evict the oldest views while bytes exceeds this
 
 	mut           sync.Mutex
 	pruneHeight   hotstuff.View
@@ -35,7 +36,15 @@ type blockChain struct {
 
 	byView    map[hotstuff.View][]hotstuff.Hash // hashes in blocks, by view (for eviction)
 	evictedTo hotstuff.View                     // blocks of views < evictedTo are gone (genesis excepted)
+	bytes     int64                             // blockCost of every indexed block
 }
+
+// blockOverhead is what a block costs besides its command (struct, QC with
+// up to N ECDSA signatures, map entries); an estimate, so that filler blocks
+// count too.
+const blockOverhead = 512
+
+func blockCost(b *hotstuff.Block) int64 { return int64(len(b.Command())) + blockOverhead }
 
 var (
 	_ modules.BlockChain = (*blockChain)(nil)
@@ -48,15 +57,22 @@ func onceFunc(f func()) func() {
 	return func() { once.Do(f) }
 }
 
-// newBlockChain returns a blockchain that keeps the blocks of the last
-// retain views below the last pruned (committed) height, plus everything
-// above it. retain must be >= 1.
-func newBlockChain(retain hotstuff.View) *blockChain {
-	if retain < 1 {
-		retain = 1
+// newBlockChain returns a blockchain that, after each commit, evicts the
+// blocks of the oldest views while the stored blocks cost more than
+// retainBytes (command bytes + blockOverhead each), but never a block of the
+// last minKeep views below the committed (pruned) height, nor anything above
+// it. So the retention window is as many views as fit in retainBytes: with
+// filler-only views (~0.5 KB) hundreds of thousands, with 100 KB Veritas
+// blocks about retainBytes/100 KB. A replica that falls behind by more than
+// that can no longer fetch the blocks it misses and stops committing
+// (counted and fatal, see Node.Failed). minKeep must be >= 1.
+func newBlockChain(minKeep hotstuff.View, retainBytes int64) *blockChain {
+	if minKeep < 1 {
+		minKeep = 1
 	}
 	bc := &blockChain{
-		retain:        retain,
+		minKeep:       minKeep,
+		retainBytes:   retainBytes,
 		blocks:        make(map[hotstuff.Hash]*hotstuff.Block),
 		blockAtHeight: make(map[hotstuff.View]*hotstuff.Block),
 		pendingFetch:  make(map[hotstuff.Hash]context.CancelFunc),
@@ -88,6 +104,7 @@ func (chain *blockChain) index(block *hotstuff.Block) {
 		v = chain.evictedTo
 	}
 	chain.byView[v] = append(chain.byView[v], block.Hash())
+	chain.bytes += blockCost(block)
 }
 
 // Store stores a block in the blockchain
@@ -216,20 +233,23 @@ func (chain *blockChain) PruneToHeight(height hotstuff.View) (forkedBlocks []*ho
 	}
 	chain.pruneHeight = height
 
-	// The only change from the library: evict old blocks. Everything at or
-	// above height-retain stays (the commit walk above only looks at views
-	// >= the previous prune height; votes, QCs and fetches look at recent views).
-	if height > chain.retain {
-		horizon := height - chain.retain
-		for v := chain.evictedTo; v < horizon; v++ {
+	// The only change from the library: evict the oldest blocks while over
+	// the byte budget. Everything at or above height-minKeep stays (the
+	// commit walk above only looks at views >= the previous prune height;
+	// votes, QCs and fetches look at recent views).
+	if height > chain.minKeep {
+		horizon := height - chain.minKeep
+		v := chain.evictedTo
+		for ; v < horizon && chain.bytes > chain.retainBytes; v++ {
 			for _, h := range chain.byView[v] {
-				delete(chain.blocks, h)
+				if b, ok := chain.blocks[h]; ok {
+					chain.bytes -= blockCost(b)
+					delete(chain.blocks, h)
+				}
 			}
 			delete(chain.byView, v)
 		}
-		if horizon > chain.evictedTo {
-			chain.evictedTo = horizon
-		}
+		chain.evictedTo = v
 	}
 	return forkedBlocks
 }

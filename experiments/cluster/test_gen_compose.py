@@ -376,7 +376,7 @@ def test_bft2_backend_runs_sidecar_and_core_server_without_kafka_or_tso():
         assert s["volumes"] == ["node%d-data:/data" % i, "/res:/results"]
         cmd = s["command"][-1]
         # Replica i of the static set 1..4, every node gets the same peers.
-        assert ("bft2-node --id=%d --peers=%s --listen=0.0.0.0:7200 --api=127.0.0.1:7201 &"
+        assert ("\nGOMEMLIMIT=153MiB bft2-node --id=%d --peers=%s --listen=0.0.0.0:7200 --api=127.0.0.1:7201 &"
                 % (i, BFT2_PEERS_4)) in cmd
         assert ("GOMEMLIMIT=537MiB veritas-kafka --consensus=bft2 --commit-mode=sync"
                 " --version-mode=ordered --node-id=%d --signature=node%d " % (i, i)) in cmd
@@ -385,13 +385,14 @@ def test_bft2_backend_runs_sidecar_and_core_server_without_kafka_or_tso():
         assert "--redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d" % i in cmd
         assert "--breakdown-out=/results/breakdown-node%d.json &" % i in cmd
         assert "kafka-addr" not in cmd and "tso" not in cmd
-        assert cmd.count("GOMEMLIMIT") == 1  # the sidecar is not limited
+        # veritas 70% (537MiB) and the sidecar 20% (153MiB) of the 768m cap.
+        assert cmd.count("GOMEMLIMIT") == 2
 
 
 def test_bft2_veritas_starts_after_local_api_listens_with_bounded_wait():
     c = gen(backend="bft2", n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
     lines = c["services"]["node2"]["command"][-1].rstrip("\n").split("\n")
-    side = [j for j, l in enumerate(lines) if l.startswith("bft2-node ")]
+    side = [j for j, l in enumerate(lines) if l.startswith("GOMEMLIMIT=") and " bft2-node " in l]
     wait = [j for j, l in enumerate(lines) if l.startswith("until (echo > /dev/tcp/127.0.0.1/7201) 2>/dev/null; do")]
     v = [j for j, l in enumerate(lines) if "--consensus=bft2" in l]
     assert len(side) == 1 and len(wait) == 1 and len(v) == 1

@@ -101,6 +101,12 @@ KAFKA_READY_FILE = "/tmp/hbdb-ready"
 
 # Share of the node memory cap given to the veritas server as GOMEMLIMIT.
 GOMEMLIMIT_SHARE = decimal.Decimal("0.7")
+# bft2 backend: share given to the bft2-node sidecar as GOMEMLIMIT (768m ->
+# 153MiB). Its live heap is bounded by its defaults: retained blocks 64 MiB
+# (--retain-bytes), commit backlog 32 MiB, proposal queue 16 MiB, plus the
+# event queue and runtime (~25 MiB): ~137 MiB worst case, so 70% + 20% of
+# the cap for the two Go processes and the rest for redis.
+BFT2_GOMEMLIMIT_SHARE = decimal.Decimal("0.2")
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -121,11 +127,14 @@ def uses_tso(backend):
     return backend in ("kafka-orig", "kafka", "raft")
 
 
-def gomemlimit(mem):
-    """GOMEMLIMIT for a node memory cap like '768m' or '2g': 70%, in whole MiB.
+def gomemlimit(mem, share=GOMEMLIMIT_SHARE):
+    """GOMEMLIMIT for a node memory cap like '768m' or '2g': share (default
+    70%) of it, in whole MiB.
 
     >>> gomemlimit("768m")
     '537MiB'
+    >>> gomemlimit("768m", BFT2_GOMEMLIMIT_SHARE)
+    '153MiB'
     """
     m = re.match(r"^([0-9]+(?:\.[0-9]+)?)([mMgG])$", str(mem))
     if not m:
@@ -133,7 +142,7 @@ def gomemlimit(mem):
     mib = decimal.Decimal(m.group(1))
     if m.group(2) in "gG":
         mib *= 1024
-    limit = int(mib * GOMEMLIMIT_SHARE)  # rounds down
+    limit = int(mib * share)  # rounds down
     if limit < 1:
         raise ValueError("invalid --mem %r: too small for a GOMEMLIMIT of at least 1MiB" % (mem,))
     return "%dMiB" % limit
@@ -317,7 +326,7 @@ def bft2_peers(n):
     return ",".join("%d=%s:%d" % (j, node_ip(j), BFT2_PORT) for j in range(1, n + 1))
 
 
-def _bft2_node(i, n, block_size, commit_mode, memlimit):
+def _bft2_node(i, n, block_size, commit_mode, memlimit, mem):
     """Node of the bft2 backend (consensus/bft2 + core.Server, HotStuff sidecar).
 
     redis, then bft2-node (replica i of the static set 1..n, replica server
@@ -327,15 +336,18 @@ def _bft2_node(i, n, block_size, commit_mode, memlimit):
     waits by itself (up to 120 s) for every peer's replica server, then
     connects; if that fails it exits and so does the container. SIGTERM is
     forwarded to veritas as for kafka/raft/tendermint, so the breakdown
-    reaches /results; bft2-node is killed with the container. GOMEMLIMIT
-    applies to the veritas server only (tendermint is not limited either).
+    reaches /results; bft2-node is killed with the container. GOMEMLIMIT is
+    70% of the node cap for the veritas server and 20% for bft2-node
+    (BFT2_GOMEMLIMIT_SHARE). bft2-node exits 3 if its replica can no longer
+    commit (it fell behind past its retained blocks), which ends the
+    container like any other dead process.
     """
     parties = ",".join("node%d" % j for j in range(1, n + 1))
     return [
         "set -eu",
     ] + REDIS_START + [
-        "bft2-node --id=%d --peers=%s --listen=0.0.0.0:%d --api=%s &"
-        % (i, bft2_peers(n), BFT2_PORT, BFT2_API_ADDR),
+        "GOMEMLIMIT=%s bft2-node --id=%d --peers=%s --listen=0.0.0.0:%d --api=%s &"
+        % (gomemlimit(mem, BFT2_GOMEMLIMIT_SHARE), i, bft2_peers(n), BFT2_PORT, BFT2_API_ADDR),
         "bft2_pid=$!",
         "api_wait=0",
         "until (echo > /dev/tcp/127.0.0.1/%d) 2>/dev/null; do"
@@ -464,7 +476,7 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
             s["volumes"].append("%s:/tmcfg:ro" % os.path.join(tm_dir, "node%d" % (i - 1)))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "bft2":
-            s["command"] = _bash(_bft2_node(i, n, block_size, commit_mode, memlimit))
+            s["command"] = _bash(_bft2_node(i, n, block_size, commit_mode, memlimit, mem))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "tm-orig":
             s["command"] = _bash(_tm_orig_node(i, n, block_size, memlimit))

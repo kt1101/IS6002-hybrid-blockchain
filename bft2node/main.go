@@ -11,6 +11,8 @@
 // accepted and queued from then on); the replica then waits up to
 // --connect-timeout for every peer's server, connects and joins the
 // protocol. If that fails it exits 1. On SIGTERM/SIGINT it stops and exits 0.
+// If the replica can no longer commit (--max-commit-failures failed commits
+// in a row: it fell behind past the retained blocks) it exits 3.
 //
 // It is a separate Go module (go 1.23.4, required by relab/hotstuff) so the
 // main module keeps its go.mod and Go 1.20 toolchain.
@@ -51,7 +53,9 @@ func main() {
 		mult       = flag.Float64("timeout-multiplier", node.DefaultTimeoutMult, "view timeout multiplier after a timeout")
 		idle       = flag.Duration("idle-wait", node.DefaultIdleWait, "how long a leader with nothing to propose waits before an empty filler block")
 		connectTO  = flag.Duration("connect-timeout", node.DefaultConnectTimeout, "how long to wait for every peer's server at start-up")
-		retain     = flag.Int("retain-views", node.DefaultRetainViews, "views of blocks kept in memory below the committed height")
+		retainB    = flag.Int64("retain-bytes", node.DefaultRetainBytes, "bytes of blocks kept in memory for lagging replicas (oldest views evicted first)")
+		minRetain  = flag.Int("min-retain-views", node.DefaultMinRetainViews, "views below the committed height never evicted, whatever their size")
+		maxFails   = flag.Int("max-commit-failures", node.DefaultMaxCommitFails, "exit (status 3) after this many failed commits in a row")
 		maxQueue   = flag.Int("max-queue", node.DefaultMaxQueue, "max commands waiting for proposal (Submit then fails)")
 		maxQueueB  = flag.Int64("max-queue-bytes", node.DefaultMaxQueueBytes, "max bytes waiting for proposal")
 		maxBacklog = flag.Int64("max-backlog-bytes", node.DefaultMaxBacklogBytes, "max committed bytes not yet streamed to veritas (the replica then waits)")
@@ -80,7 +84,9 @@ func main() {
 		TimeoutMultiplier: *mult,
 		IdleWait:          *idle,
 		ConnectTimeout:    *connectTO,
-		RetainViews:       *retain,
+		RetainBytes:       *retainB,
+		MinRetainViews:    *minRetain,
+		MaxCommitFailures: *maxFails,
 		MaxQueue:          *maxQueue,
 		MaxQueueBytes:     *maxQueueB,
 		MaxBacklogBytes:   *maxBacklog,
@@ -130,10 +136,19 @@ func main() {
 		n.Stop()
 		return
 	}
-	s := <-sig
-	log.Printf("bft2-node %d: %v, stopping (%v)", *id, s, n.Stats())
-	srv.Close() // ends the /deliver stream
-	n.Stop()
+	select {
+	case s := <-sig:
+		log.Printf("bft2-node %d: %v, stopping (%v)", *id, s, n.Stats())
+		srv.Close() // ends the /deliver stream
+		n.Stop()
+	case <-n.Failed():
+		// The replica can no longer commit: exit so the container dies and
+		// the run is marked failed instead of measuring a smaller cluster.
+		log.Printf("bft2-node %d: replica failed, exiting (%v)", *id, n.Stats())
+		srv.Close()
+		n.Stop()
+		os.Exit(3)
+	}
 }
 
 // parsePeers parses --peers: comma-separated ID=HOST:PORT (empty entries

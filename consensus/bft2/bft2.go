@@ -12,9 +12,9 @@
 //     queued it for proposal (ACCEPTANCE, not commit); a refusal (queue
 //     full, too large, stopping) or an unreachable sidecar is an error. A
 //     replica proposes its own queued blocks, one per view, when it is
-//     leader (round robin), so an accepted block may still be lost if this
-//     node crashes, or, rarely, delivered twice (a forked block is
-//     re-proposed).
+//     leader (a per-epoch shuffled round robin), so an accepted block may
+//     still be lost if this node crashes, or, rarely, delivered twice (a
+//     forked block is re-proposed).
 //   - Deliver carries the committed blocks of the GET /deliver stream: one
 //     HotStuff command is one Veritas block, exact bytes, in commit order,
 //     the same on every replica, the proposer included (empty filler blocks
@@ -95,8 +95,8 @@ func New(cfg Config) (*BFT2, error) {
 		base: "http://" + cfg.APIAddr,
 		client: &http.Client{Transport: &http.Transport{
 			Proxy:               nil, // loopback only; ignore HTTP_PROXY
-			MaxIdleConns:        16,
-			MaxIdleConnsPerHost: 16,
+			MaxIdleConns:        64,
+			MaxIdleConnsPerHost: 64,
 			IdleConnTimeout:     90 * time.Second,
 			DisableCompression:  true,
 		}},

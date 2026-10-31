@@ -282,6 +282,7 @@ func TestBFT2SurvivesOneCrash(t *testing.T) {
 	}
 
 	var before [][]byte
+	begin := time.Now()
 	for i, nd := range nodes {
 		for k := 0; k < 4; k++ {
 			p := payload(i+1, k, 64)
@@ -292,6 +293,7 @@ func TestBFT2SurvivesOneCrash(t *testing.T) {
 		}
 	}
 	waitCount(t, cs, len(before), 60*time.Second)
+	t.Logf("before the crash: %d commands in %v", len(before), time.Since(begin).Round(time.Millisecond))
 
 	crashed := nodes[n-1]
 	crashed.Stop()
@@ -300,19 +302,53 @@ func TestBFT2SurvivesOneCrash(t *testing.T) {
 	}
 	prefix, _ := cs[n-1].snapshot()
 
+	// Several rounds after the crash: each must finish at a steady rate.
+	// With the view timeout drifting up after every dead-leader slot (review
+	// I1) later rounds got slower and slower, ending at max timeouts.
 	survivors := nodes[:n-1]
 	var after [][]byte
-	for k := 0; k < 8; k++ {
-		for i, nd := range survivors {
-			p := payload(i+1, 100+k, 64)
-			after = append(after, p)
-			if err := nd.Submit(p); err != nil {
-				t.Fatalf("node %d Submit after the crash: %v", i+1, err)
+	const rounds, perRound = 3, 8 // per survivor
+	var took []time.Duration
+	for r := 0; r < rounds; r++ {
+		begin := time.Now()
+		for k := 0; k < perRound; k++ {
+			for i, nd := range survivors {
+				p := payload(i+1, 100*(r+1)+k, 64)
+				after = append(after, p)
+				if err := nd.Submit(p); err != nil {
+					t.Fatalf("node %d Submit after the crash: %v", i+1, err)
+				}
 			}
 		}
+		waitCount(t, cs[:n-1], len(before)+len(after), 90*time.Second)
+		took = append(took, time.Since(begin))
+		t.Logf("after the crash, round %d: %d commands in %v", r+1, perRound*len(survivors), took[r].Round(time.Millisecond))
 	}
-	waitCount(t, cs[:n-1], len(before)+len(after), 90*time.Second)
 	time.Sleep(300 * time.Millisecond)
+
+	// Rate: generous for -race (a dead-leader slot costs 2 view timeouts of
+	// ~200-300 ms here and one forked block; ~2 commits per 4 views).
+	last := took[rounds-1]
+	if rate := float64(perRound*len(survivors)) / last.Seconds(); rate < 0.5 {
+		t.Errorf("last round after the crash: %.2f commands/s, want >= 0.5", rate)
+	}
+	if last > 3*took[0]+5*time.Second {
+		t.Errorf("rounds after the crash slow down: %v (no drift allowed beyond 3x the first + 5s)", took)
+	}
+	for i, nd := range survivors {
+		st := nd.Stats()
+		if st.Timeouts == 0 {
+			t.Errorf("replica %d saw no timeouts although a leader is dead", i+1)
+		}
+		// Back-off resets after each successful view: at most a couple of
+		// x1.2 steps above the 200 ms floor, never near the 1 s max.
+		if st.ViewTimeout > 500*time.Millisecond {
+			t.Errorf("replica %d: view timeout %v after the crash rounds, want near the 200ms floor", i+1, st.ViewTimeout)
+		}
+		if st.CommitFailures != 0 {
+			t.Errorf("replica %d: %d failed commits", i+1, st.CommitFailures)
+		}
+	}
 
 	seqs := make([][][]byte, n-1)
 	for i := range survivors {

@@ -35,7 +35,8 @@ func TestShuffledRoundRobinIsAPermutationPerEpochAndDeterministic(t *testing.T) 
 // does.
 func TestShuffledRoundRobinGivesEveryLiveReplicaUsableSlots(t *testing.T) {
 	const n = 4
-	r := newShuffledRoundRobin(n, 0)
+	// The schedule deployments use (bft2-node's default --key-seed).
+	r := newShuffledRoundRobin(n, leaderSeed(DefaultKeySeed))
 	for dead := hotstuff.ID(1); dead <= n; dead++ {
 		usable := map[hotstuff.ID]int{}
 		for v := hotstuff.View(1); v <= 400; v++ {

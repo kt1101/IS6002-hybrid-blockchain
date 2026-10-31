@@ -16,7 +16,8 @@ func (f *fakeConsensus) CommittedBlock() *hotstuff.Block { return f.committed }
 func (f *fakeConsensus) ChainLength() int                { return 3 }
 
 func TestBlockChainEvictsOldViewsAndReportsForks(t *testing.T) {
-	chain := newBlockChain(3)
+	// Budget 0: evict everything allowed, i.e. below height-3.
+	chain := newBlockChain(3, 0)
 	cs := &fakeConsensus{}
 	chain.consensus = cs
 	chain.logger = logging.New("test")
@@ -43,7 +44,7 @@ func TestBlockChainEvictsOldViewsAndReportsForks(t *testing.T) {
 	for v := hotstuff.View(1); v <= 10; v++ {
 		_, ok := chain.LocalGet(byView[v].Hash())
 		if want := v >= 5; ok != want {
-			t.Errorf("view %d: present = %v, want %v (retain 3 below height 8)", v, ok, want)
+			t.Errorf("view %d: present = %v, want %v (minKeep 3 below height 8)", v, ok, want)
 		}
 	}
 	if _, ok := chain.LocalGet(fork.Hash()); ok {
@@ -71,5 +72,61 @@ func TestBlockChainEvictsOldViewsAndReportsForks(t *testing.T) {
 	}
 	if _, ok := chain.LocalGet(byView[9].Hash()); !ok {
 		t.Error("view 9 was evicted (horizon 9)")
+	}
+}
+
+// The byte budget: eviction removes the oldest views only while the stored
+// blocks cost more than retainBytes, so with room to spare nothing goes, and
+// fillers (tiny) cost little.
+func TestBlockChainEvictsByBytes(t *testing.T) {
+	const cmdLen = 10000
+	budget := int64(4 * (cmdLen + blockOverhead)) // room for 4 big blocks
+	chain := newBlockChain(2, budget)
+	cs := &fakeConsensus{}
+	chain.consensus = cs
+	chain.logger = logging.New("test")
+
+	var qc hotstuff.QuorumCert
+	parent := hotstuff.GetGenesis()
+	byView := map[hotstuff.View]*hotstuff.Block{}
+	for v := hotstuff.View(1); v <= 20; v++ {
+		cmd := hotstuff.Command("")
+		if v%5 == 0 {
+			cmd = hotstuff.Command(make([]byte, cmdLen)) // views 5, 10, 15, 20
+		}
+		b := hotstuff.NewBlock(parent.Hash(), qc, cmd, v, 1)
+		chain.Store(b)
+		byView[v] = b
+		parent = b
+	}
+	cs.committed = byView[20]
+	chain.PruneToHeight(20)
+	if chain.bytes > budget {
+		t.Fatalf("stored %d bytes after prune, budget %d", chain.bytes, budget)
+	}
+	// 4 big blocks + 16 fillers exceed the budget by the fillers: the oldest
+	// views go until it fits, so view 5 (big) is gone and views 10..20 stay.
+	for v := hotstuff.View(1); v <= 20; v++ {
+		_, ok := chain.LocalGet(byView[v].Hash())
+		if v >= 10 && !ok {
+			t.Errorf("view %d evicted, want kept (it fits the budget)", v)
+		}
+		if v <= 5 && ok {
+			t.Errorf("view %d kept, want evicted (over the budget)", v)
+		}
+	}
+
+	// A generous budget evicts nothing, even far below the height.
+	roomy := newBlockChain(2, 1<<30)
+	roomy.consensus = cs
+	roomy.logger = chain.logger
+	for v := hotstuff.View(1); v <= 20; v++ {
+		roomy.Store(byView[v])
+	}
+	roomy.PruneToHeight(20)
+	for v := hotstuff.View(1); v <= 20; v++ {
+		if _, ok := roomy.LocalGet(byView[v].Hash()); !ok {
+			t.Errorf("roomy: view %d evicted", v)
+		}
 	}
 }

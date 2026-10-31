@@ -20,10 +20,13 @@ esac
 HBDB_VERITAS_PORT=1990
 HBDB_TSO_ADDR=172.28.0.3:7070
 # Consensus ports of the node containers (gen_compose.py RAFT_PORT,
-# RAFT_FORWARD_PORT, TM_P2P_PORT); see hbdb_consensus_ports.
+# RAFT_FORWARD_PORT, TM_P2P_PORT, BFT2_PORT); see hbdb_consensus_ports.
 HBDB_RAFT_PORT=7100
 HBDB_RAFT_FORWARD_PORT=7101
 HBDB_TM_P2P_PORT=26656
+# bft2: HotStuff replica-to-replica port of bft2-node (its local API, 7201,
+# is loopback only and is not a consensus port).
+HBDB_BFT2_PORT=7200
 HBDB_ALL_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
 HBDB_IMPLEMENTED_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
 
@@ -75,22 +78,6 @@ hbdb_bench_mode() {
   esac
 }
 
-# hbdb_consensus_ports BACKEND: print the TCP ports (space-separated) that
-# carry BACKEND's consensus traffic between nodes, for fault injection
-# (silencing a node's consensus network). Must match gen_compose.py:
-# raft 7100 (raft transport) and 7101 (submit forwarding), tendermint 26656
-# (p2p), bft2 7200 (HotStuff replica gorums/gRPC; its local API 7201 is
-# loopback only). kafka-orig, tm-orig, kafka: nothing (the originals are not
-# fault-injected this way; kafka orders through the broker).
-hbdb_consensus_ports() {
-  case "$1" in
-    raft) echo "7100 7101" ;;
-    tendermint) echo "26656" ;;
-    bft2) echo "7200" ;;
-    *) echo "" ;;
-  esac
-}
-
 # Default ycsbbench --load-threads for a backend (run_one.sh LOAD_THREADS,
 # check_consistency.sh): kafka-orig 10 (original), tm-orig 64 (each Set waits
 # for a block; see run_one.sh), every new backend 256 (sync commit by default:
@@ -130,14 +117,15 @@ hbdb_check_tendermint_limits() {
 # hbdb_consensus_ports BACKEND: the TCP ports a node uses to talk consensus
 # with its peers, space-separated; the network-level silent fault (F2,
 # experiments/faults.sh fault_silent_net) drops them. raft: the raft transport
-# and the submit-forward HTTP endpoint; tendermint: the tendermint p2p port.
-# Prints nothing for backends without a network-silent mode (kafka-orig,
-# tm-orig, kafka: their F2 is FaultPolicy, Task 15) and for bft2 (its port is
-# added together with the backend).
+# and the submit-forward HTTP endpoint; tendermint: the tendermint p2p port;
+# bft2: the HotStuff replica port of bft2-node. Prints nothing for backends
+# without a network-silent mode (kafka-orig, tm-orig, kafka: their F2 is
+# FaultPolicy, Task 15).
 hbdb_consensus_ports() {
   case "$1" in
     raft) echo "$HBDB_RAFT_PORT $HBDB_RAFT_FORWARD_PORT" ;;
     tendermint) echo "$HBDB_TM_P2P_PORT" ;;
+    bft2) echo "$HBDB_BFT2_PORT" ;;
     *) ;;
   esac
 }
