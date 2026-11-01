@@ -379,7 +379,7 @@ def test_main_notes_exp_without_varying_axis(tmp_path, capsys):
     out = tmp_path / "results" / "figs"
     rc, stdout, err = run_main(capsys, [str(csv), "--out", str(out)])
     assert rc == 0
-    assert "exp flat: neither clients nor n varies, no figure produced" in stdout
+    assert "exp flat: none of clients, n, block_size, workload, rtt_ms varies, no figure produced" in stdout
     assert list(out.glob("*.png")) == []
 
 
@@ -452,3 +452,177 @@ def test_main_latency_figures_use_write_latency(tmp_path, capsys):
     fig = plot.plot_latency(agg, "e1", "clients", out / "again.png")
     assert len([l for l in fig.axes[0].get_lines() if l.get_gid() == "p50"]) == 1
     plt.close(fig)
+
+
+# ---- x axis per experiment (task 19a) ---------------------------------------
+
+def sweep(col, values, **cfg):
+    """Raw frame: one backend over `values` of configuration column `col`."""
+    df = pd.concat([make_df([100, 110, 105], **{col: v}, **cfg) for v in values], ignore_index=True)
+    return df
+
+
+@pytest.mark.parametrize("col,values", [
+    ("clients", [4, 16, 64]), ("n", [4, 7]), ("block_size", [10, 100, 1000]),
+    ("workload", ["a", "b", "c"]), ("rtt_ms", [0, 20, 60])])
+def test_varying_axes_picks_the_varying_column(col, values):
+    a = plot.aggregate(sweep(col, values))
+    assert plot.varying_axes(a) == [col]
+
+
+def test_varying_axes_none_and_several():
+    assert plot.varying_axes(plot.aggregate(make_df([1, 2, 3]))) == []
+    df = pd.concat([sweep("clients", [4, 16], rtt_ms=0), sweep("clients", [4, 16], rtt_ms=20)])
+    assert plot.varying_axes(plot.aggregate(df)) == ["clients", "rtt_ms"]
+
+
+def test_plot_exp_block_size_log_axis_with_ticks_at_values(tmp_path):
+    fig = plot.plot_exp(plot.aggregate(sweep("block_size", [10, 100, 1000])), "e", "block_size", tmp_path / "b.png")
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xscale() == "log"
+        assert list(ax.get_xticks()) == [10, 100, 1000]
+        assert [t.get_text() for t in ax.get_xticklabels()] == ["10", "100", "1000"]
+        assert len(series(ax)) == 1
+    finally:
+        plt.close(fig)
+
+
+def test_plot_exp_workload_is_categorical(tmp_path):
+    agg = plot.aggregate(sweep("workload", ["c", "a", "b"]))
+    fig = plot.plot_exp(agg, "e", "workload", tmp_path / "w.png")
+    fig2 = plot.plot_latency(agg, "e", "workload", tmp_path / "wl.png")
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xscale() == "linear"
+        assert [t.get_text() for t in ax.get_xticklabels()] == ["a", "b", "c"]
+        assert list(series(ax)[0].get_xdata()) == [0, 1, 2]
+        assert [t.get_text() for t in fig2.axes[0].get_xticklabels()] == ["a", "b", "c"]
+    finally:
+        plt.close(fig)
+        plt.close(fig2)
+
+
+def test_plot_exp_rtt_linear_axis(tmp_path):
+    fig = plot.plot_exp(plot.aggregate(sweep("rtt_ms", [0, 20, 60])), "e", "rtt_ms", tmp_path / "r.png")
+    try:
+        ax = fig.axes[0]
+        assert ax.get_xscale() == "linear"
+        assert list(ax.get_xticks()) == [0, 20, 60]
+    finally:
+        plt.close(fig)
+
+
+def test_main_draws_one_figure_pair_per_varying_axis(tmp_path, capsys):
+    csv = tmp_path / "in.csv"
+    frames = [sweep("block_size", [10, 100], exp="e3"), sweep("workload", ["a", "b"], exp="e4"),
+              sweep("rtt_ms", [0, 20], exp="e5")]
+    pd.concat(frames, ignore_index=True)[plot.EXPECTED_COLUMNS].to_csv(csv, index=False)
+    out = tmp_path / "results" / "figs"
+    rc, stdout, err = run_main(capsys, [str(csv), "--out", str(out)])
+    assert rc == 0
+    for name in ("e3_tps_vs_block_size", "e3_lat_vs_block_size", "e4_tps_vs_workload",
+                 "e4_lat_vs_workload", "e5_tps_vs_rtt_ms", "e5_lat_vs_rtt_ms"):
+        assert (out / (name + ".png")).read_bytes().startswith(PNG_MAGIC)
+    assert "no figure produced" not in stdout
+
+
+# ---- E6 bars per fault scenario (task 19a) ----------------------------------
+
+def test_fault_scenario_strips_nodes_and_time():
+    assert plot.fault_scenario("F1:node4@60") == "F1"
+    assert plot.fault_scenario("F5-F2:node7+node6+node5@60") == "F5-F2"
+    assert plot.fault_scenario("none") == "none"
+
+
+def fault_frame(spec):
+    """Raw E6 frame from {(backend, n, fault): tps}; three reps (tps-5, tps, tps+5)."""
+    frames = [make_df([t - 5, t, t + 5], exp="e6", backend=b, n=n, f=1 if n == 4 else 2, clients=256,
+                      fault=fault) for (b, n, fault), t in spec.items()]
+    return pd.concat(frames, ignore_index=True)
+
+
+def test_fault_labels_strip_node_list():
+    a = plot.aggregate(fault_frame({("bft2", 4, "F1:node4@60"): 100, ("raft", 4, "F1:node4@60"): 200,
+                                    ("bft2", 4, "F5-F2:node4+node3@60"): 90}))
+    assert plot.fault_labels(a) == {"F1:node4@60": "F1", "F5-F2:node4+node3@60": "F5-F2"}
+
+
+def test_fault_labels_two_variants_of_one_backend_get_node_lists():
+    a = plot.aggregate(fault_frame({("kafka", 4, "F1:node1@60"): 100, ("kafka", 4, "F1:node4@60"): 110,
+                                    ("tendermint", 4, "F1:node4@60"): 50, ("kafka", 4, "F2:node4@60"): 90}))
+    assert plot.fault_labels(a) == {"F1:node1@60": "F1 (node1)", "F1:node4@60": "F1 (node4)",
+                                    "F2:node4@60": "F2"}
+
+
+def test_fault_labels_list_input_uses_one_backend():
+    got = plot.fault_labels(["F1:node1@60", "F1:node7+node6@60", "F2:node7+node6@60"])
+    assert got == {"F1:node1@60": "F1 (node1)", "F1:node7+node6@60": "F1 (node7+node6)", "F2:node7+node6@60": "F2"}
+
+
+def test_nofault_reference_matches_the_e2_row_only():
+    e2 = make_df([300, 300, 300], exp="e2", backend="raft", n=4, clients=256)
+    other_clients = make_df([999, 999, 999], exp="e2", backend="raft", n=4, clients=64)
+    other_n = make_df([777, 777, 777], exp="e2", backend="raft", n=7, clients=256)
+    e6 = fault_frame({("raft", 4, "F1:node4@60"): 100})
+    a = plot.aggregate(pd.concat([e2, other_clients, other_n, e6], ignore_index=True))
+    assert plot.nofault_reference(a, 4, "tps") == {"raft": 300.0}
+    assert plot.nofault_reference(a, 7, "tps") == {"raft": 777.0}
+    assert plot.nofault_reference(plot.aggregate(e6), 4, "tps") == {}
+
+
+def test_plot_fault_bars_groups_bars_and_reference(tmp_path):
+    spec = {("kafka", 4, "F1:node1@60"): 100, ("kafka", 4, "F1:node4@60"): 110, ("kafka", 4, "F2:node4@60"): 90,
+            ("tendermint", 4, "F1:node4@60"): 50, ("tendermint", 4, "F2:node4@60"): 40}
+    df = pd.concat([fault_frame(spec), fault_frame({("kafka", 7, "F1:node7+node6@60"): 70}),
+                    make_df([300, 300, 300], exp="e2", backend="kafka", n=4, clients=256)], ignore_index=True)
+    a = plot.aggregate(df)
+    out = tmp_path / "e6_tps_by_fault_n4.png"
+    fig = plot.plot_fault_bars(a, "e6", 4, "tps", out, plot.nofault_reference(a, 4, "tps"))
+    try:
+        assert out.read_bytes().startswith(PNG_MAGIC)
+        ax = fig.axes[0]
+        assert [t.get_text() for t in ax.get_xticklabels()] == ["F1\n(node1)", "F1\n(node4)", "F2"]
+        assert not any("n=7" in t.get_text() for t in ax.get_xticklabels())
+        heights = sorted(p.get_height() for p in ax.patches)
+        assert heights == [40, 50, 90, 100, 110]
+        # one dashed reference tick per kafka bar (3), none for tendermint
+        refs = [l for l in ax.get_lines() if l.get_gid() == "reference"]
+        assert len(refs) == 3 and all(list(l.get_ydata()) == [300, 300] for l in refs)
+        assert any("no fault" in t for t in legend_texts(ax))
+    finally:
+        plt.close(fig)
+    # without an E2 row there is no reference and no legend entry
+    fig = plot.plot_fault_bars(a, "e6", 7, "lat_p99_ms", tmp_path / "l.png")
+    try:
+        assert not [l for l in fig.axes[0].get_lines() if l.get_gid() == "reference"]
+        assert not any("no fault" in t for t in legend_texts(fig.axes[0]))
+        assert [p.get_height() for p in fig.axes[0].patches] == [5.0]  # p99 of make_df, one n=7 bar
+    finally:
+        plt.close(fig)
+
+
+def test_plot_fault_bars_errors(tmp_path):
+    a = plot.aggregate(fault_frame({("raft", 4, "F1:node4@60"): 100}))
+    with pytest.raises(ValueError):
+        plot.plot_fault_bars(a, "e6", 7, "tps", tmp_path / "x.png")
+    with pytest.raises(ValueError):
+        plot.plot_fault_bars(a, "e6", 4, "bogus", tmp_path / "x.png")
+
+
+def test_main_draws_e6_bars_per_n_and_not_lines(tmp_path, capsys):
+    csv = tmp_path / "in.csv"
+    spec = {(b, n, "F1:node%d@60" % n): 100 for b in ("raft", "bft2") for n in (4, 7)}
+    spec.update({(b, n, "F4:node%d@60" % n): 90 for b in ("raft", "bft2") for n in (4, 7)})
+    df = pd.concat([fault_frame(spec), make_df([300, 300, 300], exp="e2", backend="raft", n=4, clients=256)],
+                   ignore_index=True)
+    df[plot.EXPECTED_COLUMNS].to_csv(csv, index=False)
+    out = tmp_path / "results" / "figs"
+    rc, stdout, err = run_main(capsys, [str(csv), "--out", str(out)])
+    assert rc == 0, err
+    for n in (4, 7):
+        assert (out / ("e6_tps_by_fault_n%d.png" % n)).read_bytes().startswith(PNG_MAGIC)
+        assert (out / ("e6_lat_by_fault_n%d.png" % n)).read_bytes().startswith(PNG_MAGIC)
+    assert not (out / "e6_tps_vs_n.png").exists()
+    # e2 has no varying axis here
+    assert "exp e2: none of" in stdout

@@ -32,6 +32,24 @@ Conventions
   `write` line (apply_write_latency); rows without one keep the CSV values.
   The column lat_source says which (write | csv).  The figures
   <exp>_lat_vs_<x>.png draw that latency (p50 and p99).
+
+Figures (main)
+--------------
+* x axis of an experiment = every column of X_AXES (clients, n, block_size,
+  workload, rtt_ms) that varies within it, one <exp>_tps_vs_<x>.png and
+  <exp>_lat_vs_<x>.png each (E1 clients, E2 n, E3 block_size, E4 workload,
+  E5 rtt_ms).  One line per backend; clients log2 axis, block_size log10 axis
+  with ticks at the actual values, workload categorical.
+* An experiment whose `fault` column varies (E6) gets grouped bars instead of
+  lines, one pair of figures per cluster size n: <exp>_tps_by_fault_n<N>.png
+  (throughput) and <exp>_lat_by_fault_n<N>.png (p99 write latency).  x = fault
+  scenario with the node list stripped (F1, F2, F3, F4, F5-F2, F5-F4; two
+  variants of a scenario become "F1 (node1)" / "F1 (node4)", see
+  fault_labels), bars = backends, error bars = sample std.  The no-fault
+  reference of a backend is a dashed black tick across each of its bars, taken
+  from the E2 row with the same backend and n and clients=256, block 100,
+  workload a, rtt 0, fault none (NOFAULT_REF); it is drawn only when the
+  inputs contain such a row.
 """
 from __future__ import annotations
 
@@ -48,7 +66,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
-from matplotlib.ticker import NullLocator  # noqa: E402
+from matplotlib.ticker import LogFormatterSciNotation, NullLocator  # noqa: E402
 
 # Columns that are not part of the configuration key.
 NON_CONFIG_COLS = (
@@ -73,6 +91,13 @@ STAT_COLS = (
 CV_THRESHOLD = 0.10
 MIN_REPS = 3
 DEFAULT_RERUN_PATH = "results/rerun.txt"
+
+# Configuration columns that can be the x axis of a line figure (main draws one
+# figure pair per column that varies within an experiment).
+X_AXES = ("clients", "n", "block_size", "workload", "rtt_ms")
+# The E2 configuration whose no-fault result is the reference of the E6 bars.
+NOFAULT_REF = {"exp": "e2", "clients": 256, "block_size": 100, "workload": "a",
+               "rtt_ms": 0, "fault": "none"}
 
 
 EXPECTED_COLUMNS = [
@@ -306,9 +331,41 @@ def rerun_list(agg: pd.DataFrame, out_path=DEFAULT_RERUN_PATH) -> pd.DataFrame:
     return flagged
 
 
+def varying_axes(sub: pd.DataFrame) -> list:
+    """The X_AXES columns that take more than one value in `sub` (one
+    experiment's aggregated rows), in X_AXES order."""
+    return [x for x in X_AXES if x in sub.columns and sub[x].nunique() > 1]
+
+
+def _x_positions(values):
+    """({value: x position}, [tick labels in position order]) for the x values
+    of a line figure: a numeric column sits at its own value (labels "%g"), a
+    text column (workload a, b, c) at 0, 1, 2, ... in sorted order."""
+    uniq = sorted(pd.Series(values).dropna().unique())
+    if pd.api.types.is_numeric_dtype(pd.Series(values)):
+        return {v: float(v) for v in uniq}, ["%g" % v for v in uniq]
+    return {v: float(i) for i, v in enumerate(uniq)}, [str(v) for v in uniq]
+
+
+def _set_x_axis(ax, x, xpos, labels):
+    """Scale and ticks of a line figure's x axis: clients log2, block_size log10
+    (ticks at the actual values), n / rtt_ms linear, workload categorical."""
+    pos = sorted(xpos.values())
+    if x == "clients" and min(pos) > 0:
+        ax.set_xscale("log", base=2)
+    elif x == "block_size" and min(pos) > 0:
+        ax.set_xscale("log", base=10)
+    ax.set_xticks(pos)
+    ax.set_xticklabels(labels)
+    ax.xaxis.set_minor_locator(NullLocator())
+    ax.set_xlabel(x)
+
+
 def plot_exp(agg: pd.DataFrame, exp: str, x: str, out_png):
     """Throughput (log y) vs configuration column `x` for one experiment.
 
+    `x` is any of X_AXES (clients: log2 axis, block_size: log10 axis with ticks
+    at the actual values, workload: categorical a, b, c, n / rtt_ms: linear).
     Writes the PNG and returns the matplotlib Figure; the CALLER must close it
     (plt.close(fig)).
 
@@ -335,6 +392,7 @@ def plot_exp(agg: pd.DataFrame, exp: str, x: str, out_png):
              if c not in ("exp", "backend", x)
              and sub.groupby(["backend", x])[c].nunique(dropna=False).max() > 1]
 
+    xpos, xlabels = _x_positions(sub[x])
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
     skipped = 0
     any_sat = False
@@ -342,9 +400,9 @@ def plot_exp(agg: pd.DataFrame, exp: str, x: str, out_png):
         if not isinstance(key, tuple):
             key = (key,)
         label = str(key[0]) + "".join(" %s=%s" % (c, v) for c, v in zip(extra, key[1:]))
-        g = g.sort_values(x)
+        g = g.assign(_x=g[x].map(xpos)).sort_values("_x")
         color = "C%d" % (i % 10)
-        xs = g[x].to_numpy(dtype=float)
+        xs = g["_x"].to_numpy(dtype=float)
         mean = g["tps_mean"].to_numpy(dtype=float)
         std = g["tps_std"].fillna(0).to_numpy(dtype=float)
         sat = g["saturated"].map(lambda v: False if pd.isna(v) else bool(v)).to_numpy(dtype=bool)
@@ -367,15 +425,10 @@ def plot_exp(agg: pd.DataFrame, exp: str, x: str, out_png):
                     markeredgecolor=color, markeredgewidth=1.5, zorder=3, gid="hollow")
 
     ax.set_yscale("log")
+    ax.yaxis.set_minor_formatter(LogFormatterSciNotation(minor_thresholds=(2, 0.4)))  # label sparse ticks
     if skipped == len(sub):
         ax.set_ylim(1, 10)  # nothing drawable; avoid a degenerate range
-    xs_all = sorted(sub[x].dropna().unique())
-    if x == "clients" and min(xs_all) > 0:
-        ax.set_xscale("log", base=2)
-    ax.set_xticks(xs_all)
-    ax.set_xticklabels(["%g" % v for v in xs_all])
-    ax.xaxis.set_minor_locator(NullLocator())
-    ax.set_xlabel(x)
+    _set_x_axis(ax, x, xpos, xlabels)
     ax.set_ylabel("throughput (tx/s, log scale)")
     ax.set_title("%s: throughput vs %s" % (exp, x))
     ax.grid(True, which="both", alpha=0.3)
@@ -407,28 +460,132 @@ def plot_latency(agg: pd.DataFrame, exp: str, x: str, out_png):
     sub = agg[agg["exp"] == exp].dropna(subset=[x])
     if sub.empty:
         raise ValueError("no data for exp=%r with x=%r" % (exp, x))
+    xpos, xlabels = _x_positions(sub[x])
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
     for i, (b, g) in enumerate(sub.groupby("backend", sort=True)):
-        g = g.groupby(x, as_index=False)[["lat_p50_ms_mean", "lat_p99_ms_mean"]].mean().sort_values(x)
+        g = g.groupby(x, as_index=False)[["lat_p50_ms_mean", "lat_p99_ms_mean"]].mean()
+        g = g.assign(_x=g[x].map(xpos)).sort_values("_x")
         color = "C%d" % (i % 10)
-        xs = g[x].to_numpy(dtype=float)
+        xs = g["_x"].to_numpy(dtype=float)
         for col, style, name in (("lat_p50_ms_mean", "-", "p50"), ("lat_p99_ms_mean", "--", "p99")):
             ys = g[col].to_numpy(dtype=float)
             ok = ys > 0
             ax.plot(xs[ok], ys[ok], style, marker="o", color=color, label="%s %s" % (b, name), gid=name)
     ax.set_yscale("log")
-    xs_all = sorted(sub[x].dropna().unique())
-    if x == "clients" and min(xs_all) > 0:
-        ax.set_xscale("log", base=2)
-    ax.set_xticks(xs_all)
-    ax.set_xticklabels(["%g" % v for v in xs_all])
-    ax.xaxis.set_minor_locator(NullLocator())
-    ax.set_xlabel(x)
+    ax.yaxis.set_minor_formatter(LogFormatterSciNotation(minor_thresholds=(2, 0.4)))  # label sparse ticks
+    _set_x_axis(ax, x, xpos, xlabels)
     ax.set_ylabel("write latency (ms, log scale)")
     ax.set_title("%s: write latency vs %s" % (exp, x))
     ax.grid(True, which="both", alpha=0.3)
     if ax.get_legend_handles_labels()[0]:
         ax.legend(fontsize=8)
+    out_png = Path(out_png)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def fault_scenario(fault) -> str:
+    """Scenario of a CSV `fault` value without node list and time:
+    "F5-F2:node7+node6+node5@60" -> "F5-F2"; "none" -> "none"."""
+    return str(fault).split(":")[0].split("@")[0]
+
+
+def fault_labels(faults) -> dict:
+    """{fault value: bar-group label} for the fault values of one E6 figure.
+
+    The label is the scenario (F1, F2, F3, F4, F5-F2, F5-F4).  If any backend
+    ran two or more variants of a scenario (kafka/raft F1:node1@60 = leader and
+    F1:node4@60), every variant of that scenario gets its node list, e.g.
+    "F1 (node1)", "F1 (node4)", "F1 (node7+node6)", so that equal variants of
+    different backends share one group.  Pass a DataFrame with the columns
+    backend and fault, or any iterable of fault values (then all backends are
+    treated as one)."""
+    if isinstance(faults, pd.DataFrame):
+        pairs = faults[["backend", "fault"]].drop_duplicates()
+    else:
+        pairs = pd.DataFrame({"backend": "", "fault": sorted(set(faults))})
+    pairs = pairs.assign(scenario=pairs["fault"].map(fault_scenario))
+    split = set(pairs.groupby(["scenario", "backend"])["fault"].nunique()
+                .loc[lambda s: s > 1].index.get_level_values("scenario"))
+    out = {}
+    for fault, scen in zip(pairs["fault"], pairs["scenario"]):
+        nodes = str(fault).split(":", 1)[1].split("@")[0] if ":" in str(fault) else ""
+        out[fault] = "%s (%s)" % (scen, nodes) if scen in split and nodes else scen
+    return out
+
+
+def nofault_reference(agg: pd.DataFrame, n, metric: str) -> dict:
+    """{backend: no-fault value} of an E6 figure for cluster size `n`, from the
+    NOFAULT_REF row of the aggregated frame (E2: clients=256, block 100,
+    workload a, rtt 0, fault none).  metric: "tps" or "lat_p99_ms".  Backends
+    without such a row (E2 not among the inputs) are absent; several matching
+    rows (e.g. other commit_mode) are averaged."""
+    m = agg["n"] == n
+    for c, v in NOFAULT_REF.items():
+        m &= agg[c] == v
+    return agg[m].groupby("backend")[metric + "_mean"].mean().to_dict()
+
+
+FAULT_METRICS = {  # metric -> (axis label, title word)
+    "tps": ("throughput (tx/s)", "throughput"),
+    "lat_p99_ms": ("p99 write latency (ms)", "p99 write latency"),
+}
+
+
+def plot_fault_bars(agg: pd.DataFrame, exp: str, n, metric: str, out_png, reference=None):
+    """Grouped bars of `metric` ("tps" or "lat_p99_ms") per fault scenario for
+    cluster size n of one fault experiment (E6).
+
+    x = fault scenario (fault_labels), one bar per backend, error bars = sample
+    std over reps (linear y: a stalled run is a zero-height bar).  `reference`
+    ({backend: value}, see nofault_reference) is drawn as a dashed black
+    horizontal tick across each bar of that backend, in every group (the same
+    value, so the bar can be compared with the no-fault run of its backend),
+    with one legend entry.  A backend that did not run a scenario has no bar
+    there.  Writes the PNG and returns the Figure (the caller closes it)."""
+    if metric not in FAULT_METRICS:
+        raise ValueError("unknown metric: %s" % metric)
+    sub = agg[(agg["exp"] == exp) & (agg["n"] == n)]
+    if sub.empty:
+        raise ValueError("no data for exp=%r with n=%r" % (exp, n))
+    labels = fault_labels(sub)
+    # groups in scenario order (F1, F2, ... F5-F4), variants by node list
+    order = sorted(labels, key=lambda f: (fault_scenario(f), str(f)))
+    groups = list(dict.fromkeys(labels[f] for f in order))
+    backends = sorted(sub["backend"].unique())
+    width = 0.8 / len(backends)
+    ylabel, word = FAULT_METRICS[metric]
+
+    fig, ax = plt.subplots(figsize=(max(6.4, 1.5 * len(groups) + 1.5), 4.4))
+    for i, b in enumerate(backends):
+        color = "C%d" % (i % 10)
+        g = sub[sub["backend"] == b]
+        xs, ys, es = [], [], []
+        for fault, lab in labels.items():
+            r = g[g["fault"] == fault]
+            if r.empty:
+                continue
+            xs.append(groups.index(lab) + (i - (len(backends) - 1) / 2) * width)
+            ys.append(float(r.iloc[0][metric + "_mean"]))
+            es.append(float(np.nan_to_num(r.iloc[0][metric + "_std"])))
+        ax.bar(xs, ys, width * 0.92, yerr=es, capsize=2, color=color, label=b,
+               error_kw={"elinewidth": 1}, gid="bar")
+        if reference and b in reference and xs:
+            for x0 in xs:
+                ax.plot([x0 - width * 0.46, x0 + width * 0.46], [reference[b]] * 2,
+                        linestyle=(0, (2.5, 1.5)), color="black", linewidth=1.5, gid="reference")
+    handles, names = ax.get_legend_handles_labels()
+    if reference and any(b in reference for b in backends):
+        handles.append(Line2D([], [], linestyle=(0, (2.5, 1.5)), color="black", linewidth=1.5))
+        names.append("no fault (E2, same backend and n)")
+    ax.set_xticks(range(len(groups)))
+    ax.set_xticklabels([g.replace(" (", "\n(") for g in groups], fontsize=8)
+    ax.set_xlabel("fault scenario")
+    ax.set_ylabel(ylabel)
+    ax.set_title("%s, n=%s: %s by fault scenario" % (exp, "%g" % n, word))
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(handles, names, fontsize=8, loc="upper left", bbox_to_anchor=(1.01, 1.0))
     out_png = Path(out_png)
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=150, bbox_inches="tight")
@@ -465,8 +622,19 @@ def main(argv=None) -> int:
     for exp in sorted(agg["exp"].unique()):
         sub = agg[agg["exp"] == exp]
         made = False
-        for x in ("clients", "n"):
-            if x in sub.columns and sub[x].nunique() > 1:
+        if sub["fault"].nunique() > 1:  # E6: bars per fault scenario, one figure per n
+            for n in sorted(sub["n"].unique()):
+                ref = nofault_reference(agg, n, "tps")
+                png = out_dir / ("%s_tps_by_fault_n%g.png" % (exp, n))
+                plt.close(plot_fault_bars(agg, exp, n, "tps", png, ref))
+                written.append(png)
+                ref = nofault_reference(agg, n, "lat_p99_ms")
+                png = out_dir / ("%s_lat_by_fault_n%g.png" % (exp, n))
+                plt.close(plot_fault_bars(agg, exp, n, "lat_p99_ms", png, ref))
+                written.append(png)
+                made = True
+        else:
+            for x in varying_axes(sub):
                 png = out_dir / ("%s_tps_vs_%s.png" % (exp, x))
                 plt.close(plot_exp(agg, exp, x, png))
                 written.append(png)
@@ -475,7 +643,7 @@ def main(argv=None) -> int:
                 written.append(png)
                 made = True
         if not made:
-            notes.append("exp %s: neither clients nor n varies, no figure produced" % exp)
+            notes.append("exp %s: none of %s varies, no figure produced" % (exp, ", ".join(X_AXES)))
 
     print("%d configurations, %d need re-run -> %s" % (len(agg), len(flagged), rerun_path))
     print("latency: write latency from ops sidecars for %d of %d rows (the rest: CSV columns)"
