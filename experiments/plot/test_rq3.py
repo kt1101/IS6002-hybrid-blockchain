@@ -101,9 +101,13 @@ def test_node_tokens():
 FAULTS_HEADER = "utc,epoch_ms,t_s,timeline_s,fault,action,node,detail"
 
 
-def write_run(tmp_path, timeline, faults_rows, audit_rows=None):
+def write_run(tmp_path, timeline, faults_rows, audit_rows=None, wtimeline=None):
+    """wtimeline: None (no file), a list of numbers, or a str written as is."""
     tl = tmp_path / "r.timeline"
     tl.write_text("".join("%s\n" % v for v in timeline))
+    if wtimeline is not None:
+        (tmp_path / "r.wtimeline").write_text(
+            wtimeline if isinstance(wtimeline, str) else "".join("%s\n" % v for v in wtimeline))
     fl = tmp_path / "r.faults"
     fl.write_text(FAULTS_HEADER + "\n" + "".join(r + "\n" for r in faults_rows))
     au = None
@@ -494,3 +498,62 @@ def test_main_reads_n_from_the_tag(tmp_path, capsys):
     assert rq3.main([str(d / name)]) == 0
     out = capsys.readouterr().out
     assert "n=4" in out and "threshold_share=0.75" in out and "recovery_threshold_tps=6.75" in out
+
+
+# ---- write timeline ---------------------------------------------------------
+
+# F1 at 30.2, 10 s warmup.  Reads keep going after consensus stops: the total
+# timeline shows a short stall and a blip back to the pre-fault level, the
+# write timeline stays at 0 to the end of the run (the bft2 F5-F2 pattern).
+TOTAL_WITH_BLIPS = [10] * 31 + [0] * 3 + [10, 4] + [0] * 5 + [10] + [0] * 5
+WRITES_DEAD = [5] * 31 + [0] * (len(TOTAL_WITH_BLIPS) - 31)
+
+
+def test_write_timeline_shows_the_loss_of_liveness(tmp_path):
+    tl, fl, _ = write_run(tmp_path, TOTAL_WITH_BLIPS, F1_ROWS, wtimeline=WRITES_DEAD)
+    m = rq3.load_run(tl, fl, None, wtimeline_path=tmp_path / "r.wtimeline")
+    assert m["timeline_source"] == "write"
+    assert m["pre_mean_tps"] == 5  # writes only, not the 10 of reads + writes
+    assert m["recovery_status"] == "not_recovered" and m["recovery_s"] is None
+    assert m["min_after_fault_tps"] == 0
+    assert m["dip_start_s"] == pytest.approx(31 - 30.2)
+    assert m["stall_s"] == len(WRITES_DEAD) - 31  # from the fault to the end of the run
+    assert m["warnings"] == ""
+
+
+def test_total_timeline_alone_would_report_a_recovery(tmp_path):
+    # the defect this guards against: same run, no write timeline
+    tl, fl, _ = write_run(tmp_path, TOTAL_WITH_BLIPS, F1_ROWS)
+    m = rq3.load_run(tl, fl, None)
+    assert m["timeline_source"] == "total"
+    assert m["recovery_status"] == "recovered" and m["stall_s"] == 3
+
+
+def test_missing_wtimeline_falls_back_silently(tmp_path):
+    tl, fl, _ = write_run(tmp_path, TOTAL_WITH_BLIPS, F1_ROWS)
+    m = rq3.load_run(tl, fl, None, wtimeline_path=tmp_path / "r.wtimeline")  # no such file
+    assert m["timeline_source"] == "total" and m["warnings"] == ""
+    assert m["pre_mean_tps"] == 10 and m["recovery_status"] == "recovered"
+
+
+@pytest.mark.parametrize("content", ["", "\n\n", "1\nx\n", "5\n" * 3], ids=["empty", "blank", "garbage", "short"])
+def test_unusable_wtimeline_falls_back_with_a_warning(tmp_path, content):
+    tl, fl, _ = write_run(tmp_path, TOTAL_WITH_BLIPS, F1_ROWS, wtimeline=content)
+    m = rq3.load_run(tl, fl, None, wtimeline_path=tmp_path / "r.wtimeline")
+    assert m["timeline_source"] == "total"
+    assert "write timeline unusable" in m["warnings"]
+    assert m["pre_mean_tps"] == 10 and m["recovery_status"] == "recovered"
+
+
+def test_main_prints_timeline_source(tmp_path, capsys):
+    d = tmp_path / "e6"
+    d.mkdir()
+    name = "raft_n4_f1_c64_b100_wa_rtt0_F1_node4@20_sync_r1"
+    (d / (name + ".timeline")).write_text("".join("%s\n" % v for v in TOTAL_WITH_BLIPS))
+    (d / (name + ".faults")).write_text(FAULTS_HEADER + "\n" + "".join(r + "\n" for r in F1_ROWS))
+    assert rq3.main([str(d / name)]) == 0
+    assert "timeline_source=total" in capsys.readouterr().out
+    (d / (name + ".wtimeline")).write_text("".join("%s\n" % v for v in WRITES_DEAD))
+    assert rq3.main([str(d / name)]) == 0
+    out = capsys.readouterr().out
+    assert "timeline_source=write" in out and "recovery_status=not_recovered" in out

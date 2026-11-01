@@ -14,8 +14,8 @@ file only collects and aggregates.
 Inputs
 ------
 Every <tag>.timeline of the given run directories (written by
-experiments/run_one.sh) is one run; its <tag>.faults and optional <tag>.audit
-sit next to it, and N comes from the `_n<N>_` part of the tag, as in rq3.py's
+experiments/run_one.sh) is one run; its <tag>.faults and optional <tag>.wtimeline
+and <tag>.audit sit next to it, and N comes from the `_n<N>_` part of the tag, as in rq3.py's
 CLI.  backend, n and f are read from the tag (<backend>_n<N>_f<F>_c..._r<REP>);
 runs differing only in the rep number are the reps of one configuration.  If
 two directories hold the same tag, the later directory wins (a re-run replaces
@@ -27,9 +27,10 @@ backend, n, f, fault, reps (= usable runs), then for every numeric metric M of
 rq3.load_run (METRICS) the columns M_mean and M_std (sample std, ddof=1; empty
 with fewer than 2 values).  A metric that can be None in a run (NULLABLE: no
 dip, not recovered, not detected, no audit) is averaged over the runs where it
-exists, and M_n says how many that are.  recovery_status and detect_status
-become count strings such as "recovered:2;not_recovered:1" (an "invalid: why"
-detect_status counts as "invalid"), and warned_reps counts the runs with an
+exists, and M_n says how many that are.  recovery_status, detect_status and
+timeline_source (write: the metrics are on the write timeline, total: on the
+total one, see rq3.py) become count strings such as "recovered:2;not_recovered:1"
+(an "invalid: why" detect_status counts as "invalid"), and warned_reps counts the runs with an
 rq3 warning.  Numbers are rounded to 3 decimals.
 
 A run whose metrics are unusable (rq3.InputError: missing or malformed
@@ -61,7 +62,7 @@ METRICS = (
 NULLABLE = ("pre_mean_tps", "recovery_threshold_tps", "dip_start_s", "min_after_fault_tps",
             "recovery_s", "recovery_from_dip_s", "audit_ticks", "audit_last_s",
             "audit_div_pre", "detect_s", "unreachable_s")
-STATUS_COLS = ("recovery_status", "detect_status")
+STATUS_COLS = ("recovery_status", "detect_status", "timeline_source")
 
 TAG_RE = re.compile(r"^(?P<backend>.+?)_n(?P<n>[0-9]+)_f(?P<f>[0-9]+)_.*_r(?P<rep>[0-9]+)(?:_bf[A-Za-z0-9.]+)?$")
 
@@ -94,7 +95,7 @@ def collect_runs(dirs):
                 audit = Path(str(prefix) + ".audit")
                 m = rq3.load_run(str(prefix) + ".timeline", str(prefix) + ".faults",
                                  str(audit) if audit.exists() else None,
-                                 n=rq3.n_from_tag(prefix))
+                                 n=rq3.n_from_tag(prefix), wtimeline_path=str(prefix) + ".wtimeline")
             except rq3.InputError as e:
                 skipped.append("%s: skipped: %s" % (prefix, e))
                 runs.pop(tag, None)  # a broken re-run does not keep the old run

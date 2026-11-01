@@ -5,7 +5,7 @@ Usage:
     python3 experiments/plot/rq3.py results/raw/<EXP>/<tag>
 
 prints key=value lines for <tag>.timeline, <tag>.faults and (when present)
-<tag>.audit; exit status 2 and one line on stderr for unusable input.
+<tag>.wtimeline and <tag>.audit; exit status 2 and one line on stderr for unusable input.
 Pure standard library (no pandas).
 
 Inputs (all written by experiments/run_one.sh)
@@ -16,6 +16,17 @@ Inputs (all written by experiments/run_one.sh)
   column: clients bound to a stopped node fail fast in a loop, which inflates
   `errors` (about 190k in a 40 s F1 run) without saying anything about the
   cluster.
+* <tag>.wtimeline: ycsbbench --wtimeline, the same for successful Sets
+  (writes) only, same seconds as .timeline.  Reads are served by each node's
+  local store and keep succeeding after consensus has stopped (a client with a
+  pending write still completes reads between two write timeouts), so the
+  total timeline hides a loss of liveness.  When .wtimeline is usable (it
+  exists, parses, is not empty and has as many seconds as .timeline) EVERY
+  throughput / liveness metric below is computed on it and `timeline_source`
+  is `write`; otherwise on .timeline and `timeline_source` is `total` (a
+  warning says why when the file exists but is unusable).  The key names stay
+  (pre_mean_tps, min_after_fault_tps, ...): "tps" then means successful
+  writes per second, so the two sources are not comparable in absolute tps.
 * <tag>.faults: CSV `utc,epoch_ms,t_s,timeline_s,fault,action,node,detail`
   (experiments/faults.sh).  The fault time is `timeline_s` of the first
   injection row (INJECT_ACTIONS, e.g. docker_stop: logged just BEFORE the
@@ -40,12 +51,14 @@ Conventions
   second `i` of the timeline covers [i, i+1), so seconds before ceil(fault_at)
   mix pre-fault and post-fault traffic and are skipped by recovery_time and
   stall_seconds.
+* "timeline" below is the series picked by timeline_source (write or total).
 * pre_mean = mean throughput of the full seconds between the end of the warmup
   and the fault; None when there are none (AT=0), then recovery_s is None.
 
 Loader output (load_run / CLI), all times in seconds relative to fault_at_s
 unless named otherwise
 ------------------------------------------------------------------------
+* timeline_source: write | total, the series all throughput metrics come from.
 * Recovery threshold: 0.9 x pre_mean x share, share = (N - k) / N for a
   fault that takes k of the N nodes out of the cluster (F1 `docker_stop`,
   network F2 / F5-F2 `iptables_drop`; k = the distinct nodes of those rows),
@@ -347,15 +360,43 @@ def n_from_tag(prefix):
     return int(m.group(1)) if m else None
 
 
-def load_run(timeline_path, faults_path, audit_path=None, n=None):
+def pick_timeline(timeline_path, wtimeline_path=None):
+    """(per-second series, "write" | "total", warning or "") of one run.
+
+    The write timeline when wtimeline_path is given and usable (exists,
+    parses, is not empty, same number of seconds as the total timeline), else
+    the total timeline.  A missing file is silent (older runs have none); an
+    existing but unusable one gives a warning.
+    """
+    total = read_timeline(timeline_path)
+    if wtimeline_path is None or not Path(wtimeline_path).exists():
+        return total, "total", ""
+    try:
+        write = read_timeline(wtimeline_path)
+    except InputError as e:
+        why = str(e)
+    else:
+        if not write:
+            why = "%s: empty" % wtimeline_path
+        elif len(write) != len(total):
+            why = "%s: %d seconds, but the timeline has %d" % (wtimeline_path, len(write), len(total))
+        else:
+            return write, "write", ""
+    return total, "total", "write timeline unusable, using the total timeline (%s)" % why
+
+
+def load_run(timeline_path, faults_path, audit_path=None, n=None, wtimeline_path=None):
     """RQ3 metrics of one run (a dict, see main for the keys).
+
+    The throughput metrics come from pick_timeline(timeline_path,
+    wtimeline_path): the write timeline when usable, else the total one.
 
     fault_at_s = timeline_s of the first (earliest) injection row of the .faults
     file; the audit timestamps are moved onto the timeline axis with the epoch
     of timeline second 0 (epoch_ms of the run_phase_start row, else derived
     from the injection row: epoch_ms - timeline_s * 1000).
     """
-    timeline = read_timeline(timeline_path)
+    timeline, source, source_warning = pick_timeline(timeline_path, wtimeline_path)
     rows = read_faults(faults_path)
     actions = {a for acts in INJECT_ACTIONS.values() for a in acts}
     inject = [r for r in rows if r["action"] in actions and r["timeline_s"] != ""]
@@ -382,7 +423,7 @@ def load_run(timeline_path, faults_path, audit_path=None, n=None):
     pre_mean = sum(window) / len(window) if window else None
     out_nodes = faulty_nodes(rows)
     share = threshold_share(n, len(out_nodes))
-    warnings = []
+    warnings = [source_warning] if source_warning else []
     audit = None
     if audit_path is not None:
         raw = read_audit(audit_path)
@@ -412,6 +453,7 @@ def load_run(timeline_path, faults_path, audit_path=None, n=None):
 
     res = {
         "fault": first["fault"],
+        "timeline_source": source,
         "fault_at_s": r3(fault_at),
         "warmup_s": warmup,
         "pre_mean_tps": r3(pre_mean),
@@ -441,12 +483,12 @@ def load_run(timeline_path, faults_path, audit_path=None, n=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="RQ3 metrics of one run (see the module docstring).")
-    ap.add_argument("prefix", help="results/raw/<EXP>/<tag>: reads <prefix>.timeline, .faults and .audit")
+    ap.add_argument("prefix", help="results/raw/<EXP>/<tag>: reads <prefix>.timeline, .wtimeline, .faults and .audit")
     args = ap.parse_args(argv)
     audit = Path(args.prefix + ".audit")
     try:
         m = load_run(args.prefix + ".timeline", args.prefix + ".faults", audit if audit.exists() else None,
-                     n=n_from_tag(args.prefix))
+                     n=n_from_tag(args.prefix), wtimeline_path=args.prefix + ".wtimeline")
     except InputError as e:
         print("rq3: %s" % e, file=sys.stderr)
         return 2

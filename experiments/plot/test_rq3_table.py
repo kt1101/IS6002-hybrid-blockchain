@@ -20,9 +20,13 @@ F1_ROWS = [
 TAG = "raft_n4_f1_c256_b100_wa_rtt0_F1_node4_20_sync_r%d"
 
 
-def write_run(d, tag, timeline, rows=F1_ROWS, audit=None):
+def write_run(d, tag, timeline, rows=F1_ROWS, audit=None, wtimeline=None):
+    """wtimeline: None (no file), a list of numbers, or a str written as is."""
     d.mkdir(parents=True, exist_ok=True)
     (d / (tag + ".timeline")).write_text("".join("%s\n" % v for v in timeline))
+    if wtimeline is not None:
+        (d / (tag + ".wtimeline")).write_text(
+            wtimeline if isinstance(wtimeline, str) else "".join("%s\n" % v for v in wtimeline))
     if rows is not None:
         (d / (tag + ".faults")).write_text(FAULTS_HEADER + "\n" + "".join(r + "\n" for r in rows))
     if audit is not None:
@@ -77,6 +81,7 @@ def test_table_aggregates_two_reps(tmp_path, capsys):
     assert float(r["stall_s_std"]) == pytest.approx(1.414, abs=1e-3)
     assert r["recovery_status"] == "recovered:2"
     assert r["detect_status"] == "no_audit:2"
+    assert r["timeline_source"] == "total:2"
     assert r["detect_s_mean"] == "" and r["detect_s_n"] == "0"
     assert r["recovery_s_n"] == "2"
     assert list(rows[0]) == rq3_table.header()
@@ -144,3 +149,34 @@ def test_later_directory_replaces_same_tag(tmp_path, capsys):
     assert rc == 0
     r = read_table(tmp_path / "o")[0]
     assert r["reps"] == "2" and float(r["pre_mean_tps_mean"]) == pytest.approx(20.0)
+
+
+# Reads keep completing after the fault (blips in the total timeline) while no
+# write succeeds any more: only the write timeline shows the loss of liveness.
+TOTAL_WITH_BLIPS = [10] * 31 + [0] * 3 + [10, 4] + [0] * 5 + [10] + [0] * 5
+WRITES_DEAD = [5] * 31 + [0] * (len(TOTAL_WITH_BLIPS) - 31)
+
+
+def test_timeline_source_column_counts_write_and_total_runs(tmp_path, capsys):
+    d = tmp_path / "e6"
+    write_run(d, TAG % 1, TOTAL_WITH_BLIPS, wtimeline=WRITES_DEAD)
+    write_run(d, TAG % 2, TOTAL_WITH_BLIPS, wtimeline=WRITES_DEAD)
+    write_run(d, TAG % 3, TOTAL_WITH_BLIPS)                  # no .wtimeline: falls back
+    write_run(d, TAG % 4, TOTAL_WITH_BLIPS, wtimeline="")    # empty .wtimeline: falls back
+    rc, _, err = run_main(capsys, [str(d), "--out", str(tmp_path / "o")])
+    assert rc == 0 and err == ""
+    r = read_table(tmp_path / "o")[0]
+    assert r["timeline_source"] == "total:2;write:2"
+    assert r["recovery_status"] == "not_recovered:2;recovered:2"
+    assert r["warned_reps"] == "1"  # only the unusable file warns
+
+
+def test_write_timeline_gives_not_recovered_and_the_full_stall(tmp_path, capsys):
+    d = tmp_path / "e6"
+    write_run(d, TAG % 1, TOTAL_WITH_BLIPS, wtimeline=WRITES_DEAD)
+    rc, _, _ = run_main(capsys, [str(d), "--out", str(tmp_path / "o")])
+    assert rc == 0
+    r = read_table(tmp_path / "o")[0]
+    assert r["timeline_source"] == "write:1" and r["recovery_status"] == "not_recovered:1"
+    assert float(r["stall_s_mean"]) == len(WRITES_DEAD) - 31
+    assert float(r["pre_mean_tps_mean"]) == 5.0 and float(r["min_after_fault_tps_mean"]) == 0.0
