@@ -46,7 +46,7 @@ Figures (main)
   scenario with the node list stripped (F1, F2, F3, F4, F5-F2, F5-F4; two
   variants of a scenario become "F1 (node1)" / "F1 (node4)", see
   fault_labels), bars = backends, error bars = sample std.  The no-fault
-  reference of a backend is a dashed black tick across each of its bars, taken
+  reference of a backend is a dashed tick in the backend's bar colour across each of its bars, taken
   from the E2 row with the same backend and n and clients=256, block 100,
   workload a, rtt 0, fault none (NOFAULT_REF); it is drawn only when the
   inputs contain such a row.
@@ -62,6 +62,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless; must precede the pyplot import
 
+import matplotlib.patheffects as pe  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
@@ -539,10 +540,12 @@ def plot_fault_bars(agg: pd.DataFrame, exp: str, n, metric: str, out_png, refere
 
     x = fault scenario (fault_labels), one bar per backend, error bars = sample
     std over reps (linear y: a stalled run is a zero-height bar).  `reference`
-    ({backend: value}, see nofault_reference) is drawn as a dashed black
-    horizontal tick across each bar of that backend, in every group (the same
-    value, so the bar can be compared with the no-fault run of its backend),
-    with one legend entry.  A backend that did not run a scenario has no bar
+    ({backend: value}, see nofault_reference) is drawn as a dashed horizontal
+    tick in the backend's own bar colour (white halo so it stays visible over
+    its bar), with the x extent of each bar of that backend, in every group (the
+    same value, so the bar can be compared with the no-fault run of its
+    backend), with one legend entry "dashed = no fault (E2)".  Two aggregated
+    rows for one (backend, fault) raise ValueError.  A backend that did not run a scenario has no bar
     there.  Writes the PNG and returns the Figure (the caller closes it)."""
     if metric not in FAULT_METRICS:
         raise ValueError("unknown metric: %s" % metric)
@@ -566,6 +569,9 @@ def plot_fault_bars(agg: pd.DataFrame, exp: str, n, metric: str, out_png, refere
             r = g[g["fault"] == fault]
             if r.empty:
                 continue
+            if len(r) > 1:
+                raise ValueError("duplicate rows for backend=%r fault=%r in exp=%r n=%r (%d rows): "
+                                 "one aggregated row per bar expected" % (b, fault, exp, n, len(r)))
             xs.append(groups.index(lab) + (i - (len(backends) - 1) / 2) * width)
             ys.append(float(r.iloc[0][metric + "_mean"]))
             es.append(float(np.nan_to_num(r.iloc[0][metric + "_std"])))
@@ -574,11 +580,12 @@ def plot_fault_bars(agg: pd.DataFrame, exp: str, n, metric: str, out_png, refere
         if reference and b in reference and xs:
             for x0 in xs:
                 ax.plot([x0 - width * 0.46, x0 + width * 0.46], [reference[b]] * 2,
-                        linestyle=(0, (2.5, 1.5)), color="black", linewidth=1.5, gid="reference")
+                        linestyle=(0, (2.5, 1.5)), color=color, linewidth=2, gid="reference",
+                        path_effects=[pe.Stroke(linewidth=3.5, foreground="white"), pe.Normal()])
     handles, names = ax.get_legend_handles_labels()
     if reference and any(b in reference for b in backends):
-        handles.append(Line2D([], [], linestyle=(0, (2.5, 1.5)), color="black", linewidth=1.5))
-        names.append("no fault (E2, same backend and n)")
+        handles.append(Line2D([], [], linestyle=(0, (2.5, 1.5)), color="dimgray", linewidth=2))
+        names.append("dashed = no fault (E2)")
     ax.set_xticks(range(len(groups)))
     ax.set_xticklabels([g.replace(" (", "\n(") for g in groups], fontsize=8)
     ax.set_xlabel("fault scenario")

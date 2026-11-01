@@ -6,6 +6,7 @@ Never writes into the repo: everything goes to tmp_path.
 import math
 from pathlib import Path
 
+import matplotlib
 import matplotlib.pyplot as plt
 import pandas as pd
 import pytest
@@ -589,7 +590,16 @@ def test_plot_fault_bars_groups_bars_and_reference(tmp_path):
         # one dashed reference tick per kafka bar (3), none for tendermint
         refs = [l for l in ax.get_lines() if l.get_gid() == "reference"]
         assert len(refs) == 3 and all(list(l.get_ydata()) == [300, 300] for l in refs)
-        assert any("no fault" in t for t in legend_texts(ax))
+        assert "dashed = no fault (E2)" in legend_texts(ax)
+        # each tick has its backend's bar colour (kafka = C0) and exactly the extent of a kafka bar
+        kafka = [p for p in ax.patches if p.get_height() in (100, 110, 90)]
+        assert len(kafka) == 3
+        for l in refs:
+            assert matplotlib.colors.to_rgba(l.get_color()) == matplotlib.colors.to_rgba("C0")
+            assert l.get_linestyle() != "-"  # dashed
+            assert any(p.get_facecolor() == matplotlib.colors.to_rgba("C0") and
+                       p.get_x() == pytest.approx(min(l.get_xdata())) and
+                       p.get_x() + p.get_width() == pytest.approx(max(l.get_xdata())) for p in kafka)
     finally:
         plt.close(fig)
     # without an E2 row there is no reference and no legend entry
@@ -600,6 +610,13 @@ def test_plot_fault_bars_groups_bars_and_reference(tmp_path):
         assert [p.get_height() for p in fig.axes[0].patches] == [5.0]  # p99 of make_df, one n=7 bar
     finally:
         plt.close(fig)
+
+
+def test_plot_fault_bars_duplicate_row_raises(tmp_path):
+    a = plot.aggregate(fault_frame({("raft", 4, "F1:node4@60"): 100}))
+    dup = pd.concat([a, a], ignore_index=True)
+    with pytest.raises(ValueError, match="duplicate rows for backend='raft' fault='F1:node4@60'"):
+        plot.plot_fault_bars(dup, "e6", 4, "tps", tmp_path / "d.png")
 
 
 def test_plot_fault_bars_errors(tmp_path):
