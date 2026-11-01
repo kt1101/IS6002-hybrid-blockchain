@@ -1,0 +1,28 @@
+== e1 from e1.csv, e1-rerun.csv
+backend=tendermint n=4 f=0 clients=256 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync: rerun cv 0.017 -> rerun
+backend=tendermint n=4 f=0 clients=64 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync: rerun cv 0.044 -> rerun
+e1: 48 rows, 0 without sidecars
+== e2 from e2.csv, e2-rerun.csv
+backend=bft2 n=7 f=0 clients=256 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync: rerun cv 0.012 -> rerun
+backend=tendermint n=7 f=0 clients=256 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync: rerun cv 0.044 -> rerun
+e2: 26 rows, 0 without sidecars
+== e3 from e3.csv, e3-rerun.csv
+backend=kafka n=4 f=0 clients=256 block_size=10 workload=a rtt_ms=0 fault=none commit_mode=sync: rerun cv 0.077 -> rerun
+backend=tendermint n=4 f=0 clients=256 block_size=10 workload=a rtt_ms=0 fault=none commit_mode=sync: rerun cv 0.179 -> pooled
+e3: 43 rows, 0 without sidecars
+== e4 from e4.csv, e4-rerun.csv
+backend=tendermint n=4 f=0 clients=256 block_size=100 workload=b rtt_ms=0 fault=none commit_mode=sync: rerun cv 0.147 -> pooled
+e4: 42 rows, 0 without sidecars
+== e5 from e5.csv, e5-rerun.csv
+backend=tendermint n=4 f=0 clients=256 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync: rerun cv 0.068 -> rerun
+e5: 36 rows, 0 without sidecars
+== e6 from e6.csv, e6-rerun.csv
+backend=bft2 n=7 f=2 clients=256 block_size=100 workload=a rtt_ms=0 fault=F2:node7+node6@60 commit_mode=sync: rerun cv 0.185 -> pooled
+backend=tendermint n=4 f=1 clients=256 block_size=100 workload=a rtt_ms=0 fault=F2:node4@60 commit_mode=sync: rerun cv 0.118 -> pooled
+backend=tendermint n=4 f=1 clients=256 block_size=100 workload=a rtt_ms=0 fault=F3:node4@60 commit_mode=sync: rerun cv 0.088 -> rerun
+backend=tendermint n=7 f=2 clients=256 block_size=100 workload=a rtt_ms=0 fault=F2:node7+node6@60 commit_mode=sync: rerun cv 0.093 -> rerun
+backend=tendermint n=7 f=2 clients=256 block_size=100 workload=a rtt_ms=0 fault=F3:node7+node6@60 commit_mode=sync: rerun cv 0.071 -> rerun
+backend=tendermint n=7 f=2 clients=256 block_size=100 workload=a rtt_ms=0 fault=F5-F2:node7+node6+node5@60 commit_mode=sync: rerun cv 0.021 -> rerun
+e6: 157 rows, 0 without sidecars
+== e1-bf100ms from e1-bf100ms-r2.csv
+e1-bf100ms: 64 rows, 0 without sidecars

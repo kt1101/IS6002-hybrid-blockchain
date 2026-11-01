@@ -25,3 +25,6 @@ experiments/cluster/generated/
 __pycache__/
 .superpowers/
 results/ycsb/
+
+# Per-run sidecars of the final data set (rebuilt by experiments/plot/assemble_final.py)
+results/final/*/

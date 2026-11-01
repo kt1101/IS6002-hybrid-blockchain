@@ -165,3 +165,68 @@ Chỉ ghi chú (chưa sửa):
 - **I6**: broker Kafka có 2 CPU / 1,5 GB (TSO 0,5 CPU / 256 MB) ngoài giới hạn 0,5 CPU mỗi node, nên kafka đẩy việc sắp thứ tự sang một broker mạnh còn raft làm đồng thuận trong 0,5 CPU của node (ảnh hưởng RQ2); tendermint dùng `timeout-commit = 1s` (+ `create-empty-blocks`) còn bft2 nhịp view ~20 ms (IdleWait 20 ms, timeout view tối thiểu 100 ms), nên khoảng cách RQ1 giữa hai backend BFT phần lớn phản ánh nhịp cấu hình này.
 - **M2**: cột `commit` là `git describe --dirty` của checkout, không kiểm tra ảnh Docker được build từ commit đó: **sau mọi thay đổi code phải chạy lại `experiments/build.sh`** trước khi chạy (đợt này đổi `ycsbbench`, `veritas`, ảnh `hbdb-kafka`; ảnh cũ thì `ycsbbench` từ chối cờ `--ops` và lần chạy hỏng rc=3).
 - **M7/M8**: `errors` của kafka và raft không cùng ý nghĩa: ở kafka (VersionClient, approve-all như bản gốc) một SharedLog cũ làm cả khối bị Abort (tới 100 Set lỗi `Aborted`), ở raft chỉ SharedLog cũ đó bị hủy; ngoài ra batcher đảo thứ tự version TSO nên kafka/raft có lỗi `Aborted` mà tendermint/bft2 (version theo thứ tự đồng thuận) không thể có. Tách theo nguyên nhân: cột `aborted` của `<tag>.ops.csv` (lỗi gRPC `Aborted`) và `errors` (còn lại: DeadlineExceeded, Unavailable, ...); "Errors by message" trong `<tag>.bench.log` nay gộp được theo nguyên nhân vì `seq <n>` trong thông điệp được thay bằng `seq N` (trước đó mỗi thông điệp là duy nhất nên chỉ 20 lỗi đầu hiện riêng, còn lại vào "(other)").
+
+## Chiến dịch đo E1–E6 và dữ liệu cuối (Task 19, 2026-10-31 → 2026-11-01)
+
+Mọi dòng đo dùng commit **`a0e9aa9`** (ảnh Docker build lúc 2026-10-31T15:58Z từ commit đó). Các commit sau (`f4e4668`, `a5b21aa`, `cbf3735` và commit kết quả) chỉ đổi `experiments/plot/`, `experiments/NOTES.md`, `results/` (không đổi mã đo).
+
+### Trình tự
+
+| Đợt | Thời gian (UTC) | Kết quả |
+|---|---|---|
+| Chiến dịch E1 → E1 100 ms → E2 → E6 (cổng lỗi ghi 1%) | 10-31 16:50 → 11-01 09:30 | đủ dòng cho kafka, raft, bft2; tendermint bị loại khỏi E2–E6 vì E1 c256 thiếu 1 lần (khối mất khi bão hòa, xem dưới) |
+| Chạy bù tendermint (`VALID_MAX_WRITE_ERR_PCT=5`, driver chỉ chạy dòng thiếu) | 11-01 09:32 → 15:59 | không lỗi; tendermint có trong mọi thí nghiệm |
+| Chạy lại 1 lần (3 rep mới) cho 18 cấu hình `plot.py` đánh dấu CV > 10%, vào `results/raw/<exp>-rerun.csv` | 11-01 16:01 → 19:03 | 54/54 dòng, không lỗi |
+| Đo lại toàn bộ E1 100 ms (`EXP=e1-bf100ms-r2`, cổng 5%) | 11-01 19:06 → 21:43 | 64/64 dòng, không lỗi |
+
+Điều kiện host: chiến dịch bắt đầu khi máy chỉ còn ~88 MB RAM trống, ~8 GB bộ nhớ nén, ~14 GiB đĩa trống (máy không "yên").
+
+### Quy tắc dữ liệu cuối (`experiments/plot/assemble_final.py results/raw results/final`)
+
+- E1–E6: các dòng chiến dịch (+ chạy bù). Với mỗi cấu hình đã chạy lại: CV của 3 lần chạy lại ≤ 10% thì **thay** các dòng chiến dịch bằng dòng chạy lại; ngược lại **gộp** (rep của lần chạy lại đánh số tiếp sau rep cuối). Quyết định từng cấu hình ghi trong `results/final/assembly.txt` (10 thay, 4 gộp; 4 cấu hình E1 100 ms còn lại thay bằng đợt đo lại toàn bộ).
+- E1 100 ms = **chỉ** `e1-bf100ms-r2` (xem "Lệch mức" dưới).
+- File phụ của từng lần chạy (`.ops.csv`, `.timeline`, `.wtimeline`, `.faults`, `.audit`) được chép sang `results/final/<exp>/` theo tag cuối (không commit: chạy lại script để tạo).
+- Hình: `plot.py results/final/*.csv --out results/figs`; bảng RQ3: `rq3_table.py results/final/e6 --out results/figs` → `results/figs/rq3_summary.csv`.
+- **Dừng chạy lại** ở 11 cấu hình vẫn CV > 10% sau hai đợt (`results/rerun.txt`; không điểm nào bị cờ host bão hòa): E1 100 ms c64 và c256 của kafka/raft/bft2 (CV 13–26%) và tendermint c256 (36%); tendermint E3 block 10 (16%), E4 workload b (12%), E6 F2 n=4 (13%); bft2 E6 F2 n=7 (15%). Phải báo cáo kèm độ lệch chuẩn và min–max.
+
+### Lệch mức của E1 100 ms trong chiến dịch (mối đe dọa tính hợp lệ)
+
+Cùng commit và ảnh, CPU host như nhau (~23%), nhưng E1 100 ms trong chiến dịch thấp hơn đợt đo lại ở mọi mức client (c4: kafka 71 → 78, bft2 56 → 64; c256: kafka 574 → 1115, raft 594 → 1150, bft2 723 → 1170 req/s). Timeline lần chạy chiến dịch bft2 c256 rơi xuống 50–190 req/s hàng chục giây trong khi CPU node ~10% (node chờ, không bị giới hạn); lần đo lại giữ ~1500–2400 req/s với node chạm 0,5 CPU. Nguyên nhân khả dĩ nhất là trạng thái host/VM (thiếu RAM) lúc đó; chưa chứng minh được vì không ghi bộ nhớ host theo thời gian. Tỷ lệ giây "lõm" của timeline không tách được hai trường hợp (đợt đo lại cũng có), nên không dùng làm bộ lọc. Các thí nghiệm flush 1 s bị trần ~510 req/s của bộ hẹn giờ nên ít nhạy, và các lần chạy lại của chúng khớp trong 10% (trừ các cấu hình đã thay). **Khuyến nghị:** ghi `vm_stat`/áp lực bộ nhớ host theo từng lần chạy nếu đo thêm.
+
+### Kết quả chính (tps trung bình, dữ liệu cuối)
+
+- **E1 flush 1 s**: kafka/raft/bft2 trùng nhau (c4 ≈ 7,5; c16 32; c64 127; c256 478–488) vì bộ hẹn giờ flush; tendermint 5 / 19 / 85 / 294.
+- **E1 flush 100 ms** (dùng để so giữa backend, xem quyết định BATCH_FLUSH): c4 kafka 78, raft 76, bft2 64, tendermint 6; c16 295 / 279 / 237 / 24; c64 845 / 824 / 693 / 95; c256 1115 / 1150 / 1170 / 247. Ở tải thấp kafka ≈ raft > bft2 (~20%); ở c64–c256 ba backend chồng lấn (CV 13–26%), node ~42–47% CPU (gần trần 0,5) ở c256. Tendermint thấp hơn một bậc do `timeout-commit = 1s` (I6).
+- **E2** (c256, N 4 → 7): kafka 460 → 451, raft 498 → 449, bft2 481 → 501 (giá trị chạy lại; chiến dịch 394 với CV 19%), tendermint 298 → 244.
+- **E3** (block 10 / 100 / 1000): kafka 1457 / 504 / 510, raft 1644 / 510 / 508, bft2 1611 / 510 / 510, tendermint 279 / 298 / 278. Block 100 và 1000 bằng nhau đúng như I3 (flush 1 s); chỉ block 10 lấp đầy theo kích thước.
+- **E4** (a / b / c): ~510 / ~5050 / ~11400–11700 với kafka, raft, bft2; tendermint 260 / 2322 / 11490. Đọc không đi qua đồng thuận nên workload c giống nhau.
+- **E5** (RTT 0 / 20 / 60 ms): kafka 507 / 505 / 498, raft 511 / 508 / 506, bft2 508 / 507 / 471, tendermint 290 / 255 / 208. Flush 1 s che phần lớn RTT; tendermint và bft2 (nhiều vòng thông điệp mỗi khối) chịu RTT rõ nhất.
+
+### Tendermint: mất khối khi bão hòa
+
+Ở c256 đôi khi cả một khối Veritas (64 Set) hết thời gian 30 s (~1,4% lượt ghi), cổng 1% loại lần chạy. Nguyên nhân: kênh Deliver của core đầy → `DeliverTx` chờ trong khi giữ mutex của ABCI app → `CheckTx` bị chặn → `broadcast_tx_sync` hết 30 s. Đây là áp lực ngược của adapter khi bão hòa (đã biết từ review Task 11), không phải lỗi mới; vì vậy tendermint chạy bù với cổng 5% (lần treo thật vẫn bị loại; số lỗi nằm trong cột `errors`).
+
+### RQ3: chỉ số trên timeline ghi
+
+`rq3.py` (từ `cbf3735`) tính mọi chỉ số liveness/thông lượng trên `<tag>.wtimeline` (Set thành công mỗi giây) khi có (`timeline_source=write`, cả 157 lần chạy E6). Trước đó dùng timeline tổng: Get được phục vụ cục bộ nên vẫn thành công khi đồng thuận đã dừng (các đợt "nhú" mỗi 30 s giữa các Set hết thời gian), khiến bft2/tendermint F5-F2 bị báo "recovered". Vì vậy `pre_mean_tps`/`min_after_fault_tps` của `rq3_summary.csv` là **lượt ghi/s** (~255 với kafka/raft/bft2, ~130–157 với tendermint), không so trực tiếp với tps tổng của CSV. `stall_s` = số giây 0 liên tiếp đầu tiên sau lỗi (một giây 0 rời rạc vài giây sau cho `stall_s = 1`); cửa sổ sau lỗi là ~119 s. `detect_status = invalid` khi auditor không có kết luận (node bị dừng/cô lập không trả lời), không phải lỗi đo.
+
+### Đối chiếu giả thuyết F1–F5 (spec mục 4) với E6
+
+tps = tps tổng của CSV trên toàn lần chạy 180 s (60 s lành + 120 s lỗi); mốc không lỗi = E2 cùng N (kafka 460 / 451, raft 498 / 449, bft2 481 / 501, tendermint 298 / 244 ở N=4 / 7); phục hồi/dừng theo `rq3_summary.csv` (ghi).
+
+| | Giả thuyết | Kết quả | Kết luận |
+|---|---|---|---|
+| F1 kafka | Dừng hẳn | not_recovered, ghi = 0 suốt 119 s, tps 171–173 (= phần trước lỗi), node1 hay node4 như nhau | **Đúng** |
+| F1 raft | Chạy tiếp; bầu leader mới nếu leader chết | recovered; leader (node1) 2,6 s, follower 3,6 s (N=4); tps 413–442 | **Đúng** (bầu lại ~2–3 s sau sửa N5) |
+| F1 tendermint / bft2 | Chạy tiếp; HotStuff đổi view nhanh hơn | cả hai recovered; phục hồi bft2 2,0 s / 5,3 s, tendermint 3,6 s / 5,0 s (N=4 / 7); tps bft2 384 / 305, tendermint 175 / 171 | Chạy tiếp: **đúng**. "HotStuff nhanh hơn": **chỉ ở N=4**, N=7 ngang nhau |
+| F2 kafka | Dừng hẳn | N=7 (2 node im lặng): ghi = 0 suốt 119 s. N=4 (1 node): ghi còn đúng 64/s (= client của node im lặng): khối của node trung thực thiếu phiếu nên bị loại (Aborted), khối do chính node im lặng đề xuất vẫn đủ phiếu | **Đúng một phần**: node trung thực dừng, client của node lỗi vẫn ghi được |
+| F2 raft | Chạy tiếp | recovered 8,3 s / 12,0 s, tps 421 / 405 | **Đúng** |
+| F2 tendermint / bft2 | Chạy tiếp | recovered; tendermint dừng ghi 16,6 s (N=4), tps 102 / 101; bft2 6,0 s / 11,5 s, tps 377 / 264 | **Đúng**, tendermint chịu cô lập kém hơn nhiều |
+| F3 kafka | Chậm theo node chậm nhất | tps 458–465 so với mốc 460 / 451 (N=7 hai node chậm: 432, −4%); dừng ghi ≤ 1 s | **Không thấy rõ** ở flush 1 s (200 ms < 1 s flush) |
+| F3 raft | Chậm nếu node chậm là leader | leader 479 / 475 so với follower 482 / 468 (mốc 498 / 449): không khác | **Không thấy** ở flush 1 s (200 ms < 1 s flush) |
+| F3 tendermint / bft2 | Chậm theo timeout round/view | tendermint 236 / 225 (−20% / −8%), bft2 462 / 411 (−4% / −18%) | **Đúng** (chậm, không dừng) |
+| F4 (mọi backend) | Chạy tiếp; chỉ auditor phát hiện | recovered, tps 484–499 (tendermint 259–295), auditor phát hiện sau 0,7–1,5 s ở mọi lần chạy; client đọc từ node lỗi nhận giá trị sai (`wrong_gets` 2–5 nghìn mỗi lần chạy) | Chạy tiếp + auditor phát hiện: **đúng**; nhưng không chỉ auditor: client của node lỗi đọc sai |
+| F5-F2 (BFT, f+1 node) | Mất liveness | bft2 và tendermint, N=4 và 7: not_recovered, ghi = 0 suốt ~119 s | **Đúng** (mất liveness) |
+| F5-F4 (BFT, f+1 node) | Mất tính an toàn | đồng thuận không bị ảnh hưởng (tps 486–498 / 262–306), f+1 node có trạng thái sai, auditor phát hiện sau 0,9–1,4 s, `wrong_gets` 3–10 nghìn | **Đúng một phần**: an toàn ở tầng trạng thái/đọc bị vi phạm (và được phát hiện), thứ tự đồng thuận không bị ảnh hưởng vì F4 làm hỏng lúc áp dụng, không làm hỏng phiếu |
+
+Ghi chú khi trích dẫn: kafka F2 N=4 là `not_recovered` dù `stall_s = 1` (ghi giữ 64/s, dưới ngưỡng 0,9 × trước lỗi); số lần lặp của E6 là 3, trừ các cấu hình đã chạy lại (5–8).

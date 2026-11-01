@@ -1,0 +1,11 @@
+exp=e1-bf100ms backend=bft2 n=4 f=0 clients=64 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync reps=5 cv=0.172 reason=cv>0.10
+exp=e1-bf100ms backend=bft2 n=4 f=0 clients=256 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync reps=5 cv=0.145 reason=cv>0.10
+exp=e1-bf100ms backend=kafka n=4 f=0 clients=64 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync reps=5 cv=0.184 reason=cv>0.10
+exp=e1-bf100ms backend=kafka n=4 f=0 clients=256 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync reps=5 cv=0.259 reason=cv>0.10
+exp=e1-bf100ms backend=raft n=4 f=0 clients=64 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync reps=5 cv=0.126 reason=cv>0.10
+exp=e1-bf100ms backend=raft n=4 f=0 clients=256 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync reps=5 cv=0.159 reason=cv>0.10
+exp=e1-bf100ms backend=tendermint n=4 f=0 clients=256 block_size=100 workload=a rtt_ms=0 fault=none commit_mode=sync reps=5 cv=0.361 reason=cv>0.10
+exp=e3 backend=tendermint n=4 f=0 clients=256 block_size=10 workload=a rtt_ms=0 fault=none commit_mode=sync reps=8 cv=0.163 reason=cv>0.10
+exp=e4 backend=tendermint n=4 f=0 clients=256 block_size=100 workload=b rtt_ms=0 fault=none commit_mode=sync reps=8 cv=0.116 reason=cv>0.10
+exp=e6 backend=bft2 n=7 f=2 clients=256 block_size=100 workload=a rtt_ms=0 fault=F2:node7+node6@60 commit_mode=sync reps=8 cv=0.154 reason=cv>0.10
+exp=e6 backend=tendermint n=4 f=1 clients=256 block_size=100 workload=a rtt_ms=0 fault=F2:node4@60 commit_mode=sync reps=8 cv=0.133 reason=cv>0.10
