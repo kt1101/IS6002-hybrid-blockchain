@@ -33,6 +33,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -56,6 +57,7 @@ import (
 	"hybrid/veritas/benchmark"
 	"hybrid/veritas/core"
 	"hybrid/veritas/ledger"
+	"hybrid/veritas/observe"
 )
 
 var (
@@ -91,6 +93,10 @@ var (
 	// --consensus=tendermint only (same sockets as scripts/start_veritas_tendermint.sh).
 	tmABCISocket = kingpin.Flag("tm-abci-socket", "tendermint: listen address of the ABCI socket server (tendermint --proxy-app dials it)").Default("tcp://0.0.0.0:26658").String()
 	tmRPCAddr    = kingpin.Flag("tm-rpc-addr", "tendermint: RPC address of the local tendermint node (Submit = broadcast_tx_sync)").Default("tcp://127.0.0.1:26657").String()
+
+	// Live demo (core path only): serve the node observer (applied-block
+	// events, key lookup, Merkle proofs) over HTTP on this address.
+	demoEventsAddr = kingpin.Flag("demo-events-addr", "core: serve the live-demo observer (GET /events SSE, /kv, /prove, /healthz) on this address, e.g. :7300 (empty: off)").Default("").String()
 
 	// --consensus=bft2 only.
 	bft2API = kingpin.Flag("bft2-api", "bft2: local API (host:port) of the bft2-node HotStuff sidecar on this container").Default("127.0.0.1:7201").String()
@@ -266,7 +272,8 @@ func runCore() {
 	if err != nil {
 		log.Fatalf("create ledger: %v", err)
 	}
-	ex := core.NewExecutor(core.NewRedisStore(r), l, vm, fp)
+	store := core.NewRedisStore(r)
+	ex := core.NewExecutor(store, l, vm, fp)
 
 	// The backend is built before the server, but its drop callback must
 	// reach the server: it goes through dropper, pointed at srv.AbortBlock
@@ -323,14 +330,29 @@ func runCore() {
 		}
 	}
 
-	srv := core.NewServer(core.ServerConfig{
+	scfg := core.ServerConfig{
 		NodeID:        *nodeID,
 		Signature:     *signature,
 		BlockSize:     *blockSize,
 		Mode:          vm,
 		Commit:        cm,
 		FlushInterval: *batchFlush, // > 0 (checked above)
-	}, cons, ex, l)
+	}
+	var demoLis net.Listener
+	var demoSrv *http.Server
+	if *demoEventsAddr != "" {
+		// Listen before the server starts so a bad address fails the node
+		// at once. The events are published from the apply loop (OnApplied).
+		b := observe.NewBroadcaster(*signature)
+		scfg.OnApplied = b.Publish
+		var err error
+		if demoLis, err = net.Listen("tcp", *demoEventsAddr); err != nil {
+			log.Fatalf("listen demo observer %s: %v", *demoEventsAddr, err)
+		}
+		// No WriteTimeout: it would cut the SSE streams of /events.
+		demoSrv = &http.Server{Handler: observe.Handler(b, kvLookup(store), ex.Prove)}
+	}
+	srv := core.NewServer(scfg, cons, ex, l)
 	drops.set(srv.AbortBlock)
 	// SIGUSR2: breakdown snapshots for the measurement window (the harness
 	// signals at its start and its end; experiments/run_one.sh).
@@ -341,6 +363,14 @@ func runCore() {
 	lis, err := net.Listen("tcp", *addr)
 	if err != nil {
 		log.Fatalf("listen %s: %v", *addr, err)
+	}
+	if demoSrv != nil {
+		go func() {
+			log.Printf("Serving demo observer: %s", demoLis.Addr())
+			if err := demoSrv.Serve(demoLis); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("demo observer serve: %v", err)
+			}
+		}()
 	}
 	go func() {
 		log.Printf("Serving gRPC: %s (consensus %s, commit %s, version %s, node %d)", *addr, *consensusName, *commitMode, *versionMode, *nodeID)
@@ -368,6 +398,9 @@ func runCore() {
 		log.Printf("write breakdown %s: %v", out, err)
 	}
 	gs.Stop()
+	if demoSrv != nil {
+		demoSrv.Close()
+	}
 	if err := l.Close(); err != nil {
 		log.Printf("ledger close: %v", err)
 	}
@@ -375,6 +408,22 @@ func runCore() {
 		log.Printf("redis close: %v", err)
 	}
 	log.Printf("bye")
+}
+
+// kvLookup is the observer's key lookup: the stored entry of key decoded into
+// its value and version.
+func kvLookup(store core.KVStore) observe.KVFunc {
+	return func(ctx context.Context, key string) (string, int64, bool, error) {
+		raw, ok, err := store.Get(ctx, key)
+		if err != nil || !ok {
+			return "", 0, false, err
+		}
+		v, err := veritas.Decode(raw)
+		if err != nil {
+			return "", 0, false, err
+		}
+		return v.Val, v.Version, true, nil
+	}
 }
 
 // parseRaftPeers parses --raft-peers: comma-separated ID=RAFTADDR/FORWARDADDR

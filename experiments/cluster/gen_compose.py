@@ -76,6 +76,14 @@ KAFKA_IMAGE = "hbdb-kafka"
 
 VERITAS_PORT = 1990
 TSO_PORT = 7070
+# Live demo (--publish-ports): the node observer's HTTP port inside a core
+# node (veritas --demo-events-addr) and the host side of the published ports,
+# all bound to 127.0.0.1: node i gets HOST_GRPC_BASE + i -> VERITAS_PORT and
+# HOST_EVENTS_BASE + i -> DEMO_EVENTS_PORT; the TSO HOST_TSO_PORT -> TSO_PORT.
+DEMO_EVENTS_PORT = 7300
+HOST_GRPC_BASE = 19900
+HOST_EVENTS_BASE = 19800
+HOST_TSO_PORT = 19870
 KAFKA_PORT = 9092
 KAFKA_TOPIC = "shared-log"
 TM_P2P_PORT = 26656
@@ -235,7 +243,7 @@ def _kafka_orig_node(i, n, block_size, memlimit):
     ] + _exit_when_any_exits(["redis-server", "veritas-kafka"])
 
 
-def _kafka_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None):
+def _kafka_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None, demo_events=False):
     """Node of the deterministic Kafka backend (consensus/kafka + core.Server).
 
     Same Kafka/TSO/redis wiring as kafka-orig; the signature node<i> is the
@@ -256,7 +264,7 @@ def _kafka_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush
         " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
         " --breakdown-out=/results/breakdown-node%d.json &"
         % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT, KAFKA_IP, KAFKA_PORT,
-           KAFKA_TOPIC, i, i), fault, batch_flush
+           KAFKA_TOPIC, i, i), fault, batch_flush, demo_events
     ) + _exit_when_any_exits(["redis-server", "veritas-kafka"])
 
 
@@ -287,6 +295,15 @@ def _batch_flush_arg(batch_flush):
     return "" if batch_flush is None else " --batch-flush=%s" % batch_flush
 
 
+def _demo_events_arg(demo_events):
+    """veritas flag that starts the node observer (live demo; False: no flag).
+
+    >>> _demo_events_arg(True)
+    ' --demo-events-addr=:7300'
+    """
+    return " --demo-events-addr=:%d" % DEMO_EVENTS_PORT if demo_events else ""
+
+
 def check_batch_flush(batch_flush):
     """Raise ValueError unless batch_flush is None or a positive duration like
     1s, 250ms, 2m, 1h (the forms run_one.sh accepts; Go's ParseDuration reads them)."""
@@ -297,7 +314,7 @@ def check_batch_flush(batch_flush):
         raise ValueError("invalid --batch-flush %r: want a positive duration like 1s, 250ms, 2m" % (batch_flush,))
 
 
-def _forward_sigterm(start, fault=None, batch_flush=None):
+def _forward_sigterm(start, fault=None, batch_flush=None, demo_events=False):
     """Lines that start veritas (start ends with ' &') so that SIGTERM/SIGINT
     reaching bash is passed on to it and bash waits for it (core backends:
     the server writes its breakdown on SIGTERM).
@@ -306,7 +323,8 @@ def _forward_sigterm(start, fault=None, batch_flush=None):
     trap; until veritas runs the trap only exits. The server's pid is written
     to VERITAS_PIDFILE (the fault injector signals it there). fault (None,
     'silent' or 'corrupt') adds the --fault flags (_fault_args); batch_flush
-    (None or a duration) adds --batch-flush (_batch_flush_arg).
+    (None or a duration) adds --batch-flush (_batch_flush_arg); demo_events
+    adds --demo-events-addr (_demo_events_arg).
     """
     if not start.endswith(" &"):
         raise ValueError("veritas start line must end with ' &': %r" % (start,))
@@ -314,7 +332,7 @@ def _forward_sigterm(start, fault=None, batch_flush=None):
         "veritas_pid=",
         "trap 'if [ -n \"$veritas_pid\" ]; then kill -TERM \"$veritas_pid\" 2>/dev/null || true;"
         " wait \"$veritas_pid\" || true; fi; exit 143' TERM INT",
-        start[:-2] + _fault_args(fault) + _batch_flush_arg(batch_flush) + " &",
+        start[:-2] + _fault_args(fault) + _batch_flush_arg(batch_flush) + _demo_events_arg(demo_events) + " &",
         "veritas_pid=$!",
         "echo \"$veritas_pid\" >%s" % VERITAS_PIDFILE,
     ]
@@ -331,7 +349,7 @@ def raft_peers(n):
         for j in range(1, n + 1))
 
 
-def _raft_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None):
+def _raft_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None, demo_events=False):
     """Node of the Raft backend (consensus/raft + core.Server).
 
     Same binary, TSO and redis wiring as kafka, no Kafka. The raft server ID
@@ -351,11 +369,11 @@ def _raft_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=
         " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
         " --breakdown-out=/results/breakdown-node%d.json &"
         % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT,
-           raft_peers(n), RAFT_PORT, " --raft-bootstrap" if i == 1 else "", i, i), fault, batch_flush
+           raft_peers(n), RAFT_PORT, " --raft-bootstrap" if i == 1 else "", i, i), fault, batch_flush, demo_events
     ) + _exit_when_any_exits(["redis-server", "veritas-kafka"])
 
 
-def _tendermint_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None):
+def _tendermint_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None, demo_events=False):
     """Node of the Tendermint backend (consensus/tendermint + core.Server).
 
     Same layout as tm-orig (tendermint home copied from the read-only /tmcfg
@@ -377,7 +395,7 @@ def _tendermint_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_
         " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
         " --breakdown-out=/results/breakdown-node%d.json &"
         % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT,
-           TM_ABCI_LISTEN, TM_RPC, i, i), fault, batch_flush
+           TM_ABCI_LISTEN, TM_RPC, i, i), fault, batch_flush, demo_events
     ) + [
         # tendermint exits if the ABCI app is not listening yet. The wait is
         # bounded (ABCI_WAIT_TRIES x 0.2 s) and stops early if the server
@@ -402,7 +420,7 @@ def bft2_peers(n):
     return ",".join("%d=%s:%d" % (j, node_ip(j), BFT2_PORT) for j in range(1, n + 1))
 
 
-def _bft2_node(i, n, block_size, commit_mode, memlimit, mem, fault=None, batch_flush=None):
+def _bft2_node(i, n, block_size, commit_mode, memlimit, mem, fault=None, batch_flush=None, demo_events=False):
     """Node of the bft2 backend (consensus/bft2 + core.Server, HotStuff sidecar).
 
     redis, then bft2-node (replica i of the static set 1..n, replica server
@@ -441,7 +459,7 @@ def _bft2_node(i, n, block_size, commit_mode, memlimit, mem, fault=None, batch_f
         " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
         " --breakdown-out=/results/breakdown-node%d.json &"
         % (bft2_veritas_gomemlimit(mem), commit_mode, i, i, parties, block_size, VERITAS_PORT, BFT2_API_ADDR, i, i),
-        fault, batch_flush
+        fault, batch_flush, demo_events
     ) + _exit_when_any_exits(["redis-server", "bft2-node", "veritas-kafka"])
 
 
@@ -532,7 +550,7 @@ def check_node_faults(backend, n, node_faults):
 
 
 def gen(backend, n, block_size, commit_mode, cpus, mem,
-        tm_dir=None, ycsb_dir=None, results_dir=None, node_faults=None, batch_flush=None):
+        tm_dir=None, ycsb_dir=None, results_dir=None, node_faults=None, batch_flush=None, publish_ports=False):
     """Return the compose document (a dict) for one cluster.
 
     commit_mode is accepted for every backend; the original backends have a
@@ -546,6 +564,11 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
     the core batcher's flush interval, on every node of a core backend; None
     leaves the flag out (the binary's default, 1 s). The original backends
     have no such flag.
+    publish_ports (live demo, off by default: the output is then unchanged)
+    publishes on 127.0.0.1 of the host every node's gRPC port and observer
+    port (HOST_GRPC_BASE + i, HOST_EVENTS_BASE + i) and the TSO's, and starts
+    the observer (veritas --demo-events-addr) on the core backends; the
+    original backends have no observer, so only their ports are published.
     """
     if backend not in ALL_BACKENDS:
         raise ValueError("unknown backend %r" % backend)
@@ -581,6 +604,8 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
         tso["working_dir"] = "/data"  # the oracle writes orc.log into its cwd
         tso["command"] = ["veritas-tso", "--addr=:%d" % TSO_PORT]
         tso["volumes"] = ["tso-data:/data"]
+        if publish_ports:
+            tso["ports"] = ["127.0.0.1:%d:%d" % (HOST_TSO_PORT, TSO_PORT)]
         volumes["tso-data"] = {}
         services["tso"] = tso
 
@@ -595,22 +620,25 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
             s["command"] = _bash(_kafka_orig_node(i, n, block_size, memlimit))
             s["depends_on"] = {"kafka": {"condition": "service_healthy"}}
         elif backend == "kafka":
-            s["command"] = _bash(_kafka_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush))
+            s["command"] = _bash(_kafka_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, publish_ports))
             s["depends_on"] = {"kafka": {"condition": "service_healthy"}}
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "raft":
-            s["command"] = _bash(_raft_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush))
+            s["command"] = _bash(_raft_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, publish_ports))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "tendermint":
-            s["command"] = _bash(_tendermint_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush))
+            s["command"] = _bash(_tendermint_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, publish_ports))
             s["volumes"].append("%s:/tmcfg:ro" % os.path.join(tm_dir, "node%d" % (i - 1)))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "bft2":
-            s["command"] = _bash(_bft2_node(i, n, block_size, commit_mode, memlimit, mem, node_faults.get(i), batch_flush))
+            s["command"] = _bash(_bft2_node(i, n, block_size, commit_mode, memlimit, mem, node_faults.get(i), batch_flush, publish_ports))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "tm-orig":
             s["command"] = _bash(_tm_orig_node(i, n, block_size, memlimit))
             s["volumes"].append("%s:/tmcfg:ro" % os.path.join(tm_dir, "node%d" % (i - 1)))
+        if publish_ports:
+            s["ports"] = ["127.0.0.1:%d:%d" % (HOST_GRPC_BASE + i, VERITAS_PORT),
+                          "127.0.0.1:%d:%d" % (HOST_EVENTS_BASE + i, DEMO_EVENTS_PORT)]
         services[name] = s
 
     client = _service(NODE_IMAGE, "client", CLIENT_IP, CLIENT_CPUS, CLIENT_MEM)
@@ -649,13 +677,17 @@ def main(argv=None):
     p.add_argument("--batch-flush", default=None, metavar="DURATION",
                    help="veritas --batch-flush (batcher flush interval, e.g. 250ms) on every node of a core"
                         " backend; default: flag left out (veritas default 1s)")
+    p.add_argument("--publish-ports", action="store_true",
+                   help="live demo: publish node gRPC/observer ports and the TSO on 127.0.0.1 of the host and"
+                        " start the node observer (veritas --demo-events-addr) on core backends")
     a = p.parse_args(argv)
 
     cpus = int(a.cpus) if a.cpus == int(a.cpus) else a.cpus
     try:
         doc = gen(a.backend, a.n, a.block_size, a.commit_mode, cpus, a.mem,
                   tm_dir=a.tm_dir, ycsb_dir=a.ycsb_dir, results_dir=a.results_dir,
-                  node_faults=parse_node_faults(a.node_fault), batch_flush=a.batch_flush)
+                  node_faults=parse_node_faults(a.node_fault), batch_flush=a.batch_flush,
+                  publish_ports=a.publish_ports)
     except NotImplementedError as e:
         sys.stderr.write("gen_compose: %s\n" % e)
         return 2

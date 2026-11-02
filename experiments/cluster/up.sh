@@ -11,6 +11,8 @@
 #      with --fault armed, see gen_compose.py --node-fault).
 #      BATCH_FLUSH="" (empty: veritas default 1s; else a duration like 250ms:
 #      veritas --batch-flush of every node of a core backend).
+#      PUBLISH_PORTS=0 (1: live demo, gen_compose.py --publish-ports: node
+#      gRPC/observer ports and the TSO published on 127.0.0.1 of the host).
 # Writes experiments/cluster/generated/{compose.json,tm/}.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
@@ -22,6 +24,7 @@ CPUS="${CPUS:-0.5}"
 MEM="${MEM:-768m}"
 NODE_FAULTS="${NODE_FAULTS:-}"
 BATCH_FLUSH="${BATCH_FLUSH:-}"
+PUBLISH_PORTS="${PUBLISH_PORTS:-0}"
 
 hbdb_check_backend
 hbdb_check_n "$N"
@@ -40,6 +43,13 @@ if [ -n "$BATCH_FLUSH" ]; then
   batch_flush_args="--batch-flush $BATCH_FLUSH"
 fi
 
+publish_ports_args=""
+case "$PUBLISH_PORTS" in
+  0) ;;
+  1) publish_ports_args="--publish-ports" ;;
+  *) die "PUBLISH_PORTS='$PUBLISH_PORTS': want 0 or 1" ;;
+esac
+
 mkdir -p "$HBDB_GEN_DIR" "$HBDB_RESULTS_RAW" "$HBDB_YCSB_DIR"
 
 if [ "$BACKEND" = tm-orig ] || [ "$BACKEND" = tendermint ]; then
@@ -54,11 +64,11 @@ if [ "$BACKEND" = tm-orig ] || [ "$BACKEND" = tendermint ]; then
   python3 "$HBDB_CLUSTER_DIR/tm_config.py" --dir "$HBDB_GEN_DIR/tm" --n "$N" --backend "$BACKEND"
 fi
 
-log "generating compose: backend=$BACKEND n=$N block_size=$BLOCK_SIZE commit_mode=$COMMIT_MODE cpus=$CPUS mem=$MEM${NODE_FAULTS:+ node_faults=$NODE_FAULTS}${BATCH_FLUSH:+ batch_flush=$BATCH_FLUSH}"
+log "generating compose: backend=$BACKEND n=$N block_size=$BLOCK_SIZE commit_mode=$COMMIT_MODE cpus=$CPUS mem=$MEM${NODE_FAULTS:+ node_faults=$NODE_FAULTS}${BATCH_FLUSH:+ batch_flush=$BATCH_FLUSH}${publish_ports_args:+ publish_ports=1}"
 # shellcheck disable=SC2086
 python3 "$HBDB_CLUSTER_DIR/gen_compose.py" \
   --backend "$BACKEND" --n "$N" --block-size "$BLOCK_SIZE" --commit-mode "$COMMIT_MODE" \
-  --cpus "$CPUS" --mem "$MEM" $node_fault_args $batch_flush_args \
+  --cpus "$CPUS" --mem "$MEM" $node_fault_args $batch_flush_args $publish_ports_args \
   --tm-dir "$HBDB_GEN_DIR/tm" --ycsb-dir "$HBDB_YCSB_DIR" --results-dir "$HBDB_RESULTS_RAW" \
   --out "$HBDB_COMPOSE_FILE"
 

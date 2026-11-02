@@ -586,3 +586,50 @@ def test_bft2_memory_limits_fit_the_node_cap():
     # the other core backends keep 70% of the whole cap
     c = gen(backend="raft", n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
     assert "GOMEMLIMIT=537MiB veritas-kafka " in c["services"]["node1"]["command"][-1]
+
+
+_ALL = ("kafka-orig", "tm-orig", "kafka", "raft", "tendermint", "bft2")
+
+
+@pytest.mark.parametrize("backend", _ALL)
+def test_publish_ports_off_is_unchanged(backend):
+    kw = dict(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
+    c = gen(**kw)
+    assert c == gen(publish_ports=False, **kw)
+    for name, s in c["services"].items():
+        assert "ports" not in s, name
+        assert "demo-events-addr" not in json.dumps(s.get("command")), name
+
+
+def test_publish_ports_core_backend():
+    c = gen(backend="bft2", n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m", publish_ports=True)
+    assert c["services"]["node3"]["ports"] == ["127.0.0.1:19903:1990", "127.0.0.1:19803:7300"]
+    assert c["services"]["node1"]["ports"] == ["127.0.0.1:19901:1990", "127.0.0.1:19801:7300"]
+    assert _veritas_line(c, "node3").endswith(" --demo-events-addr=:7300 &")
+    assert "ports" not in c["services"]["client"]
+
+
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint", "bft2"])
+def test_publish_ports_every_core_backend_gets_events_flag(backend):
+    c = gen(backend=backend, n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m", publish_ports=True)
+    for k in ("node1", "node2"):
+        assert "--demo-events-addr=:7300" in _veritas_line(c, k)
+
+
+def test_publish_ports_tso():
+    c = gen(backend="kafka", n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m", publish_ports=True)
+    assert c["services"]["tso"]["ports"] == ["127.0.0.1:19870:7070"]
+    assert "ports" not in c["services"]["kafka"]
+
+
+def test_publish_ports_orig_no_events_flag():
+    c = gen(backend="kafka-orig", n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="768m", publish_ports=True)
+    assert c["services"]["node2"]["ports"] == ["127.0.0.1:19902:1990", "127.0.0.1:19802:7300"]
+    assert "demo-events-addr" not in json.dumps(c["services"]["node2"]["command"])
+
+
+def test_cli_publish_ports(tmp_path):
+    out = tmp_path / "compose.json"
+    assert main(["--backend", "raft", "--n", "2", "--publish-ports", "--out", str(out)]) == 0
+    c = json.loads(out.read_text())
+    assert c["services"]["node2"]["ports"] == ["127.0.0.1:19902:1990", "127.0.0.1:19802:7300"]
