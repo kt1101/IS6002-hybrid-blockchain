@@ -27,6 +27,13 @@
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/experiments/lib.sh"
 . "$HBDB_ROOT/experiments/faults.sh"
+# Faults act now and are not logged: an inherited environment must not delay,
+# abort or log them (faults.sh reads these globals).
+FAULT_T0_MS=""
+FAULT_STOP=""
+FAULT_PARENT_PID=""
+FAULT_LOG=""
+FAULT_STOPPED=""
 
 usage() {
   echo "usage: HBDB_BACKEND=<backend> $HBDB_SCRIPT <crash|silent|slow|corrupt|heal> <nodeX>" >&2

@@ -180,7 +180,11 @@ func (d *Docker) waitAnyNode(ctx context.Context) error {
 			}
 		}(n)
 	}
-	defer wg.Wait()
+	// Stop the pollers of unreachable nodes as soon as we return.
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
 	select {
 	case <-found:
 		return nil

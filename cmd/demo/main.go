@@ -53,7 +53,7 @@ func main() {
 	var o options
 	flag.StringVar(&o.mode, "mode", "sim", "cluster mode: sim (in-process) or docker")
 	flag.StringVar(&o.listen, "listen", "127.0.0.1:8080", "address of the demo's web server")
-	flag.IntVar(&o.n, "n", 4, "number of nodes (sim mode)")
+	flag.IntVar(&o.n, "n", 4, "number of nodes (sim: started; docker: the running cluster's size)")
 	flag.IntVar(&o.slowMs, "slow-ms", 200, "extra delay of the slow fault in milliseconds (sim mode)")
 	flag.StringVar(&o.backend, "backend", "", "docker mode: consensus backend of the cluster ("+strings.Join(dockerBackends, ", ")+")")
 	flag.IntVar(&o.grpcBase, "grpc-base", 19900, "docker mode: node i serves gRPC on 127.0.0.1:(grpc-base+i)")

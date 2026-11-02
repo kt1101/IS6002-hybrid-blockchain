@@ -408,3 +408,40 @@ func TestDockerDefaults(t *testing.T) {
 		t.Errorf("kafka ArmedSilent = %v", k.ArmedSilent)
 	}
 }
+
+func TestDockerConnectDoesNotWaitForDeadNodes(t *testing.T) {
+	nodes := startDockerTestNodes(t, 1)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := lis.Addr().String()
+	lis.Close()
+
+	const connectTimeout = 5 * time.Second
+	start := time.Now()
+	d, err := NewDocker(context.Background(), DockerConfig{
+		Backend: "bft2",
+		N:       2,
+		GRPCAddr: func(i int) string {
+			if i == 1 {
+				return nodes[0].grpcAddr
+			}
+			return dead
+		},
+		EventsURL: func(i int) string {
+			if i == 1 {
+				return nodes[0].obs.URL
+			}
+			return "http://" + dead
+		},
+		ConnectTimeout: connectTimeout,
+	})
+	if err != nil {
+		t.Fatalf("NewDocker with one dead node: %v", err)
+	}
+	defer d.Close()
+	if el := time.Since(start); el > connectTimeout/2 {
+		t.Fatalf("NewDocker took %v with one healthy node, want well under %v", el, connectTimeout)
+	}
+}
