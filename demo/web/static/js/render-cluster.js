@@ -259,12 +259,17 @@
   function load(state, busy) {
     var btn = d.byId('load-btn');
     var running = !!(state && state.running);
-    btn.textContent = running ? 'Stop load · ' + state.remaining_s + ' s left' : 'Start load';
+    var preloading = running && state.phase === 'preloading';
+    btn.textContent = preloading ? 'Stop load · preloading' : running ? 'Stop load · ' + state.remaining_s + ' s left' : 'Start load';
     btn.className = 'btn' + (running ? '' : ' primary');
     btn.disabled = !!busy;
     btn.setAttribute('data-running', String(running));
+    btn.setAttribute('data-phase', running ? state.phase || 'running' : '');
     var res = d.byId('load-result');
-    if (running) {
+    if (preloading) {
+      res.className = 'result';
+      res.textContent = 'Preloading 1,000 keys… (not measured; the ' + state.clients + ' clients start next)';
+    } else if (running) {
       res.className = 'result';
       res.textContent = 'Running: ' + state.clients + ' clients · ' + (WORKLOAD[state.workload] || state.workload);
     } else if (!res.classList.contains('error')) {

@@ -352,7 +352,10 @@ func TestLoadConflict(t *testing.T) {
 	}
 	eventually(t, 3*time.Second, "load state running", func() bool {
 		l := e.snapshot(t).Load
-		return l.Running && l.Clients == 2 && l.Workload == "a" && l.RemainingS > 0
+		return l.Running && (l.Phase == "preloading" || l.Phase == "running") && l.Clients == 2 && l.Workload == "a" && l.RemainingS > 0
+	})
+	eventually(t, 10*time.Second, "load phase running after the preload", func() bool {
+		return e.snapshot(t).Load.Phase == "running"
 	})
 	status, out = e.call(t, "POST", "/api/load", body)
 	if status != 409 || out["error"] == "" {
@@ -364,7 +367,7 @@ func TestLoadConflict(t *testing.T) {
 	if e.runner.Running() {
 		t.Fatal("runner still running after DELETE")
 	}
-	if l := e.snapshot(t).Load; l.Running {
+	if l := e.snapshot(t).Load; l.Running || l.Phase != "" {
 		t.Fatalf("hub load state still running: %+v", l)
 	}
 	// Stopping when idle is fine too.

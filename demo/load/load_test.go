@@ -67,12 +67,12 @@ func TestLoadRunsAndStops(t *testing.T) {
 	var cnt counter
 	r := NewRunner(newSim(t), cnt.rec)
 	var calls, endCalls int32
-	err := r.Start(Config{Clients: 8, Workload: "a", Duration: 5 * time.Second, Keys: 20}, func(running bool, rem time.Duration) {
+	err := r.Start(Config{Clients: 8, Workload: "a", Duration: 5 * time.Second, Keys: 20}, func(st State) {
 		atomic.AddInt32(&calls, 1)
-		if !running {
+		if !st.Running {
 			atomic.AddInt32(&endCalls, 1)
-			if rem != 0 {
-				t.Errorf("remaining on end = %v, want 0", rem)
+			if st.Remaining != 0 || st.Phase != "" {
+				t.Errorf("end state %+v, want no phase and 0 remaining", st)
 			}
 		}
 	})
@@ -210,13 +210,61 @@ func TestPreloadOncePerGeneration(t *testing.T) {
 	}
 }
 
+// phases records the distinct phases onState reports, in order.
+type phases struct {
+	mu  sync.Mutex
+	seq []string
+}
+
+func (p *phases) cb(st State) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n := len(p.seq); n == 0 || p.seq[n-1] != st.Phase {
+		p.seq = append(p.seq, st.Phase)
+	}
+}
+
+func (p *phases) get() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.seq...)
+}
+
+func TestStatePhases(t *testing.T) {
+	r := NewRunner(newSim(t), func(time.Duration, error) {})
+	cfg := Config{Clients: 2, Workload: "a", Duration: 5 * time.Second, Keys: 50}
+	run := func(wantSeq string) {
+		t.Helper()
+		var p phases
+		if err := r.Start(cfg, p.cb); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if seq := p.get(); len(seq) > 0 && seq[len(seq)-1] == PhaseRunning {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("never reached phase running: %q", p.get())
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		r.Stop()
+		if got := strings.Join(p.get(), ","); got != wantSeq {
+			t.Fatalf("phases %q, want %q", got, wantSeq)
+		}
+	}
+	run("preloading,running,")
+	run("running,") // already preloaded: no preloading phase
+}
+
 func TestStateCallbacksStayOrderedAcrossRuns(t *testing.T) {
 	r := NewRunner(newSim(t), func(time.Duration, error) {})
 	cfg := Config{Clients: 1, Workload: "c", Duration: 5 * time.Second, Keys: 3}
 	var overlapped, ends int32
 	var inEnd int32 // 1 while an end-of-run callback is executing
-	cb := func(running bool, _ time.Duration) {
-		if running {
+	cb := func(st State) {
+		if st.Running {
 			if atomic.LoadInt32(&inEnd) == 1 {
 				atomic.StoreInt32(&overlapped, 1)
 			}

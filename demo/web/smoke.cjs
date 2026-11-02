@@ -93,6 +93,8 @@ async function main() {
     // Step 2: 64 clients of YCSB-A for 60 s.
     await step(page, 2);
     await page.waitForSelector('#load-btn[data-running="true"]', { timeout: 20000 });
+    // The 1,000-key preload comes first, then the measured clients.
+    await page.waitForSelector('#load-btn[data-phase="running"]', { timeout: 20000 });
     // More than the single Set of step 1: the load is committing.
     await page.waitForFunction(() => Number(document.getElementById('tps').textContent.replace(/,/g, '')) > 5, null, { timeout: 20000 });
     console.log('ok   step 2: TPS = ' + await page.textContent('#tps'));

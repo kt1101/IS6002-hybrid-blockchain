@@ -51,6 +51,7 @@ type LogLine struct {
 // LoadState describes the load generator, as reported to the hub.
 type LoadState struct {
 	Running    bool   `json:"running"`
+	Phase      string `json:"phase"` // "preloading" or "running" while running; "" otherwise
 	Clients    int    `json:"clients"`
 	Workload   string `json:"workload"`
 	RemainingS int    `json:"remaining_s"`

@@ -31,11 +31,24 @@ const (
 	setTimeout = 10 * time.Second
 	getTimeout = 3 * time.Second
 
-	preloadWriters = 16
+	preloadWriters = 128
 	tickEvery      = time.Second
 	upRefreshEvery = 250 * time.Millisecond
 	failBackoff    = time.Millisecond
 )
+
+// Phases of a running load run.
+const (
+	PhasePreloading = "preloading" // writing the key space, unrecorded
+	PhaseRunning    = "running"    // the measured closed loop
+)
+
+// State is what a run reports to its onState callback.
+type State struct {
+	Running   bool
+	Phase     string        // PhasePreloading or PhaseRunning while running; "" once ended
+	Remaining time.Duration // run time left; the full duration while preloading; 0 once ended
+}
 
 // Config describes one load run.
 type Config struct {
@@ -126,16 +139,18 @@ func (r *Runner) Stop() {
 
 // Start begins a run in the background: it preloads the keys if this
 // cluster generation has not been preloaded yet (unrecorded), then runs the
-// closed loop for cfg.Duration. onState (may be nil) is called with
-// (true, remaining) about once a second while running and (false, 0) exactly
-// once when the run ends, by duration or Stop.
-func (r *Runner) Start(cfg Config, onState func(running bool, remaining time.Duration)) error {
+// closed loop for cfg.Duration. onState (may be nil) is called with a
+// running State in PhasePreloading when the preload starts, in PhaseRunning
+// when the loop starts and then about once a second, and with the zero State
+// exactly once when the run ends, by duration or Stop. onState must not block
+// for long and must not call Stop (Stop waits for the goroutine calling it).
+func (r *Runner) Start(cfg Config, onState func(State)) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
 	cfg = cfg.withDefaults()
 	if onState == nil {
-		onState = func(bool, time.Duration) {}
+		onState = func(State) {}
 	}
 
 	r.mu.Lock()
@@ -153,8 +168,8 @@ func (r *Runner) Start(cfg Config, onState func(running bool, remaining time.Dur
 	return nil
 }
 
-func (r *Runner) run(ctx context.Context, cancel context.CancelFunc, prev, done chan struct{}, cfg Config, needPreload bool, onState func(bool, time.Duration)) {
-	// The previous run may still be delivering its (false, 0); wait so that
+func (r *Runner) run(ctx context.Context, cancel context.CancelFunc, prev, done chan struct{}, cfg Config, needPreload bool, onState func(State)) {
+	// The previous run may still be delivering its end State; wait so that
 	// state callbacks never arrive out of order.
 	if prev != nil {
 		<-prev
@@ -164,19 +179,22 @@ func (r *Runner) run(ctx context.Context, cancel context.CancelFunc, prev, done 
 		r.mu.Lock()
 		r.running, r.cancel = false, nil
 		r.mu.Unlock()
-		onState(false, 0)
+		onState(State{})
 		close(done)
 	}()
 
-	onState(true, cfg.Duration)
-	if needPreload && r.preload(ctx, cfg) {
-		r.mu.Lock()
-		r.preloaded = true
-		r.mu.Unlock()
+	if needPreload {
+		onState(State{Running: true, Phase: PhasePreloading, Remaining: cfg.Duration})
+		if r.preload(ctx, cfg) {
+			r.mu.Lock()
+			r.preloaded = true
+			r.mu.Unlock()
+		}
 	}
 	if ctx.Err() != nil {
 		return
 	}
+	onState(State{Running: true, Phase: PhaseRunning, Remaining: cfg.Duration})
 
 	end := time.Now().Add(cfg.Duration)
 	tctx, tcancel := context.WithDeadline(ctx, end)
@@ -207,7 +225,7 @@ loop:
 			break loop
 		case <-tick.C:
 			if rem := time.Until(end); rem > 0 {
-				onState(true, rem)
+				onState(State{Running: true, Phase: PhaseRunning, Remaining: rem})
 			}
 		}
 	}

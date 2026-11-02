@@ -240,12 +240,9 @@ func (s *server) startLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	// onState must not call runner.Stop: Stop waits for the run, which is
 	// the goroutine delivering this callback.
-	onState := func(running bool, remaining time.Duration) {
-		remS := 0
-		if running {
-			remS = int((remaining + time.Second - 1) / time.Second)
-		}
-		s.hub.SetLoad(hub.LoadState{Running: running, Clients: cfg.Clients, Workload: cfg.Workload, RemainingS: remS})
+	onState := func(st load.State) {
+		remS := int((st.Remaining + time.Second - 1) / time.Second)
+		s.hub.SetLoad(hub.LoadState{Running: st.Running, Phase: st.Phase, Clients: cfg.Clients, Workload: cfg.Workload, RemainingS: remS})
 	}
 	if err := s.runner.Start(cfg, onState); err != nil {
 		if errors.Is(err, load.ErrRunning) {

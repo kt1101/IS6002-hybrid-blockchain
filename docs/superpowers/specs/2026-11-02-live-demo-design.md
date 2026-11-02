@@ -134,7 +134,7 @@ type Cluster interface {
 
 ### 2.5 `demo/load`
 
-Closed loop với C client (1–256), workload YCSB A (50% đọc, 50% ghi), B (95/5) hoặc C (100% đọc), trên keyspace 1.000 key `ycsb0..ycsb999` (tiền tố riêng để tải không ghi đè khoá kịch bản `user42`), giá trị 100 byte, phân bố uniform. Client i gửi tới node `(i mod N)+1` như harness. Pha nạp ban đầu ghi 1.000 key (không đo). Dừng khi hết thời lượng hoặc khi `DELETE /api/load`.
+Closed loop với C client (1–256), workload YCSB A (50% đọc, 50% ghi), B (95/5) hoặc C (100% đọc), trên keyspace 1.000 key `ycsb0..ycsb999` (tiền tố riêng để tải không ghi đè khoá kịch bản `user42`), giá trị 100 byte, phân bố uniform. Client i gửi tới node `(i mod N)+1` như harness. Pha nạp ban đầu ghi 1.000 key (không đo) với 128 writer song song. Trạng thái tải báo cho hub có `phase`: `preloading` trong pha nạp (UI hiện "Preloading 1,000 keys…"), `running` khi C client bắt đầu chạy. Dừng khi hết thời lượng hoặc khi `DELETE /api/load`.
 
 ## 3. HTTP API (`demo/api`)
 
