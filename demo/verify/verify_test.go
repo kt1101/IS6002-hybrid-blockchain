@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,6 +116,77 @@ func TestVerifyCorruptReplica(t *testing.T) {
 	want := map[string]string{
 		"node1": "valid · majority", "node2": "valid · majority",
 		"node3": "valid · minority root", "node4": "valid · majority",
+	}
+	for n, w := range want {
+		if v[n] != w {
+			t.Errorf("%s verdict %q, want %q", n, v[n], w)
+		}
+	}
+}
+
+// staleCluster answers Prove for one node with a proof captured earlier (a
+// replica a block behind) on its first stale calls, then passes through.
+type staleCluster struct {
+	cluster.Cluster
+	node  string
+	proof cluster.Proof
+
+	mu    sync.Mutex
+	stale int // calls still to answer with the old proof
+}
+
+func (s *staleCluster) Prove(ctx context.Context, node, key string) (cluster.Proof, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if node == s.node && s.stale > 0 {
+		s.stale--
+		return s.proof, nil
+	}
+	return s.Cluster.Prove(ctx, node, key)
+}
+
+// newStale sets user42 everywhere, captures node4's proof, then commits
+// another block so that proof's root is one block old.
+func newStale(t *testing.T, stale int) *staleCluster {
+	t.Helper()
+	c := newSim(t)
+	setAndWait(t, c, "user42", "alice", "node1", "node2", "node3", "node4")
+	old, err := c.Prove(context.Background(), "node4", "user42")
+	if err != nil {
+		t.Fatalf("Prove: %v", err)
+	}
+	setAndWait(t, c, "user43", "bob", "node1", "node2", "node3", "node4")
+	return &staleCluster{Cluster: c, node: "node4", proof: old, stale: stale}
+}
+
+func TestVerifyLagThenCatchUp(t *testing.T) {
+	c := newStale(t, 2) // stale in the first two rounds only
+
+	r, err := Run(context.Background(), c, "node1", "user42")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for n, v := range verdicts(r) {
+		if v != "valid · majority" {
+			t.Errorf("%s verdict %q, want valid · majority after re-sampling", n, v)
+		}
+	}
+}
+
+func TestVerifyLagging(t *testing.T) {
+	c := newStale(t, 1000) // never catches up
+
+	r, err := Run(context.Background(), c, "node4", "user42")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !r.Valid || r.Root != hex.EncodeToString(c.proof.Root) {
+		t.Fatalf("Valid=%v Root=%s, want node4's own stale root to verify", r.Valid, r.Root)
+	}
+	v := verdicts(r)
+	want := map[string]string{
+		"node1": "valid · majority", "node2": "valid · majority",
+		"node3": "valid · majority", "node4": "valid · lagging",
 	}
 	for n, w := range want {
 		if v[n] != w {

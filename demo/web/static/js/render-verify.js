@@ -60,13 +60,17 @@
       return;
     }
     var mine = askedReplica(res);
-    var minority = mine && mine.verdict !== 'valid · majority';
+    var minority = mine && mine.verdict === 'valid · minority root';
+    var lagging = mine && mine.verdict === 'valid · lagging';
     var body = [res.key + ' = ', b(d.clip(res.value, VALUE_SHOWN)), ' (version ' + res.version + ') is included in root ', b(d.digest(res.root)),
       ', recomputed from the leaf through ' + siblings + ' sibling hash' + (siblings === 1 ? '' : 'es') +
       '; the other ' + (TREE_DEPTH - siblings) + ' levels are empty subtrees.'];
     if (minority) {
       body.push(' But this root is not the majority root: ' + res.node + ' disagrees with the other replicas.');
       verdictBox('invalid', 'Proof valid · root not majority', body);
+    } else if (lagging) {
+      body.push(' ' + res.node + ' holds the same value as the majority but its root is older: it has not applied the latest blocks yet.');
+      verdictBox('valid', 'Proof valid · replica lagging', body);
     } else {
       verdictBox('valid', 'Proof valid', body);
     }
@@ -74,7 +78,7 @@
 
   function verdictClass(v) {
     if (v === 'valid · majority') { return 'v-majority'; }
-    if (v === 'unreachable' || v === 'not found') { return 'v-none'; }
+    if (v === 'unreachable' || v === 'not found' || v === 'valid · lagging') { return 'v-none'; }
     return 'v-bad';
   }
 
@@ -89,11 +93,16 @@
       ]);
     }));
     var minority = replicas.filter(function (r) { return r.verdict === 'valid · minority root'; }).map(function (r) { return r.node; });
+    var lagging = replicas.filter(function (r) { return r.verdict === 'valid · lagging'; }).map(function (r) { return r.node; });
     var invalid = replicas.filter(function (r) { return r.verdict === 'invalid'; }).map(function (r) { return r.node; });
     var notes = [];
     if (minority.length) {
       notes.push(d.list(minority) + (minority.length === 1 ? ' is' : ' are') +
         ' self-consistent (the proof checks against its own root) but the root differs from the majority — this is how a client spots a lying replica.');
+    }
+    if (lagging.length) {
+      notes.push(d.list(lagging) + (lagging.length === 1 ? ' holds' : ' hold') +
+        ' the majority value with a valid proof but an older root: still applying the latest blocks, not lying.');
     }
     if (invalid.length) {
       notes.push(d.list(invalid) + ' returned a proof that does not match its own root.');

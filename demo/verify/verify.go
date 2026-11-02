@@ -10,6 +10,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strconv"
+	"sync"
+	"time"
 
 	"hybrid/demo/cluster"
 	"hybrid/veritas/ledger/merkletree"
@@ -18,9 +20,17 @@ import (
 // treeDepth is the number of levels of the sparse Merkle tree (bits of sha256).
 const treeDepth = 256
 
+// Re-sampling: while replicas disagree on the root, ask them all again, up to
+// sampleRounds times in all, sampleGap apart.
+const (
+	sampleRounds = 5
+	sampleGap    = 100 * time.Millisecond
+)
+
 // Replica verdicts.
 const (
 	VerdictMajority    = "valid · majority"
+	VerdictLagging     = "valid · lagging"
 	VerdictMinority    = "valid · minority root"
 	VerdictInvalid     = "invalid"
 	VerdictUnreachable = "unreachable"
@@ -74,24 +84,39 @@ type answer struct {
 // Run verifies key on node and compares it with every replica. It returns an
 // error (wrapping cluster.ErrNodeDown when the node is down) if node itself
 // cannot answer; other replicas failing only shows up in their verdicts.
+//
+// All replicas are asked at once, and asked again (up to sampleRounds rounds,
+// sampleGap apart) while one of them reports a root other than the majority
+// root: under load, replicas a block apart differ for a moment. A replica that
+// still differs after the last round is "valid · lagging" if it holds the
+// majority value and "valid · minority root" if not.
 func Run(ctx context.Context, c cluster.Cluster, node, key string) (Result, error) {
-	var answers []answer
+	nodes := c.Nodes()
 	askedIdx := -1
-	for _, n := range c.Nodes() {
+	for i, n := range nodes {
 		if n.Name == node {
-			askedIdx = len(answers)
+			askedIdx = i
 		}
-		answers = append(answers, ask(ctx, c, n.Name, key))
 	}
 	if askedIdx < 0 {
 		return Result{}, fmt.Errorf("verify: unknown node %q", node)
 	}
-	asked := &answers[askedIdx]
-	if asked.err != nil {
-		return Result{}, fmt.Errorf("verify %s on %s: %w", key, node, asked.err)
-	}
 
-	maj := majorityRoot(answers)
+	var answers []answer
+	var maj []byte
+	for round := 1; ; round++ {
+		answers = askAll(ctx, c, nodes, key)
+		if err := answers[askedIdx].err; err != nil {
+			return Result{}, fmt.Errorf("verify %s on %s: %w", key, node, err)
+		}
+		maj = majorityRoot(answers)
+		if round == sampleRounds || settled(answers, maj) || !wait(ctx, sampleGap) {
+			break
+		}
+	}
+	asked := &answers[askedIdx]
+
+	majValue, hasMajValue := majorityValue(answers)
 	res := Result{
 		Valid:    asked.found && asked.valid,
 		Found:    asked.found,
@@ -110,9 +135,50 @@ func Run(ctx context.Context, c cluster.Cluster, node, key string) (Result, erro
 		}
 	}
 	for _, a := range answers {
-		res.Replicas = append(res.Replicas, replicaOf(a, maj))
+		lagging := hasMajValue && a.found && a.kv.Value == majValue
+		res.Replicas = append(res.Replicas, replicaOf(a, maj, lagging))
 	}
 	return res, nil
+}
+
+// askAll asks every node in parallel; answers are in the order of nodes.
+func askAll(ctx context.Context, c cluster.Cluster, nodes []cluster.NodeInfo, key string) []answer {
+	answers := make([]answer, len(nodes))
+	var wg sync.WaitGroup
+	for i, n := range nodes {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			answers[i] = ask(ctx, c, name, key)
+		}(i, n.Name)
+	}
+	wg.Wait()
+	return answers
+}
+
+// settled reports whether every node that answered reports the majority root.
+func settled(answers []answer, majority []byte) bool {
+	if majority == nil {
+		return false
+	}
+	for _, a := range answers {
+		if a.err == nil && !bytes.Equal(a.proof.Root, majority) {
+			return false
+		}
+	}
+	return true
+}
+
+// wait sleeps for d; it returns false if ctx ends first.
+func wait(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // ask fetches and verifies key on one node.
@@ -163,7 +229,31 @@ func majorityRoot(answers []answer) []byte {
 	return nil
 }
 
-func replicaOf(a answer, majority []byte) Replica {
+// majorityValue returns the value held, with a valid proof, by more than
+// half of the nodes that answered.
+func majorityValue(answers []answer) (string, bool) {
+	counts := map[string]int{}
+	answered := 0
+	for _, a := range answers {
+		if a.err != nil {
+			continue
+		}
+		answered++
+		if a.found && a.valid {
+			counts[a.kv.Value]++
+		}
+	}
+	for v, n := range counts {
+		if 2*n > answered {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// replicaOf labels one answer. lagging: the replica holds the majority value,
+// so a root other than the majority root means it is behind, not lying.
+func replicaOf(a answer, majority []byte, lagging bool) Replica {
 	r := Replica{Node: a.node}
 	switch {
 	case a.err != nil:
@@ -181,6 +271,8 @@ func replicaOf(a answer, majority []byte) Replica {
 		r.Verdict = VerdictInvalid
 	case bytes.Equal(a.proof.Root, majority):
 		r.Verdict = VerdictMajority
+	case lagging:
+		r.Verdict = VerdictLagging
 	default:
 		r.Verdict = VerdictMinority
 	}

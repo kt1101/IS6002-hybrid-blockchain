@@ -160,7 +160,7 @@ Lỗi trả `{error}` với mã 4xx/5xx. Tham số được validate (node phả
 1. `Get(node,key)` → `value, version`; `Prove(node,key)` → `root, side nodes`.
 2. Gọi `merkletree.VerifyProofSteps(proof, root, key, []byte(value+"-"+version), sha256.New())` (hàm mới, mục 4.3), nhận `ok` và các hash trung gian.
 3. Dựng `steps` từ lá lên root. `sibling_side` suy từ bit của `sha256(key)` tại level đó. Level không có side node, tức subtree rỗng, được gộp thành một dòng `empty: true` kèm số level.
-4. `replicas`: làm bước 1–2 trên mọi node `up`. `verdict` nhận một trong các giá trị `valid · majority`, `valid · minority root`, `invalid`, `unreachable`.
+4. `replicas`: làm bước 1–2 trên mọi node, hỏi song song. Khi có replica báo root khác root đa số (dưới tải, các replica lệch nhau một block trong chốc lát), hỏi lại toàn bộ, tối đa 5 lượt cách nhau ~100 ms. `verdict` nhận một trong các giá trị `valid · majority`, `valid · lagging` (proof hợp lệ, cùng value với đa số nhưng root vẫn khác sau các lượt hỏi lại: replica đang chậm, không phải gian lận), `valid · minority root` (proof hợp lệ nhưng value và root khác đa số), `invalid`, `unreachable`, `not found`.
 
 ## 4. Thay đổi trong code hiện có (mặc định tắt)
 
