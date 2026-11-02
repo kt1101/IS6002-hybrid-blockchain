@@ -84,6 +84,21 @@ type ServerConfig struct {
 
 	FlushInterval time.Duration // <= 0 means DefaultFlushInterval (1 s)
 	SyncTimeout   time.Duration // <= 0 means DefaultSyncTimeout
+
+	// OnApplied, if non-nil, is called synchronously from the apply loop
+	// after every successfully applied block (empty blocks included) and
+	// before the block's waiters are resolved. It MUST NOT block. nil = off.
+	OnApplied func(AppliedEvent)
+}
+
+// AppliedEvent describes one block applied by a Server; see
+// ServerConfig.OnApplied.
+type AppliedEvent struct {
+	Height   int64
+	Proposer string // blk.GetSignature()
+	Txs      int    // number of SetRequests in the block (sum over SharedLogs)
+	Aborted  int    // number of aborted SharedLogs
+	Root     []byte // copy of ex.RootDigest() after Apply
 }
 
 // Server is the shared Veritas node core: it batches client Sets into
@@ -479,11 +494,29 @@ func (s *Server) applyLoop() {
 			continue
 		}
 		s.metrics.applied(time.Since(start)-ledgerTime, ledgerTime)
+		if s.cfg.OnApplied != nil {
+			s.notifyApplied(height, &blk, aborted)
+		}
 		if own && s.cfg.Commit == CommitSync {
 			s.resolveBlock(&blk, aborted)
 		}
 	}
 	s.stop(errors.New("consensus delivery channel closed"))
+}
+
+// notifyApplied reports an applied block to cfg.OnApplied.
+func (s *Server) notifyApplied(height int64, blk *pbv.Block, aborted []int64) {
+	txs := 0
+	for _, sl := range blk.GetTxs() {
+		txs += len(sl.GetSets())
+	}
+	s.cfg.OnApplied(AppliedEvent{
+		Height:   height,
+		Proposer: blk.GetSignature(),
+		Txs:      txs,
+		Aborted:  len(aborted),
+		Root:     s.ex.RootDigest(),
+	})
 }
 
 // resolveBlock wakes the waiters of an applied own block. Waking a seq with
