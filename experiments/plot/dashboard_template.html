@@ -775,7 +775,7 @@ td .key { display: inline-flex; align-items: center; gap: 6px; }
       charts: [4, 7].map((n) => ({ type: 'bar', metric: 'tps', twoLineX: true, xName: 'fault',
         title: 'E6 · Throughput by fault scenario, N=' + n,
         subtitle: 'E6 · N=' + n + ' · ' + fixedParams('e6', ['n']) + ' · whiskers: ± sample std',
-        note: '"none (E2)" is the no-fault reference: E2 at the same N and client count. A node list in brackets marks scenarios that a backend ran on different nodes (node1 is the Kafka/Raft leader).',
+        note: '"none (E2)" is the no-fault reference: E2 at the same N and client count. A node list in brackets marks scenarios that a backend ran on different nodes (node1 is the Raft bootstrap node; Kafka has no leader among the replicas).',
         groups: () => faultGroups(n) })).concat([{ type: 'rq3' }]) },
   ];
 
