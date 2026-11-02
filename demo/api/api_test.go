@@ -526,6 +526,18 @@ func TestResetSim(t *testing.T) {
 	if err := json.Unmarshal(raw, &res); err != nil || res.Found {
 		t.Fatalf("alice survived the reset: %+v (%v)", res, err)
 	}
+	var notFound, invalid bool
+	for _, l := range e.snapshot(t).Log {
+		if l.Level == "info" && l.Text == "Verify alice on node1: key not found" {
+			notFound = true
+		}
+		if strings.Contains(l.Text, "proof invalid") {
+			invalid = true
+		}
+	}
+	if !notFound || invalid {
+		t.Fatalf("log for a missing key: notFound=%v invalid=%v: %+v", notFound, invalid, e.snapshot(t).Log)
+	}
 	e.mustSet(t, "node2", "bob", "1")
 }
 

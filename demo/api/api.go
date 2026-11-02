@@ -291,9 +291,12 @@ func (s *server) verify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.SetTrackedKey(req.Key)
-	if res.Valid {
+	switch {
+	case !res.Found:
+		s.hub.Logf("info", "Verify %s on %s: key not found", req.Key, req.Node)
+	case res.Valid:
 		s.hub.Logf("ok", "Verify %s on %s: proof valid", req.Key, req.Node)
-	} else {
+	default:
 		s.hub.Logf("warn", "Verify %s on %s: proof invalid", req.Key, req.Node)
 	}
 	writeJSON(w, http.StatusOK, res)
