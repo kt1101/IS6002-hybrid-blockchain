@@ -1,0 +1,15 @@
+# Cloud-session base layer: BASE plus the session's TLS-intercepting proxy CA
+# (ccr-proxy.crt, copied in by experiments/cloud/build.sh, not committed) and,
+# for Ubuntu bases, apt sources over HTTPS (the egress proxy serves only
+# HTTPS/CONNECT). Used through `--build-context <image>=docker-image://...` so
+# the experiment Dockerfiles in experiments/docker/ stay unchanged.
+ARG BASE
+FROM ${BASE}
+COPY ccr-proxy.crt /usr/local/share/ca-certificates/ccr-proxy.crt
+RUN set -e; mkdir -p /etc/ssl/certs; \
+    cat /usr/local/share/ca-certificates/ccr-proxy.crt >> /etc/ssl/certs/ca-certificates.crt; \
+    if command -v update-ca-certificates >/dev/null; then update-ca-certificates >/dev/null 2>&1 || true; fi; \
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do \
+      [ -f "$f" ] && sed -i 's#http://\(archive\|security\|ports\)\.ubuntu\.com#https://\1.ubuntu.com#g' "$f" || true; \
+    done
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
