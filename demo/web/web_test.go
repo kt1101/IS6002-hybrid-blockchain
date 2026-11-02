@@ -58,3 +58,16 @@ func TestIndexAssetsExist(t *testing.T) {
 		}
 	}
 }
+
+func TestOverviewServed(t *testing.T) {
+	res, body := get(t, Handler(), "/overview")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("GET /overview = %d, want 200", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("GET /overview Content-Type = %q, want text/html", ct)
+	}
+	if !strings.Contains(body, "Results overview") {
+		t.Errorf("GET /overview body does not contain %q", "Results overview")
+	}
+}
