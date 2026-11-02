@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veritas Live Demo</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div class="page">
+
+<header class="top">
+  <div class="brand">
+    <h1>Veritas Live Demo</h1>
+    <span class="subtitle">Hybrid blockchain database · pluggable consensus</span>
+  </div>
+  <nav class="pages" aria-label="Pages">
+    <a href="/" aria-current="page">Live demo</a>
+    <a href="/overview">Results overview</a>
+  </nav>
+  <div class="status-row">
+    <div class="mode-switch" role="group" aria-label="Cluster mode (chosen at startup)">
+      <button type="button" id="mode-sim" disabled title="The mode is chosen at startup with --mode">Simulated</button>
+      <button type="button" id="mode-docker" disabled title="The mode is chosen at startup with --mode">Docker cluster</button>
+    </div>
+    <span class="cluster-tag" id="cluster-tag">connecting…</span>
+    <span class="conn" id="conn" role="status">
+      <svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="6"></circle></svg>
+      <span id="conn-text">Connecting…</span>
+    </span>
+  </div>
+</header>
+
+<nav class="scenario" id="scenario" aria-label="Demo scenario">
+  <button type="button" class="step" data-step="1"><span class="num">1</span>Write a transaction</button>
+  <button type="button" class="step" data-step="2"><span class="num">2</span>Replicate &amp; commit</button>
+  <button type="button" class="step" data-step="3"><span class="num">3</span>Verify a proof</button>
+  <button type="button" class="step" data-step="4"><span class="num">4</span>Inject a fault</button>
+  <button type="button" class="step" data-step="5"><span class="num">5</span>Detect &amp; recover</button>
+</nav>
+<p class="notice" id="notice" role="status" hidden></p>
+
+<!-- Live cluster view -->
+<div class="view live" id="view-live">
+
+  <aside class="col-left">
+    <section class="card">
+      <h2>New transaction</h2>
+      <form id="tx-form" class="stack">
+        <label>Key<input id="tx-key" class="mono" value="user42" maxlength="128" required autocomplete="off" spellcheck="false"></label>
+        <label>Value<input id="tx-value" class="mono" value="hello-committee" maxlength="4096" autocomplete="off" spellcheck="false"></label>
+        <label>Send to<select id="tx-node"></select></label>
+        <button type="submit" class="btn primary" id="tx-submit">Submit Set</button>
+        <p class="result mono" id="tx-result" role="status"></p>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Load generator</h2>
+      <div class="stack">
+        <label><span>Clients: <span id="load-clients-value">64</span></span>
+          <input type="range" id="load-clients" min="1" max="256" value="64"></label>
+        <div class="row2">
+          <label>Workload<select id="load-workload">
+            <option value="a">YCSB-A (50/50)</option>
+            <option value="b">YCSB-B (95/5)</option>
+            <option value="c">YCSB-C (read only)</option>
+          </select></label>
+          <label>Duration<select id="load-duration">
+            <option value="30">30 s</option>
+            <option value="60" selected>60 s</option>
+            <option value="120">120 s</option>
+            <option value="300">300 s</option>
+          </select></label>
+        </div>
+        <button type="button" class="btn primary" id="load-btn">Start load</button>
+        <p class="result" id="load-result" role="status"></p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Fault injection</h2>
+      <div class="stack">
+        <label>Target node<select id="fault-node"></select></label>
+        <div class="fault-grid" id="fault-grid">
+          <button type="button" class="fault" data-kind="crash" title="Stop the node: it neither orders nor serves">Crash<span>stop the node</span></button>
+          <button type="button" class="fault" data-kind="silent" title="Swallow the node's own blocks; it still receives others'">Silent<span>drop its own blocks</span></button>
+          <button type="button" class="fault" data-kind="slow" title="Extra delay on the node's messages">Slow<span>extra message delay</span></button>
+          <button type="button" class="fault danger" data-kind="corrupt" title="The node applies wrong values: its ledger root diverges">Corrupt state<span>wrong values applied</span></button>
+          <button type="button" class="fault" id="heal-btn" title="Clear a crash, silent or slow fault">Heal<span>bring the node back</span></button>
+          <button type="button" class="fault" id="reset-btn" hidden title="Restart every node with empty state">Reset cluster<span>start over, empty</span></button>
+        </div>
+        <p class="result" id="fault-result" role="status"></p>
+      </div>
+    </section>
+  </aside>
+
+  <main class="col-main">
+    <div class="banner unknown" id="banner" tabindex="-1" role="status" aria-live="polite">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path id="banner-icon" d="M12 7v5l3 2M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z"></path></svg>
+      <span class="banner-title" id="banner-title">WAITING</span>
+      <span class="banner-text" id="banner-text">Waiting for the replicas to report a block</span>
+    </div>
+
+    <section class="recover card" id="recover" hidden aria-label="Recover">
+      <h2>Recover</h2>
+      <p id="recover-text"></p>
+      <div class="recover-actions" id="recover-actions"></div>
+    </section>
+
+    <section class="replicas" id="replicas" aria-label="Replicas"></section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>Ordered blocks</h2>
+        <span class="muted" id="blocks-caption">newest right</span>
+      </div>
+      <div class="blocks" id="blocks"></div>
+    </section>
+  </main>
+
+  <aside class="col-side">
+    <section class="card">
+      <h2>Throughput</h2>
+      <div class="tps"><span class="tps-value" id="tps">0</span><span class="muted">tx/s</span></div>
+      <svg class="spark" id="spark" viewBox="0 0 300 90" preserveAspectRatio="none" role="img" aria-label="Throughput over the last 60 seconds"></svg>
+      <div class="spark-axis"><span>−60 s</span><span id="marker-label"></span><span>now</span></div>
+      <div class="stats">
+        <div><div class="stat-label">p50</div><div class="stat-value" id="p50">–</div></div>
+        <div><div class="stat-label">p99</div><div class="stat-value" id="p99">–</div></div>
+        <div><div class="stat-label">errors</div><div class="stat-value" id="errors">0</div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Event log</h2>
+      <ol class="log" id="log" aria-live="off"></ol>
+    </section>
+  </aside>
+</div>
+
+<!-- Merkle proof view (#verify) -->
+<div class="view verify" id="view-verify" hidden>
+  <div class="verify-head">
+    <button type="button" class="btn back" id="back-btn">← Back to cluster</button>
+    <h2 class="view-title">Verify a key against the ledger</h2>
+    <span class="muted">Sparse Merkle Tree proof · step 3 of 5</span>
+  </div>
+
+  <div class="verify-cols">
+    <section class="verify-left">
+      <form class="card stack" id="verify-form">
+        <label>Key<input id="verify-key" class="mono" value="user42" maxlength="128" required autocomplete="off" spellcheck="false"></label>
+        <label>Ask replica<select id="verify-node"></select></label>
+        <button type="submit" class="btn primary" id="verify-submit">Verify proof</button>
+      </form>
+
+      <div class="verdict idle" id="verdict" role="status">
+        <span class="verdict-title" id="verdict-title">No proof yet</span>
+        <span class="verdict-text" id="verdict-text">Choose a key and a replica, then press Verify proof.</span>
+      </div>
+
+      <section class="card">
+        <h2>Same key on every replica</h2>
+        <div class="table-wrap">
+          <table class="replica-table">
+            <thead><tr><th scope="col">Node</th><th scope="col">Value</th><th scope="col">Root</th><th scope="col">Proof</th></tr></thead>
+            <tbody id="replica-rows"></tbody>
+          </table>
+        </div>
+        <p class="muted note" id="replica-note"></p>
+      </section>
+    </section>
+
+    <section class="card proof" aria-label="Proof path from leaf to root">
+      <div class="card-head">
+        <h2>Proof path</h2>
+        <span class="muted">hash(left ‖ right) at each level · empty siblings collapsed</span>
+      </div>
+      <div id="proof-path" class="proof-path">
+        <p class="muted">The path from the leaf up to the root appears here after a verification.</p>
+      </div>
+    </section>
+  </div>
+</div>
+
+</div>
+<script src="js/api.js"></script>
+<script src="js/dom.js"></script>
+<script src="js/render-cluster.js"></script>
+<script src="js/render-verify.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
