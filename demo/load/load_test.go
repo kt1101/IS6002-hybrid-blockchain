@@ -151,25 +151,100 @@ func TestStartRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+// setCounter counts Sets reaching the cluster.
+type setCounter struct {
+	cluster.Cluster
+	sets int64
+}
+
+func (s *setCounter) Set(ctx context.Context, node, key, value string) error {
+	atomic.AddInt64(&s.sets, 1)
+	return s.Cluster.Set(ctx, node, key, value)
+}
+
+func (s *setCounter) Sets() int64 { return atomic.LoadInt64(&s.sets) }
+
 func TestPreloadOncePerGeneration(t *testing.T) {
-	sim := newSim(t)
-	r := NewRunner(sim, func(time.Duration, error) {})
-	cfg := Config{Clients: 1, Workload: "c", Duration: 5 * time.Second, Keys: 5}
-	if err := r.Start(cfg, nil); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(300 * time.Millisecond)
-	r.Stop()
-	for i := 0; i < cfg.Keys; i++ {
-		if _, ok, err := sim.Get(context.Background(), "node1", keyName(i)); err != nil || !ok {
-			t.Fatalf("key %d not preloaded (ok=%v err=%v)", i, ok, err)
+	const keys = 5
+	sc := &setCounter{Cluster: newSim(t)}
+	var cnt counter
+	r := NewRunner(sc, cnt.rec)
+	// Workload c never writes, so every Set seen is a preload write.
+	cfg := Config{Clients: 1, Workload: "c", Duration: 5 * time.Second, Keys: keys}
+
+	// run starts a run, waits until closed-loop ops are recorded (so the
+	// preload has finished or been skipped), then stops it.
+	run := func() {
+		t.Helper()
+		before := cnt.Ops()
+		if err := r.Start(cfg, nil); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for cnt.Ops() == before && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		r.Stop()
+		if cnt.Ops() == before {
+			t.Fatal("run recorded no ops")
 		}
 	}
-	if !r.preloaded {
-		t.Fatal("preloaded flag not set")
+
+	run()
+	if got := sc.Sets(); got != keys {
+		t.Fatalf("first run preload wrote %d keys, want %d", got, keys)
+	}
+	if cnt.Errs() != 0 {
+		t.Fatalf("%d errors", cnt.Errs())
+	}
+	run()
+	if got := sc.Sets(); got != keys {
+		t.Fatalf("second run wrote %d keys in total, want preload skipped (%d)", got, keys)
 	}
 	r.ResetPreload()
-	if r.preloaded {
-		t.Fatal("ResetPreload did not clear the flag")
+	run()
+	if got := sc.Sets(); got != 2*keys {
+		t.Fatalf("after ResetPreload wrote %d keys in total, want %d", got, 2*keys)
+	}
+}
+
+func TestStateCallbacksStayOrderedAcrossRuns(t *testing.T) {
+	r := NewRunner(newSim(t), func(time.Duration, error) {})
+	cfg := Config{Clients: 1, Workload: "c", Duration: 5 * time.Second, Keys: 3}
+	var overlapped, ends int32
+	var inEnd int32 // 1 while an end-of-run callback is executing
+	cb := func(running bool, _ time.Duration) {
+		if running {
+			if atomic.LoadInt32(&inEnd) == 1 {
+				atomic.StoreInt32(&overlapped, 1)
+			}
+			return
+		}
+		atomic.AddInt32(&ends, 1)
+		atomic.StoreInt32(&inEnd, 1)
+		time.Sleep(200 * time.Millisecond) // slow end-of-run handler
+		atomic.StoreInt32(&inEnd, 0)
+	}
+	if err := r.Start(cfg, cb); err != nil {
+		t.Fatal(err)
+	}
+	go r.Stop()
+	// Start again as soon as the first run reports itself not running, which
+	// can happen while its (false, 0) callback is still in progress.
+	var err error
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if err = r.Start(cfg, cb); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Stop()
+	if atomic.LoadInt32(&overlapped) == 1 {
+		t.Fatal("second run reported running before the first run's end callback returned")
+	}
+	if n := atomic.LoadInt32(&ends); n != 2 {
+		t.Fatalf("%d end callbacks, want 2", n)
 	}
 }

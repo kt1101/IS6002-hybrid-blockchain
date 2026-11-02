@@ -34,6 +34,7 @@ const (
 	preloadWriters = 16
 	tickEvery      = time.Second
 	upRefreshEvery = 250 * time.Millisecond
+	failBackoff    = time.Millisecond
 )
 
 // Config describes one load run.
@@ -86,7 +87,7 @@ type Runner struct {
 	running   bool
 	preloaded bool // keys are in the cluster; cleared by ResetPreload
 	cancel    context.CancelFunc
-	done      chan struct{} // closed when the current run has fully ended
+	done      chan struct{} // closed when the latest run has fully ended
 }
 
 // NewRunner returns a Runner that reports every operation to rec.
@@ -141,16 +142,21 @@ func (r *Runner) Start(cfg Config, onState func(running bool, remaining time.Dur
 		return ErrRunning
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
+	done, prev := make(chan struct{}), r.done
 	r.running, r.cancel, r.done = true, cancel, done
 	needPreload := !r.preloaded
 	r.mu.Unlock()
 
-	go r.run(ctx, cancel, done, cfg, needPreload, onState)
+	go r.run(ctx, cancel, prev, done, cfg, needPreload, onState)
 	return nil
 }
 
-func (r *Runner) run(ctx context.Context, cancel context.CancelFunc, done chan struct{}, cfg Config, needPreload bool, onState func(bool, time.Duration)) {
+func (r *Runner) run(ctx context.Context, cancel context.CancelFunc, prev, done chan struct{}, cfg Config, needPreload bool, onState func(bool, time.Duration)) {
+	// The previous run may still be delivering its (false, 0); wait so that
+	// state callbacks never arrive out of order.
+	if prev != nil {
+		<-prev
+	}
 	defer func() {
 		cancel()
 		r.mu.Lock()
@@ -258,6 +264,14 @@ func (r *Runner) client(ctx context.Context, cfg Config, i int, view *nodeView) 
 			return // aborted by the end of the run, not a failed op
 		}
 		r.rec(time.Since(start), err)
+		if err != nil {
+			// Back off briefly so clients of a dead cluster (instant
+			// failures) do not spin and flood the recorder.
+			select {
+			case <-ctx.Done():
+			case <-time.After(failBackoff):
+			}
+		}
 	}
 }
 
