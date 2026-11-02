@@ -1,8 +1,12 @@
 package verify
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -77,6 +81,7 @@ func TestVerifyValid(t *testing.T) {
 	if first := r.Steps[0]; first.Span != 256-(len(r.Steps)-1) {
 		t.Fatalf("empty span %d, want %d", first.Span, 256-(len(r.Steps)-1))
 	}
+	checkChain(t, r)
 	for i, s := range r.Steps[1:] {
 		if s.SiblingSide != "left" && s.SiblingSide != "right" {
 			t.Fatalf("step %d side %q", i+1, s.SiblingSide)
@@ -157,5 +162,42 @@ func TestVerifyDownNode(t *testing.T) {
 
 	if _, err := Run(context.Background(), c, "node4", "user42"); !errors.Is(err, cluster.ErrNodeDown) {
 		t.Fatalf("Run on down node = %v, want ErrNodeDown", err)
+	}
+}
+
+// checkChain recomputes the path from the leaf up, independently of the
+// package under test: leaf = H(0x00 || H(key) || H(value-version)), and each
+// side step is H(0x01 || left || right) with the sibling on the reported side.
+func checkChain(t *testing.T, r Result) {
+	t.Helper()
+	h := func(parts ...[]byte) []byte {
+		sum := sha256.Sum256(bytes.Join(parts, nil))
+		return sum[:]
+	}
+	keyPath := h([]byte(r.Key))
+	valueHash := h([]byte(r.Value + "-" + strconv.FormatInt(r.Version, 10)))
+	cur := h([]byte{0}, keyPath, valueHash)
+	if got := hex.EncodeToString(cur); got != r.LeafHash || got != r.Steps[0].Hash {
+		t.Fatalf("leaf hash %s, want %s", r.LeafHash, got)
+	}
+	for k, s := range r.Steps[1:] {
+		sib, err := hex.DecodeString(s.Sibling)
+		if err != nil || len(sib) != sha256.Size {
+			t.Fatalf("step %d sibling %q: %v", k+1, s.Sibling, err)
+		}
+		switch s.SiblingSide {
+		case "left":
+			cur = h([]byte{1}, sib, cur)
+		case "right":
+			cur = h([]byte{1}, cur, sib)
+		default:
+			t.Fatalf("step %d side %q", k+1, s.SiblingSide)
+		}
+		if got := hex.EncodeToString(cur); got != s.Hash {
+			t.Fatalf("step %d hash %s, recomputed %s (side %s)", k+1, s.Hash, got, s.SiblingSide)
+		}
+	}
+	if got := hex.EncodeToString(cur); got != r.Root {
+		t.Fatalf("recomputed root %s != Root %s", got, r.Root)
 	}
 }

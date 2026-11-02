@@ -76,17 +76,17 @@ type answer struct {
 // cannot answer; other replicas failing only shows up in their verdicts.
 func Run(ctx context.Context, c cluster.Cluster, node, key string) (Result, error) {
 	var answers []answer
-	var asked *answer
+	askedIdx := -1
 	for _, n := range c.Nodes() {
-		a := ask(ctx, c, n.Name, key)
-		answers = append(answers, a)
 		if n.Name == node {
-			asked = &answers[len(answers)-1]
+			askedIdx = len(answers)
 		}
+		answers = append(answers, ask(ctx, c, n.Name, key))
 	}
-	if asked == nil {
+	if askedIdx < 0 {
 		return Result{}, fmt.Errorf("verify: unknown node %q", node)
 	}
+	asked := &answers[askedIdx]
 	if asked.err != nil {
 		return Result{}, fmt.Errorf("verify %s on %s: %w", key, node, asked.err)
 	}
