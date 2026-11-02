@@ -55,7 +55,7 @@ CPU của host <= 6%. Kết luận: tm-orig không bị giới hạn bởi CPU m
 
 ## Kết quả P0
 
-Trung bình mọi lần lặp có mặt (độ lệch chuẩn mẫu trong ngoặc; 3 lần, hoặc 5 lần với cấu hình chạy thêm vì CV > 10%). Dữ liệu thô `results/raw/p0.csv` (34 dòng, commit `3a1ade8`), bản chốt `results/p0-baseline.csv`. Không có lần chạy thất bại (không có `results/raw/p0.failures`). `errors` là tổng qua các lần lặp; `saturated` là max.
+Trung bình mọi lần lặp có mặt (độ lệch chuẩn mẫu trong ngoặc; 3 lần, hoặc 5 lần với cấu hình chạy thêm vì CV > 10%). Dữ liệu thô `results/raw/p0.csv` (34 dòng, commit `8a54d00`), bản chốt `results/p0-baseline.csv`. Không có lần chạy thất bại (không có `results/raw/p0.failures`). `errors` là tổng qua các lần lặp; `saturated` là max.
 
 ### Điều kiện host (cần nêu khi trích dẫn số liệu)
 
@@ -100,7 +100,7 @@ Nhận xét:
 
 Ruling: **N <= 8 trên máy này** cho các thí nghiệm sau (thay cho N <= 16 / N <= 13 trong kế hoạch). Lý do: không phải bão hòa CPU (`saturated = 0` ở mọi điểm, CPU host <= 59%) mà là RAM: 16 node kafka-orig cần ~11 GB, trong khi Docker VM chỉ có 7,65 GiB (`mem 768m` x 16 node + Kafka/ZooKeeper). Muốn đo N=16 cần nâng RAM Docker VM lên >= 12 GiB rồi chạy `EXP=p0 PART=b NS_B="16" experiments/exp/p0_baseline.sh` (các dòng N=4/8 đã có sẽ được bỏ qua).
 
-## Kiểm tra P1 (core + backend `kafka` mới, commit `75b15cd`)
+## Kiểm tra P1 (core + backend `kafka` mới, commit `a5195b7`)
 
 - **Nhất quán**: `experiments/check_consistency.sh kafka` (N=4, sync, 16 client, 30 s) -> `CONSISTENT` (root digest giống nhau trên 4 node). 1 request `Aborted` (version cũ), được tính vào `errors`, không vào tps.
 - **Hồi quy (theo kế hoạch: async, N=4, YCSB-A, block 100, 3 lần; `results/raw/p1reg.csv`)**:
@@ -124,7 +124,7 @@ Ruling: **N <= 8 trên máy này** cho các thí nghiệm sau (thay cho N <= 16 
 
 ## Mốc HotStuff (Task 12): `BFT2=hotstuff`
 
-Spike (code bỏ đi, nhánh `spike/hotstuff`, commit `f625b23`; script `spike/hotstuff/run_spike.sh`) với `github.com/relab/hotstuff` v0.5.0 (commit `48e4d89`), chạy 2026-10-29T20:49Z:
+Spike (code bỏ đi, nhánh `spike/hotstuff`, commit `bcd8b17`; script `spike/hotstuff/run_spike.sh`) với `github.com/relab/hotstuff` v0.5.0 (commit `48e4d89`), chạy 2026-10-29T20:49Z:
 
 - (a) **Build trên arm64: đạt.** `go build ./cmd/hotstuff` trong `golang:1.23-bookworm` (linux/arm64, go1.23.12). Lưu ý: `go.mod` của thư viện đòi Go >= 1.23.4, ảnh `hbdb-build` hiện là golang:1.20.
 - (b) **4 replica commit >= 1000 lệnh trong 60 s: đạt.** `hotstuff run --replicas 4 --clients 4 --duration 60s --batch-size 100 --payload-size 0`: mỗi replica commit 3.685.033 lệnh (~61.400 lệnh/s; cả 4 replica bằng nhau), client báo ~920 nghìn lệnh thực thi mỗi client, 67–83 lệnh lỗi mỗi client. Bộ đọc awk của script báo nhầm 0 (sai tên trường `Commands`/`Event.ID`); số trên đếm lại từ `measurements.json` bằng Python. Đây là chạy trong một tiến trình, không payload, không giới hạn CPU: chỉ dùng cho mốc quyết định, không so sánh với các backend.
@@ -168,7 +168,7 @@ Chỉ ghi chú (chưa sửa):
 
 ## Chiến dịch đo E1–E6 và dữ liệu cuối (Task 19, 2026-10-31 → 2026-11-01)
 
-Mọi dòng đo dùng commit **`a0e9aa9`** (ảnh Docker build lúc 2026-10-31T15:58Z từ commit đó). Các commit sau (`f4e4668`, `a5b21aa`, `cbf3735` và commit kết quả) chỉ đổi `experiments/plot/`, `experiments/NOTES.md`, `results/` (không đổi mã đo).
+Mọi dòng đo dùng commit **`e7baa60`** (cột `commit` của CSV ghi mã cũ `a0e9aa9`, xem "Mã commit sau khi đổi email"; ảnh Docker build lúc 2026-10-31T15:58Z từ commit đó). Các commit sau (`e27614b`, `4e15297`, `80fbd66` và commit kết quả) chỉ đổi `experiments/plot/`, `experiments/NOTES.md`, `results/` (không đổi mã đo).
 
 ### Trình tự
 
@@ -208,7 +208,7 @@ Cùng commit và ảnh, CPU host như nhau (~23%), nhưng E1 100 ms trong chiế
 
 ### RQ3: chỉ số trên timeline ghi
 
-`rq3.py` (từ `cbf3735`) tính mọi chỉ số liveness/thông lượng trên `<tag>.wtimeline` (Set thành công mỗi giây) khi có (`timeline_source=write`, cả 157 lần chạy E6). Trước đó dùng timeline tổng: Get được phục vụ cục bộ nên vẫn thành công khi đồng thuận đã dừng (các đợt "nhú" mỗi 30 s giữa các Set hết thời gian), khiến bft2/tendermint F5-F2 bị báo "recovered". Vì vậy `pre_mean_tps`/`min_after_fault_tps` của `rq3_summary.csv` là **lượt ghi/s** (~255 với kafka/raft/bft2, ~130–157 với tendermint), không so trực tiếp với tps tổng của CSV. `stall_s` = số giây 0 liên tiếp đầu tiên sau lỗi (một giây 0 rời rạc vài giây sau cho `stall_s = 1`); cửa sổ sau lỗi là ~119 s. `detect_status = invalid` khi auditor không có kết luận (node bị dừng/cô lập không trả lời), không phải lỗi đo.
+`rq3.py` (từ `80fbd66`) tính mọi chỉ số liveness/thông lượng trên `<tag>.wtimeline` (Set thành công mỗi giây) khi có (`timeline_source=write`, cả 157 lần chạy E6). Trước đó dùng timeline tổng: Get được phục vụ cục bộ nên vẫn thành công khi đồng thuận đã dừng (các đợt "nhú" mỗi 30 s giữa các Set hết thời gian), khiến bft2/tendermint F5-F2 bị báo "recovered". Vì vậy `pre_mean_tps`/`min_after_fault_tps` của `rq3_summary.csv` là **lượt ghi/s** (~255 với kafka/raft/bft2, ~130–157 với tendermint), không so trực tiếp với tps tổng của CSV. `stall_s` = số giây 0 liên tiếp đầu tiên sau lỗi (một giây 0 rời rạc vài giây sau cho `stall_s = 1`); cửa sổ sau lỗi là ~119 s. `detect_status = invalid` khi auditor không có kết luận (node bị dừng/cô lập không trả lời), không phải lỗi đo.
 
 ### Đối chiếu giả thuyết F1–F5 (spec mục 4) với E6
 
@@ -230,3 +230,54 @@ tps = tps tổng của CSV trên toàn lần chạy 180 s (60 s lành + 120 s l�
 | F5-F4 (BFT, f+1 node) | Mất tính an toàn | đồng thuận không bị ảnh hưởng (tps 486–498 / 262–306), f+1 node có trạng thái sai, auditor phát hiện sau 0,9–1,4 s, `wrong_gets` 3–10 nghìn | **Đúng một phần**: an toàn ở tầng trạng thái/đọc bị vi phạm (và được phát hiện), thứ tự đồng thuận không bị ảnh hưởng vì F4 làm hỏng lúc áp dụng, không làm hỏng phiếu |
 
 Ghi chú khi trích dẫn: kafka F2 N=4 là `not_recovered` dù `stall_s = 1` (ghi giữ 64/s, dưới ngưỡng 0,9 × trước lỗi); số lần lặp của E6 là 3, trừ các cấu hình đã chạy lại (5–8).
+
+## Mã commit sau khi đổi email (2026-11-02)
+
+Toàn bộ lịch sử (44 commit, nhánh `master` và `spike/hotstuff`, tag `p0-baseline` … `p4-faults`) được viết lại để email tác giả và người commit là `khoatran.yuji@gmail.com` (trước đây `khoatran@freec.asia`); nội dung (tree) của mọi commit không đổi. Mã commit trong ghi chú này đã được thay bằng mã mới, nhưng **cột `commit` của các CSV kết quả giữ mã cũ** (đó là giá trị ghi lúc đo): `3a1ade8` (P0, `results/p0-baseline.csv`) = `8a54d00`, `a0e9aa9` (E1–E6, `results/final/*.csv`) = `e7baa60`. Bảng đầy đủ:
+
+| Ngày | Mã cũ | Mã mới | Commit |
+|---|---|---|---|
+| 2026-10-29 | `c59a854` | `0976d86` | chore: import original artifact |
+| 2026-10-29 | `e85397f` | `419c71b` | build: arm64 toolchain and images |
+| 2026-10-29 | `27aa82f` | `800fbfe` | build: arm64 fixes (bookworm node image, kafka client v2) |
+| 2026-10-29 | `2fa0ab7` | `7732fb7` | bench: time-based runs, percentiles, CSV output |
+| 2026-10-29 | `cf52980` | `399b8aa` | harness: docker-compose cluster, health check, single-run driver |
+| 2026-10-29 | `ba07253` | `f1da9b8` | consensus: interface and in-memory hub |
+| 2026-10-29 | `d6c8e60` | `c2cb146` | audit: root digest collection and divergence check |
+| 2026-10-29 | `1b60d0d` | `ae99c50` | exp: P0 baseline driver and notes |
+| 2026-10-29 | `2cc8777` | `6326dd6` | plot: aggregation, rerun list, figures |
+| 2026-10-29 | `a5d01fd` | `f9be1b3` | core: deterministic executor |
+| 2026-10-29 | `687d170` | `e1b567e` | core: batcher, gRPC server, sync/async commit, breakdown |
+| 2026-10-29 | `3a1ade8` | `8a54d00` | exp: host-state log per run, configurable part (b) cluster sizes |
+| 2026-10-30 | `72e8539` | `e544bc0` | exp: P0 baseline results (kafka-orig, tm-orig; N=4,8) |
+| 2026-10-30 | `75b15cd` | `a5195b7` | consensus/kafka: approve-all Kafka backend wired into cmd/veritas |
+| 2026-10-30 | `3211ecf` | `7a7a158` | exp: P1 checks; keep per-run core breakdown files |
+| 2026-10-30 | `f625b23` | `bcd8b17` | spike: hotstuff gate script (`spike/hotstuff`) |
+| 2026-10-30 | `4fb6640` | `d526e00` | docs: HotStuff gate decision |
+| 2026-10-30 | `d46155b` | `ebbcac2` | consensus: raft backend |
+| 2026-10-30 | `7b39010` | `388236d` | consensus/raft: fix round 1 (go.sum, race-safe tests, no snapshots) |
+| 2026-10-30 | `0d12192` | `a0a6187` | consensus: tendermint backend |
+| 2026-10-30 | `3c8f20e` | `f42a12a` | consensus/tendermint: fix round 1 (gas cap per block, mempool bytes, port wait) |
+| 2026-10-30 | `384ad8f` | `4e66fd7` | consensus/tendermint: fix round 2 (drop gas cap, sync/client guard) |
+| 2026-10-30 | `fb6c2b5` | `61c425f` | faults: crash, slow, network-silent injection |
+| 2026-10-30 | `b996d59` | `a78ec5a` | faults: fix round 1 (keep RTT record, prompt F1, orphan guard, netem limit) |
+| 2026-10-30 | `48920bd` | `c4d6878` | audit: periodic auditor and RQ3 metrics |
+| 2026-10-30 | `3679997` | `ace4050` | audit: fix round 1 (detect guard, dip-based recovery, stop order) |
+| 2026-10-30 | `fb08079` | `70aa001` | consensus: bft2 (hotstuff sidecar) |
+| 2026-10-30 | `97993a2` | `192db6c` | consensus/bft2: fix round 1 (go.sum, crash liveness) |
+| 2026-10-30 | `4411d34` | `43742a8` | bft2node: stop the reverse-view test loop before View underflows |
+| 2026-10-31 | `bc58da4` | `50a5e6b` | consensus/bft2: fix round 2 (view timeout, retention, fault ports) |
+| 2026-10-31 | `17ed744` | `b4e8785` | core: fault policy (silent, corrupt) |
+| 2026-10-31 | `2985576` | `1566bac` | core: fault policy on bft2 (rebase onto p3-bft2) |
+| 2026-10-31 | `2f9f0f2` | `e720ba3` | core: fault policy fix round 1 (pin kafka silent, confirm activation, F4 cap) |
+| 2026-10-31 | `857e394` | `43a5aa6` | exp: E1-E6 drivers |
+| 2026-10-31 | `c4d0e20` | `89555a0` | exp: E1-E6 drivers fix round 1 (hermetic tests, plan validation) |
+| 2026-10-31 | `27ef981` | `86e17e1` | docs: batch-flush decision for E1-E6 |
+| 2026-10-31 | `8ee51fb` | `338ccc4` | ledger: prune orphaned SMT nodes (bounded memory) |
+| 2026-10-31 | `561f95f` | `25bb911` | final-fix: read/write split, resource stats, validity gate, leader faults, run guards |
+| 2026-10-31 | `9265dcd` | `bfd72b7` | final-fix: gofmt recorder_test.go |
+| 2026-10-31 | `a0e9aa9` | `e7baa60` | final-fix: round 2 (aborted split, gate calibration, exact net bytes, raft forward timeout, bft2 mem) |
+| 2026-11-02 | `f4e4668` | `e27614b` | plot: figures for E3-E6 (x axis per experiment, E6 bars per fault) and rq3_table.py |
+| 2026-11-02 | `a5b21aa` | `4e15297` | plot: E6 no-fault ticks in backend colour, duplicate (backend, fault) rows raise |
+| 2026-11-02 | `cbf3735` | `80fbd66` | plot: RQ3 liveness metrics on the write timeline when .wtimeline is usable (timeline_source key and column) |
+| 2026-11-02 | `b02d523` | `5389261` | results: final data and figures |
