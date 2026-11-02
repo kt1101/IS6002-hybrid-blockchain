@@ -118,7 +118,7 @@ type Cluster interface {
 - `Set`/`Get` dùng `veritas/driver` cho backend `client` version mode (có TSO), hoặc client gRPC `pbv.NodeClient` trực tiếp cho `ordered`, giống cách `cmd/hbdbprobe` làm.
 - `Get` và `Prove` đọc qua observer HTTP của node (`GET /kv?key=`, `GET /prove?key=`, mục 4.2) để có cả `version`, vì leaf của SMT là `value + "-" + version`.
 - `Events()` mở một SSE tới `GET /events` của mỗi node. Khi mất kết nối thì đánh dấu node `down` và thử lại sau mỗi 1 s.
-- `Inject`/`Heal` gọi `experiments/demo_fault.sh <action> <node>` (mục 5.2), với timeout 30 s, stdout/stderr đưa vào event log.
+- `Inject`/`Heal` gọi `experiments/demo_fault.sh <action> <node>` (mục 5.2), với timeout 30 s, stdout/stderr đưa vào event log. Script không tồn tại thì `NewDocker` báo lỗi ngay lúc khởi động.
 
 ### 2.4 `demo/hub`
 
@@ -248,7 +248,7 @@ Mỗi bước là một nút. Bấm nút thì gọi đúng các API ở trên (k
 ## 7. Xử lý lỗi
 
 - Mọi lời gọi cluster có timeout: Set 10 s, Get/Prove 3 s, fault script 30 s. Lỗi được ghi vào event log và trả về cho UI, không làm sập server.
-- Node down trong docker mode: hub đánh dấu sau 2 lần nối SSE thất bại liên tiếp hoặc khi gRPC trả `Unavailable`.
+- Node down trong docker mode: đánh dấu sau 2 lần nối SSE thất bại liên tiếp, hoặc ngay khi gRPC trả `Unavailable` / request tới observer không tới được node; node `up` lại khi SSE nối lại hoặc nhận được block mới.
 - Bộ sinh tải đếm lỗi theo loại (`Aborted`, timeout, unavailable) và tiếp tục chạy.
 - `cmd/demo` khởi động ở docker mode mà không nối được node nào trong 10 s thì in hướng dẫn chạy `demo_up.sh` và thoát mã 2.
 

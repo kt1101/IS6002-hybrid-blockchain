@@ -95,6 +95,7 @@ type Hub struct {
 	tracked string
 	step    int
 	last    Consistency // last verdict that had a common height
+	lastMaj []string    // up nodes in last's majority group
 	logged  string      // verdict last reported to the log
 
 	subMu sync.Mutex
@@ -278,7 +279,7 @@ func (h *Hub) nodeViewsLocked() ([]NodeView, Consistency) {
 		// previous verdict, minus nodes that have since gone down.
 		cons = h.keepLastLocked(cons)
 	} else if cons.Verdict != "UNKNOWN" {
-		h.last = cons
+		h.last, h.lastMaj = cons, majorityOf(up, cons)
 	}
 
 	divergent := map[string]bool{}
@@ -308,7 +309,13 @@ func (h *Hub) nodeViewsLocked() ([]NodeView, Consistency) {
 	return nodes, cons
 }
 
+// keepLastLocked is the previous verdict carried over to the current up
+// nodes: nodes that have gone down leave its divergent list and its Agree
+// count. With no node up there is nothing to judge: cur (UNKNOWN) is kept.
 func (h *Hub) keepLastLocked(cur Consistency) Consistency {
+	if cur.Up == 0 {
+		return cur
+	}
 	isDown := map[string]bool{}
 	for _, n := range cur.Down {
 		isDown[n] = true
@@ -321,7 +328,31 @@ func (h *Hub) keepLastLocked(cur Consistency) Consistency {
 			kept.Divergent = append(kept.Divergent, n)
 		}
 	}
+	kept.Agree = 0
+	for _, n := range h.lastMaj {
+		if !isDown[n] {
+			kept.Agree++
+		}
+	}
 	return kept
+}
+
+// majorityOf lists the up nodes in c's majority group (none if c has none).
+func majorityOf(up []string, c Consistency) []string {
+	if c.Agree == 0 {
+		return nil
+	}
+	divergent := map[string]bool{}
+	for _, n := range c.Divergent {
+		divergent[n] = true
+	}
+	var maj []string
+	for _, n := range up {
+		if !divergent[n] {
+			maj = append(maj, n)
+		}
+	}
+	return maj
 }
 
 func latest(r map[int64]string) (int64, bool) {
@@ -428,7 +459,7 @@ drain:
 	h.load = LoadState{}
 	h.tracked = ""
 	h.step = 0
-	h.last = Consistency{}
+	h.last, h.lastMaj = Consistency{}, nil
 	h.logged = ""
 	h.infos = h.c.Nodes()
 	h.logLocked("info", "Cluster reset")

@@ -237,3 +237,38 @@ func TestHubResetClearsState(t *testing.T) {
 		}
 	}
 }
+
+// judgeAfter sets the node infos (name → up) and returns the hub's verdict.
+func judgeAfter(h *Hub, up map[string]bool) Consistency {
+	h.infos = nil
+	for _, n := range []string{"node1", "node2", "node3", "node4"} {
+		h.infos = append(h.infos, cluster.NodeInfo{Name: n, Up: up[n]})
+	}
+	_, cons := h.nodeViewsLocked()
+	return cons
+}
+
+func TestHubKeptVerdictFollowsUpNodes(t *testing.T) {
+	h := &Hub{roots: map[string]map[int64]string{}, values: map[string]string{}}
+	for _, n := range []string{"node1", "node2", "node3", "node4"} {
+		h.roots[n] = map[int64]string{5: "aa"}
+	}
+	all := map[string]bool{"node1": true, "node2": true, "node3": true, "node4": true}
+	if c := judgeAfter(h, all); c.Verdict != "CONSISTENT" || c.Agree != 4 || c.Up != 4 {
+		t.Fatalf("all up: %+v", c)
+	}
+
+	// node1 and node2 go down; node4 has no common height (catching up), so
+	// the previous verdict is kept, counting only majority nodes still up.
+	h.roots["node4"] = map[int64]string{}
+	c := judgeAfter(h, map[string]bool{"node3": true, "node4": true})
+	if c.Verdict != "CONSISTENT" || c.Up != 2 || c.Agree != 2 {
+		t.Fatalf("two up, no common height: %+v, want kept CONSISTENT with agree 2 of 2", c)
+	}
+
+	// Every node down: nothing to judge.
+	c = judgeAfter(h, map[string]bool{})
+	if c.Verdict != "UNKNOWN" || c.Up != 0 || c.Agree != 0 || len(c.Down) != 4 {
+		t.Fatalf("all down: %+v, want UNKNOWN with 0 up", c)
+	}
+}

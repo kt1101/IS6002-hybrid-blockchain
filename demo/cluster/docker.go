@@ -99,7 +99,9 @@ func (c *DockerConfig) applyDefaults() {
 // events through its SSE stream, and faults through the fault script.
 //
 // A node is Up while its SSE stream is connected; two consecutive failed
-// connects mark it down, and it is retried every second. NodeInfo.Faults
+// connects mark it down, and it is retried every second. A Set, Get or Prove
+// that cannot reach the node marks it down at once; its stream marks it up
+// again when it reconnects or delivers a block. NodeInfo.Faults
 // lists the faults this Docker injected and has not healed: crash and
 // corrupt stay (they cannot be healed), and so does silent on kafka.
 type Docker struct {
@@ -120,11 +122,23 @@ type dockerNode struct {
 	name string
 	idx  int // 1-based
 
+	openMu sync.Mutex // serializes opening drv, outside mu
+
 	mu       sync.Mutex
 	up       bool
 	failures int // consecutive failed SSE connects
 	faults   []Fault
 	drv      *driver.Driver
+	closed   bool // Close ran: no driver may be installed any more
+}
+
+// markDown marks n down after a request to it could not reach it. failures is
+// raised too, so that if the stream also ends it does not wait for a second
+// failed connect.
+func (n *dockerNode) markDown() {
+	n.mu.Lock()
+	n.up, n.failures = false, sseDownAfter
+	n.mu.Unlock()
 }
 
 // NewDocker connects to the cluster and starts one SSE reader per node. It
@@ -135,6 +149,10 @@ func NewDocker(ctx context.Context, cfg DockerConfig) (*Docker, error) {
 	}
 	cfg.applyDefaults()
 	cfg.FaultScript = resolveScript(cfg.FaultScript)
+	// Fail at startup, not at the first fault button.
+	if _, err := os.Stat(cfg.FaultScript); err != nil {
+		return nil, fmt.Errorf("cluster: docker: fault script: %w", err)
+	}
 
 	dctx, cancel := context.WithCancel(ctx)
 	d := &Docker{
@@ -266,6 +284,11 @@ func (d *Docker) stream(n *dockerNode) {
 		switch {
 		case line == "":
 			if data != "" && (event == "" || event == "block") {
+				// A block shows the node is alive, even if a failed
+				// request marked it down while the stream stayed up.
+				n.mu.Lock()
+				n.up = true
+				n.mu.Unlock()
 				d.publish(n, data)
 			}
 			event, data = "", ""
@@ -362,16 +385,35 @@ func (d *Docker) node(name string) (*dockerNode, error) {
 
 // ---- Set, Get, Prove ----
 
-// driverFor returns node n's driver, opening it on first use.
+// driverFor returns node n's driver, opening it on first use. The open (whose
+// TSO dial has no timeout) runs outside n.mu, so Nodes and the SSE reader
+// never wait for it.
 func (d *Docker) driverFor(n *dockerNode) (*driver.Driver, error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if n.drv != nil {
+	current := func() (*driver.Driver, error) {
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if n.closed {
+			return nil, fmt.Errorf("cluster: %s: cluster closed", n.name)
+		}
 		return n.drv, nil
+	}
+	if drv, err := current(); drv != nil || err != nil {
+		return drv, err
+	}
+	n.openMu.Lock()
+	defer n.openMu.Unlock()
+	if drv, err := current(); drv != nil || err != nil {
+		return drv, err // opened by a concurrent caller, or closed meanwhile
 	}
 	drv, err := driver.Open(d.cfg.GRPCAddr(n.idx), d.cfg.TSOAddr, dockerDriverSignature)
 	if err != nil {
 		return nil, fmt.Errorf("cluster: %s: %w", n.name, err)
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closed { // Close ran during the open: do not leak the connection
+		_ = drv.Close()
+		return nil, fmt.Errorf("cluster: %s: cluster closed", n.name)
 	}
 	n.drv = drv
 	return drv, nil
@@ -389,6 +431,7 @@ func (d *Docker) Set(ctx context.Context, node, key, value string) error {
 	}
 	if err := drv.Set(ctx, key, value); err != nil {
 		if status.Code(err) == codes.Unavailable {
+			n.markDown()
 			return fmt.Errorf("%w: %s: %v", ErrNodeDown, node, err)
 		}
 		return err
@@ -457,6 +500,7 @@ func (d *Docker) observerGet(ctx context.Context, node, path, key string, v inte
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
+		n.markDown()
 		return false, fmt.Errorf("%w: %s: %v", ErrNodeDown, node, err)
 	}
 	defer resp.Body.Close()
@@ -639,6 +683,7 @@ func (d *Docker) Close() error {
 		close(d.events)
 		for _, n := range d.nodes {
 			n.mu.Lock()
+			n.closed = true
 			if n.drv != nil {
 				_ = n.drv.Close()
 				n.drv = nil

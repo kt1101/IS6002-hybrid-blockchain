@@ -34,7 +34,7 @@ const (
 	preloadWriters = 128
 	tickEvery      = time.Second
 	upRefreshEvery = 250 * time.Millisecond
-	failBackoff    = time.Millisecond
+	failBackoff    = 50 * time.Millisecond
 )
 
 // Phases of a running load run.

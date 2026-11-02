@@ -27,6 +27,7 @@ import (
 // observer, standing in for a node container.
 type dockerTestNode struct {
 	grpcAddr string
+	grpc     *grpc.Server
 	obs      *httptest.Server
 }
 
@@ -75,7 +76,7 @@ func startDockerTestNodes(t *testing.T, n int) []*dockerTestNode {
 		pbv.RegisterNodeServer(gs, srv)
 		go gs.Serve(lis)
 
-		nodes[i] = &dockerTestNode{grpcAddr: lis.Addr().String(), obs: obs}
+		nodes[i] = &dockerTestNode{grpcAddr: lis.Addr().String(), grpc: gs, obs: obs}
 		t.Cleanup(func() {
 			gs.Stop()
 			obs.CloseClientConnections()
@@ -212,6 +213,61 @@ func TestDockerNodeDownWhenObserverStops(t *testing.T) {
 	eventually(t, 4*time.Second, "node3 down", func() bool { return !up("node3") })
 	if !up("node1") || !up("node2") {
 		t.Fatalf("other nodes went down: %+v", d.Nodes())
+	}
+}
+
+func nodeUp(d *Docker, name string) bool {
+	for _, n := range d.Nodes() {
+		if n.Name == name {
+			return n.Up
+		}
+	}
+	return false
+}
+
+// A failed observer request marks the node down at once, without waiting for
+// the SSE stream to fail twice (1 s apart).
+func TestDockerNodeDownOnFailedRead(t *testing.T) {
+	nodes := startDockerTestNodes(t, 3)
+	d := newTestDocker(t, dockerTestConfig(nodes))
+	eventually(t, testTimeout, "node3 up", func() bool { return nodeUp(d, "node3") })
+
+	nodes[2].obs.CloseClientConnections()
+	nodes[2].obs.Close()
+	if _, _, err := d.Get(ctxT(t, testTimeout), "node3", "k"); !errors.Is(err, ErrNodeDown) {
+		t.Fatalf("Get on a stopped node = %v, want ErrNodeDown", err)
+	}
+	if nodeUp(d, "node3") {
+		t.Fatal("node3 still up right after a failed Get")
+	}
+}
+
+// A Set the node's gRPC refuses marks it down at once; its SSE stream (still
+// connected) brings it back up with the next block it applies.
+func TestDockerNodeDownOnFailedSetThenUpOnBlock(t *testing.T) {
+	nodes := startDockerTestNodes(t, 3)
+	d := newTestDocker(t, dockerTestConfig(nodes))
+	eventually(t, testTimeout, "node3 up", func() bool { return nodeUp(d, "node3") })
+
+	nodes[2].grpc.Stop()
+	if err := d.Set(ctxT(t, testTimeout), "node3", "k", "v"); !errors.Is(err, ErrNodeDown) {
+		t.Fatalf("Set on a stopped gRPC server = %v, want ErrNodeDown", err)
+	}
+	if nodeUp(d, "node3") {
+		t.Fatal("node3 still up right after a refused Set")
+	}
+
+	mustSet(t, d, "node1", "k", "v") // node3 still applies the block
+	eventually(t, testTimeout, "node3 up again on its next block", func() bool { return nodeUp(d, "node3") })
+}
+
+func TestDockerMissingFaultScript(t *testing.T) {
+	nodes := startDockerTestNodes(t, 1)
+	cfg := dockerTestConfig(nodes)
+	cfg.FaultScript = filepath.Join(t.TempDir(), "no-such-script.sh")
+	_, err := NewDocker(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "no-such-script.sh") {
+		t.Fatalf("NewDocker with a missing fault script = %v, want an error naming it", err)
 	}
 }
 
