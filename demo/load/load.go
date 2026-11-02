@@ -42,7 +42,7 @@ type Config struct {
 	Clients   int
 	Workload  string // "a" (50% reads), "b" (95% reads) or "c" (100% reads)
 	Duration  time.Duration
-	Keys      int // key space user0..user{Keys-1}; default 1000
+	Keys      int // key space ycsb0..ycsb{Keys-1}; default 1000
 	ValueSize int // bytes per written value; default 100
 }
 
@@ -76,7 +76,9 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-func keyName(i int) string { return fmt.Sprintf("user%d", i) }
+// keyName is the i-th load key. The ycsb prefix keeps the load clear of the
+// keys the UI scenario writes and verifies (user42).
+func keyName(i int) string { return fmt.Sprintf("ycsb%d", i) }
 
 // Runner runs at most one load run at a time against a cluster.
 type Runner struct {
@@ -213,7 +215,7 @@ loop:
 	wg.Wait()
 }
 
-// preload writes keys user0..user{Keys-1} to node1..N round-robin with up to
+// preload writes keys ycsb0..ycsb{Keys-1} to node1..N round-robin with up to
 // preloadWriters concurrent writers. It reports whether every key was stored.
 func (r *Runner) preload(ctx context.Context, cfg Config) bool {
 	view := newNodeView(r.cl)

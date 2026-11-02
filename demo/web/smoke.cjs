@@ -35,6 +35,24 @@ async function waitForServer(server, timeoutMs) {
   throw new Error('demo server did not answer /api/state within ' + timeoutMs + ' ms');
 }
 
+// expectValues waits until ok(values) holds, values mapping each replica
+// card's node to the tracked key's value it shows.
+async function expectValues(page, ok) {
+  const read = () => page.$$eval('#replicas .replica', (cards) => {
+    const v = {};
+    cards.forEach((c) => { v[c.getAttribute('data-node')] = c.querySelector('.value').textContent; });
+    return v;
+  });
+  const deadline = Date.now() + 15000;
+  let v = {};
+  while (Date.now() < deadline) {
+    v = await read();
+    if (ok(v)) { return; }
+    await sleep(250);
+  }
+  throw new Error('unexpected replica values: ' + JSON.stringify(v));
+}
+
 function step(page, n) {
   return page.click('#scenario .step[data-step="' + n + '"]');
 }
@@ -81,18 +99,12 @@ async function main() {
     await sleep(2000);
     await page.screenshot({ path: path.join(SHOTS, 'healthy.png'), fullPage: true });
 
-    // Step 3: the Merkle proof of user42 on node2. Under load a write to
-    // user42 can land between the Get and the Prove of a verification (a
-    // known race); a fresh verification then succeeds.
+    // Step 3: the Merkle proof of user42 on node2, valid on the first try.
     await step(page, 3);
     await page.waitForSelector('#view-verify', { state: 'visible', timeout: 5000 });
-    let valid = false;
-    for (let attempt = 0; attempt < 3 && !valid; attempt++) {
-      if (attempt > 0) { await page.click('#verify-submit'); }
-      await page.waitForFunction(() => document.getElementById('verdict-title').textContent !== 'Verifying…', null, { timeout: 15000 });
-      valid = (await page.textContent('#verdict-title')) === 'Proof valid';
-    }
-    if (!valid) { throw new Error('verify view shows ' + await page.textContent('#verdict-title')); }
+    await page.waitForFunction(() => document.getElementById('verdict-title').textContent !== 'Verifying…', null, { timeout: 15000 });
+    const verdict = await page.textContent('#verdict-title');
+    if (verdict !== 'Proof valid') { throw new Error('verify view shows ' + verdict); }
     console.log('ok   step 3: Proof valid');
     await page.screenshot({ path: path.join(SHOTS, 'verify.png'), fullPage: true });
 
@@ -103,6 +115,16 @@ async function main() {
       return /DIVERGENT/.test(t) && /node3/.test(t);
     }, null, { timeout: 20000 });
     console.log('ok   step 4: banner ' + await page.textContent('#banner-title'));
+    // The load (ycsb* keys) leaves user42 alone: every replica still shows
+    // the value of step 1 (node3 applied it before it was corrupted).
+    await expectValues(page, (v) => ['node1', 'node2', 'node3', 'node4'].every((n) => v[n] === 'hello-committee'));
+    console.log('ok   user42 = hello-committee on every replica after the load');
+    // Writing user42 again by hand shows the corruption: node3 applies it
+    // with the corrupt marker, the others with the plain value.
+    await page.click('#tx-submit');
+    await expectValues(page, (v) => v.node1 === 'hello-committee' && v.node2 === 'hello-committee' &&
+      v.node4 === 'hello-committee' && v.node3 === 'hello-committee-CORRUPT');
+    console.log('ok   rewritten user42: node3 shows hello-committee-CORRUPT, node1/2/4 hello-committee');
     await sleep(1500);
     await page.screenshot({ path: path.join(SHOTS, 'divergent.png'), fullPage: true });
 

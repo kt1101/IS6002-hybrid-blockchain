@@ -3,6 +3,8 @@ package load
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -246,5 +248,49 @@ func TestStateCallbacksStayOrderedAcrossRuns(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&ends); n != 2 {
 		t.Fatalf("%d end callbacks, want 2", n)
+	}
+}
+
+// keyRecorder remembers the keys of Sets reaching the cluster.
+type keyRecorder struct {
+	cluster.Cluster
+	mu   sync.Mutex
+	keys map[string]bool
+}
+
+func (k *keyRecorder) Set(ctx context.Context, node, key, value string) error {
+	k.mu.Lock()
+	k.keys[key] = true
+	k.mu.Unlock()
+	return k.Cluster.Set(ctx, node, key, value)
+}
+
+// The load's keys must not collide with the UI scenario's key (user42), or
+// the load would overwrite the value the presenter just wrote and verifies.
+func TestLoadKeysAvoidScenarioKeys(t *testing.T) {
+	kr := &keyRecorder{Cluster: newSim(t), keys: map[string]bool{}}
+	var cnt counter
+	r := NewRunner(kr, cnt.rec)
+	// Workload c never writes, so every Set seen is a preload write: all keys.
+	if err := r.Start(Config{Clients: 1, Workload: "c", Duration: 5 * time.Second, Keys: 50}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); cnt.Ops() == 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.Stop()
+
+	kr.mu.Lock()
+	defer kr.mu.Unlock()
+	if len(kr.keys) != 50 {
+		t.Fatalf("preload wrote %d distinct keys, want 50", len(kr.keys))
+	}
+	for k := range kr.keys {
+		if !strings.HasPrefix(k, "ycsb") {
+			t.Errorf("load key %q is outside the ycsb* keyspace", k)
+		}
+	}
+	if kr.keys["user42"] {
+		t.Error("load wrote user42, the scenario's key")
 	}
 }

@@ -238,7 +238,7 @@ input[type="range"] { accent-color: var(--accent); min-height: 30px; }
 .chip.g1 { background: var(--div); }
 .chip.g2 { background: #6D28D9; }
 .chip.g3 { background: #0F766E; }
-.chip.none { background: var(--down); }
+.chip.none { background: var(--muted); }
 
 /* blocks */
 .blocks { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }

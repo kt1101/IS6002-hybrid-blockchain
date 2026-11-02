@@ -81,7 +81,7 @@
   // taking fallback the first time).
   function nodeSelect(sel, nodes, fallback) {
     var names = nodes.map(function (n) { return n.name; });
-    var current = sel.value || sel.getAttribute('data-want') || fallback;
+    var current = sel.value || fallback;
     var same = sel.options.length === names.length &&
       names.every(function (n, i) { return sel.options[i].value === n; });
     if (!same) {
@@ -283,7 +283,9 @@
       var supported = has(info.faults, kind);
       b.disabled = busy || !supported || !node;
       b.setAttribute('aria-pressed', String(has(active, kind)));
-      if (!supported && info.mode) { b.title = 'Not available in ' + info.mode + ' mode'; }
+      // Keep the button's own hint; say why when the mode lacks the fault.
+      if (!b.hasAttribute('data-hint')) { b.setAttribute('data-hint', b.title); }
+      b.title = !supported && info.mode ? 'Not available in ' + info.mode + ' mode' : b.getAttribute('data-hint');
     });
     var healable = active.filter(function (f) { return has(info.healable, f); });
     var heal = d.byId('heal-btn');
