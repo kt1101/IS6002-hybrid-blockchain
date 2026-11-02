@@ -108,23 +108,18 @@ async function main() {
     console.log('ok   step 3: Proof valid');
     await page.screenshot({ path: path.join(SHOTS, 'verify.png'), fullPage: true });
 
-    // Step 4: corrupt node3; the banner must name it.
+    // Step 4: corrupt node3 and re-send user42; the banner must name node3.
     await step(page, 4);
     await page.waitForFunction(() => {
       const t = document.getElementById('banner-title').textContent;
       return /DIVERGENT/.test(t) && /node3/.test(t);
     }, null, { timeout: 20000 });
     console.log('ok   step 4: banner ' + await page.textContent('#banner-title'));
-    // The load (ycsb* keys) leaves user42 alone: every replica still shows
-    // the value of step 1 (node3 applied it before it was corrupted).
-    await expectValues(page, (v) => ['node1', 'node2', 'node3', 'node4'].every((n) => v[n] === 'hello-committee'));
-    console.log('ok   user42 = hello-committee on every replica after the load');
-    // Writing user42 again by hand shows the corruption: node3 applies it
-    // with the corrupt marker, the others with the plain value.
-    await page.click('#tx-submit');
+    // Step 4 also re-sends user42: node3 applies it with the corrupt marker,
+    // the others with the plain value (the load's ycsb* keys never touch it).
     await expectValues(page, (v) => v.node1 === 'hello-committee' && v.node2 === 'hello-committee' &&
       v.node4 === 'hello-committee' && v.node3 === 'hello-committee-CORRUPT');
-    console.log('ok   rewritten user42: node3 shows hello-committee-CORRUPT, node1/2/4 hello-committee');
+    console.log('ok   step 4: user42 = hello-committee-CORRUPT on node3, hello-committee on node1/2/4');
     await sleep(1500);
     await page.screenshot({ path: path.join(SHOTS, 'divergent.png'), fullPage: true });
 

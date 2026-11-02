@@ -287,7 +287,15 @@
       }
       d.byId('fault-node').value = DEMO.faultNode;
       renderControls();
-      return inject('corrupt', DEMO.faultNode);
+      // Then re-send the scenario's write, so node3's value visibly diverges
+      // (and its root moves) even when the load has already finished.
+      return inject('corrupt', DEMO.faultNode).then(function (ok) {
+        if (!ok) { return false; }
+        d.byId('tx-key').value = DEMO.key;
+        d.byId('tx-value').value = DEMO.value;
+        d.byId('tx-node').value = DEMO.entry;
+        return submitTx(DEMO.key, DEMO.value, DEMO.entry);
+      });
     },
     5: function () {
       showLive();

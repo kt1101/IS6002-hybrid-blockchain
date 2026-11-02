@@ -134,7 +134,7 @@ type Cluster interface {
 
 ### 2.5 `demo/load`
 
-Closed loop với C client (1–256), workload YCSB A (50% đọc, 50% ghi), B (95/5) hoặc C (100% đọc), trên keyspace 1.000 key `user0..user999`, giá trị 100 byte, phân bố uniform. Client i gửi tới node `(i mod N)+1` như harness. Pha nạp ban đầu ghi 1.000 key (không đo). Dừng khi hết thời lượng hoặc khi `DELETE /api/load`.
+Closed loop với C client (1–256), workload YCSB A (50% đọc, 50% ghi), B (95/5) hoặc C (100% đọc), trên keyspace 1.000 key `ycsb0..ycsb999` (tiền tố riêng để tải không ghi đè khoá kịch bản `user42`), giá trị 100 byte, phân bố uniform. Client i gửi tới node `(i mod N)+1` như harness. Pha nạp ban đầu ghi 1.000 key (không đo). Dừng khi hết thời lượng hoặc khi `DELETE /api/load`.
 
 ## 3. HTTP API (`demo/api`)
 
@@ -231,7 +231,7 @@ Hành động không hỗ trợ (ví dụ corrupt trên node chưa arm) thoát m
 1. **Write a transaction**: điền sẵn `user42 = hello-committee`, gửi tới node2.
 2. **Replicate & commit**: tự bật tải 64 client YCSB-A trong 60 s.
 3. **Verify a proof**: mở màn Merkle proof với `user42`.
-4. **Inject a fault**: corrupt node3 (và crash node4 nếu bật tuỳ chọn).
+4. **Inject a fault**: corrupt node3, rồi gửi lại `user42` (tới node2) để giá trị trên node3 lệch thấy rõ (và crash node4 nếu bật tuỳ chọn).
 5. **Detect & recover**: trỏ vào banner DIVERGENT. Sim: Heal node4 cho thấy catch-up, Reset để làm lại. Docker: nêu rằng corrupt/crash không gỡ được.
 
 Mỗi bước là một nút. Bấm nút thì gọi đúng các API ở trên (không có đường tắt riêng), và người trình bày vẫn thao tác tay được.
