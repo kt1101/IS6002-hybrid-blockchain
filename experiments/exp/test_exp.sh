@@ -181,6 +181,12 @@ E6_LEADER_BACKENDS="kafka-orig" "$ROOT/experiments/exp/e6_faults.sh" --dry-run >
 eq "E6_LEADER_BACKENDS rejects a non E1-E6 backend" "$?" 1
 E6_LEADER=2 "$ROOT/experiments/exp/e6_faults.sh" --dry-run >/dev/null 2>&1
 eq "E6_LEADER must be 0 or 1" "$?" 1
+OUT="$(E6_KINDS="F1 F2 F4" "$ROOT/experiments/exp/e6_faults.sh" --dry-run 2>/dev/null)"
+eq "E6_KINDS without F3: (24 + 8 + 4 leader F1) configs x 3 reps" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 108
+eq "E6_KINDS without F3 plans no F3 run" "$(printf '%s\n' "$OUT" | grep -c 'FAULT=F3:')" 0
+eq "E6_KINDS without F3 keeps the F1 leader fault" "$(printf '%s\n' "$OUT" | grep -c 'FAULT=F1:node1@60 ')" 12
+E6_KINDS="F1 F9" "$ROOT/experiments/exp/e6_faults.sh" --dry-run >/dev/null 2>&1
+eq "E6_KINDS rejects an unknown fault" "$?" 1
 # I9: rep is the outermost loop of the plan.
 OUT="$("$ROOT/experiments/exp/e1_clients.sh" --dry-run 2>/dev/null)"
 eq "dry run: the first 16 runs are rep 1 of every config" "$(printf '%s\n' "$OUT" | head -n 16 | grep -c ' REP=1 ')" 16

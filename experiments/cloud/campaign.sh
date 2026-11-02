@@ -17,6 +17,11 @@
 # .timeline, .wtimeline, .faults, .audit, .leaders) are copied to
 # results/<PREFIX>-bf100ms/ (committed; results/raw is gitignored).
 #
+# netem: E5 (RTT) and the E6 F3 fault (slow node) need the sch_netem qdisc.
+# If a test container cannot add one (e.g. a kernel built without
+# CONFIG_NET_SCH_NETEM), e5 is dropped from STEPS and E6 runs with
+# E6_KINDS="F1 F2 F4" (no F3, also not as a leader fault); NETEM=0/1 forces it.
+#
 # Driver exit codes: 0 ok; 4 = some configurations missing (a backend without
 # complete E1 rows is skipped), the campaign goes on; anything else (1 = harness
 # or input error, 130 = Ctrl-C) stops it.
@@ -33,6 +38,19 @@ export E1_EXP="$PREFIX-e1-bf100ms"
 export NO_CAFFEINATE=1
 
 log() { printf '%s [campaign] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+if [ -z "${NETEM:-}" ]; then
+  if docker run --rm --cap-add NET_ADMIN hbdb-node tc qdisc add dev eth0 root netem delay 1ms >/dev/null 2>&1; then
+    NETEM=1
+  else
+    NETEM=0
+  fi
+fi
+if [ "$NETEM" = 0 ]; then
+  log "no sch_netem: skipping e5 and F3 (E6_KINDS=\"F1 F2 F4\")"
+  STEPS="$(printf '%s\n' $STEPS | grep -vx e5 | tr '\n' ' ')"
+  export E6_KINDS="F1 F2 F4"
+fi
 
 snapshot() {
   local exp="$1" raw="$ROOT/results/raw"
