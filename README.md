@@ -165,6 +165,12 @@ cat logs-distribution-veritas-kafka-.../veritas-latest-logs/veritas-* | grep Abo
 
 There are no aborted transactions in Veritas (TM) and BlockchainDB.
 
+## Live demo
+
+`cmd/demo` is a browser demo of Veritas: write a transaction, generate YCSB load, verify a Merkle proof, inject faults (crash, silent, slow, corrupt) and watch the replicas diverge. It runs on an in-process simulated cluster (`go run ./cmd/demo`, then open http://127.0.0.1:8080) or on the Docker cluster (`BACKEND=bft2 N=4 experiments/demo_up.sh`, then `go run ./cmd/demo --mode=docker --backend=bft2 --n=4`). The page `/overview` shows the offline results dashboard.
+
+The operator guide (in Vietnamese: setup, the 5-step scenario, pre-defense checklist and fallbacks) is [docs/demo.md](docs/demo.md).
+
 ## License
 
 MIT License
