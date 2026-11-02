@@ -44,6 +44,30 @@ func TestJudge(t *testing.T) {
 			want: Consistency{Verdict: "DIVERGENT", Height: 5, Divergent: []string{"node1", "node2", "node3", "node4"}, Down: []string{}, Agree: 0, Up: 4},
 		},
 		{
+			name: "four nodes split 2-1-1 has no majority",
+			roots: map[string]map[int64]string{
+				"node1": same("X", 5), "node2": same("X", 5), "node3": same("Y", 5), "node4": same("Z", 5),
+			},
+			up:   []string{"node1", "node2", "node3", "node4"},
+			want: Consistency{Verdict: "DIVERGENT", Height: 5, Divergent: []string{"node1", "node2", "node3", "node4"}, Down: []string{}, Agree: 0, Up: 4},
+		},
+		{
+			name: "five nodes split 2-2-1 has no majority",
+			roots: map[string]map[int64]string{
+				"node1": same("X", 5), "node2": same("X", 5), "node3": same("Y", 5), "node4": same("Y", 5), "node5": same("Z", 5),
+			},
+			up:   []string{"node1", "node2", "node3", "node4", "node5"},
+			want: Consistency{Verdict: "DIVERGENT", Height: 5, Divergent: []string{"node1", "node2", "node3", "node4", "node5"}, Down: []string{}, Agree: 0, Up: 5},
+		},
+		{
+			name: "five nodes split 3-1-1 has a majority",
+			roots: map[string]map[int64]string{
+				"node1": same("X", 5), "node2": same("X", 5), "node3": same("Y", 5), "node4": same("X", 5), "node5": same("Z", 5),
+			},
+			up:   []string{"node1", "node2", "node3", "node4", "node5"},
+			want: Consistency{Verdict: "DIVERGENT", Height: 5, Divergent: []string{"node3", "node5"}, Down: []string{}, Agree: 3, Up: 5},
+		},
+		{
 			name: "down node is never divergent",
 			roots: map[string]map[int64]string{
 				"node1": same("X", 5), "node2": same("X", 5), "node3": same("X", 5), "node4": same("Z", 2),

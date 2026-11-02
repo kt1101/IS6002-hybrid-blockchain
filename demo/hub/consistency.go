@@ -16,8 +16,9 @@ type Consistency struct {
 // Judge compares the up nodes' ledger roots. roots maps node → height → hex
 // root. Replicas apply a block a few ms apart, so roots are only compared at
 // the highest height every up node has; with no such height the verdict is
-// UNKNOWN. A strictly largest group of equal roots is the majority and every
-// other up node is divergent; with no strict majority (a tie) every up node is.
+// UNKNOWN. A group of equal roots holding more than half of the up nodes is the
+// majority and every other up node is divergent; without one (a tie, 2-1-1,
+// all different, ...) every up node is divergent and Agree is 0.
 // Nodes in roots that are not in up are reported as Down, never as divergent.
 func Judge(roots map[string]map[int64]string, up []string) Consistency {
 	c := Consistency{Verdict: "UNKNOWN", Divergent: []string{}, Down: []string{}, Up: len(up)}
@@ -51,20 +52,14 @@ func Judge(roots map[string]map[int64]string, up []string) Consistency {
 
 	c.Verdict = "DIVERGENT"
 	var best []string
-	tie := false
 	for _, g := range groups {
-		switch {
-		case len(g) > len(best):
-			best, tie = g, false
-		case len(g) == len(best):
-			tie = true
+		if len(g) > len(best) {
+			best = g
 		}
 	}
-	if !tie {
+	inMajority := map[string]bool{}
+	if len(best)*2 > len(up) { // absolute majority: more than half of the up nodes
 		c.Agree = len(best)
-	}
-	inMajority := make(map[string]bool, len(best))
-	if !tie {
 		for _, n := range best {
 			inMajority[n] = true
 		}
