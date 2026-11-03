@@ -175,6 +175,7 @@ EXP=e1-bf100ms BATCH_FLUSH=100ms experiments/exp/e1_clients.sh
 | `CPUS` / `MEM` | 0.5 / 768m | Per-node limits |
 | `FIXED_CLIENTS`, `BEST_CLIENTS_<BACKEND>` | from E1 | Override the clients of E2–E6 |
 | `E6_NF`, `F5_KINDS`, `E6_LEADER` | `4:1 7:2`, `F5-F2 F5-F4`, 1 | E6 matrix; `E6_LEADER=1` adds crash and slow faults on node1 (the Raft leader) for raft and kafka |
+| `E6_KINDS` | `F1 F2 F3 F4` | f-node faults of E6 (and, for F1/F3, the leader faults); e.g. `F1 F2 F4` where `sch_netem` is missing |
 
 **Behaviour of the drivers:**
 
@@ -246,6 +247,38 @@ experiments/exp/test_exp.sh
 ### P0 baseline (paper's servers)
 
 `experiments/exp/p0_baseline.sh` runs the paper's `kafka-orig` and `tm-orig` servers on the same harness (clients {4, 16, 64, 256} at N = 4, then N = {4, 8, 16} via `NS_B`). The results are in `results/p0-baseline.csv`.
+
+### Cloud campaign (E1–E6 at 100 ms flush)
+
+A second, separate data set re-runs E1–E6 with `BATCH_FLUSH=100ms` on one linux/amd64 cloud host (4 CPU, 15.7 GiB), so that the 1 s batcher timer no longer hides the protocol differences. Its data, figures and RQ3 tables are in [`results/cloud-bf100ms/`](results/cloud-bf100ms/). Setup, gaps and results are in the "Đợt chạy cloud" section of [`experiments/NOTES.md`](experiments/NOTES.md). Do not mix this data with the M3 data: the hardware differs.
+
+Gaps of this campaign:
+
+- **No E5 and no F3.** The host kernel has no `sch_netem`.
+- **N = 7 saturates the 4 host CPUs.** Do not draw scaling conclusions from it.
+- **Some runs ran out of memory at 768 MB.** bft2 F4/F5-F4 runs are therefore in a separate `MEM=1g` set (`e6mem1g`), and raft N = 7 F1-leader and F4 have 2 of 3 reps.
+
+```bash
+experiments/cloud/build.sh
+```
+
+```bash
+experiments/cloud/campaign.sh
+```
+
+```bash
+python3 experiments/cloud/assemble.py results/cloud-bf100ms results/cloud-bf100ms/final
+```
+
+```bash
+python3 experiments/plot/plot.py results/cloud-bf100ms/final/*.csv --out results/cloud-bf100ms/figs --rerun results/cloud-bf100ms/rerun.txt
+```
+
+```bash
+python3 experiments/plot/rq3_table.py results/cloud-bf100ms/final/e6 --out results/cloud-bf100ms/figs
+```
+
+`build.sh` is only needed behind a TLS-intercepting proxy without Debian mirrors (a Claude Code cloud session). On a normal Docker host, use `experiments/build.sh`. `campaign.sh` itself runs anywhere.
 
 ## Reproduce the paper (original artifact)
 

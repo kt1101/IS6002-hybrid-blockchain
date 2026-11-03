@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plot"))
 from plot import run_tag  # noqa: E402
 
-NAME = re.compile(r"^(?P<prefix>[A-Za-z0-9.-]+?)-(?P<exp>e[1-6])-bf100ms\.csv$")
+NAME = re.compile(r"^(?P<prefix>[A-Za-z0-9.-]+?)-(?P<exp>e[1-6][a-z0-9]*)-bf100ms\.csv$")
 
 
 def main(argv):

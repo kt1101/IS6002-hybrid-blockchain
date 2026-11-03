@@ -1,0 +1,7 @@
+DURATION=180s
+WARMUP=10s
+CPUS=0.5
+MEM=1g
+LOAD_THREADS=default
+BATCH_FLUSH=100ms
+commit=abc79cd

@@ -281,3 +281,76 @@ Toàn bộ lịch sử (44 commit, nhánh `master` và `spike/hotstuff`, tag `p0
 | 2026-11-02 | `a5b21aa` | `4e15297` | plot: E6 no-fault ticks in backend colour, duplicate (backend, fault) rows raise |
 | 2026-11-02 | `cbf3735` | `80fbd66` | plot: RQ3 liveness metrics on the write timeline when .wtimeline is usable (timeline_source key and column) |
 | 2026-11-02 | `b02d523` | `5389261` | results: final data and figures |
+
+## Đợt chạy cloud: E1–E6 ở flush 100 ms (2026-11-02 → 2026-11-03)
+
+Mục đích: bộ hẹn giờ flush 1 s che phần lớn khác biệt giữa các giao thức ở E1–E6 (xem "Quyết định về BATCH_FLUSH"); đợt này chạy lại cả E1–E6 với `BATCH_FLUSH=100ms` trên **một máy**, để E2–E6 lấy CLIENTS tốt nhất từ E1 đo trên cùng máy. Dữ liệu này **không gộp** với dữ liệu M3 (phần cứng khác).
+
+### Môi trường
+
+- Phiên Claude Code trên cloud: linux/amd64, **4 CPU**, 15,7 GiB RAM, kernel 6.18 (firecracker), Docker 29.9.2 (dockerd khởi động tay). Host rảnh (không có ứng dụng khác).
+- Giới hạn giữ như M3: mỗi node `CPUS=0.5`, `MEM=768m`; broker Kafka 2 CPU / 1,5 GB; 10k bản ghi YCSB 1 KB; `DURATION=60s`, `WARMUP=10s` (E6: 180 s, lỗi ở giây 60).
+- Build: `experiments/cloud/build.sh` (các Dockerfile trong `experiments/docker/` giữ nguyên). Mạng ra ngoài đi qua proxy chặn TLS: image gốc được thay qua `--build-context` bằng bản có CA của proxy; `deb.debian.org` bị chính sách mạng chặn (403), nên `hbdb-node` dựng trên Ubuntu 24.04 với **cùng binary Redis 6.2.24** chép từ `redis:6.2-bookworm` (`experiments/cloud/Dockerfile.redis-ubuntu`). Tendermint v0.35.0, Kafka 2.7.0, librdkafka (confluent-kafka-go v2.1.1, amd64) như M3.
+- Driver: `experiments/cloud/campaign.sh` (EXP `cloud-eN-bf100ms`, `E1_EXP=cloud-e1-bf100ms`). Dữ liệu: `results/cloud-bf100ms/` (CSV, `.failures`, `.params`, sidecar mỗi lượt); `experiments/cloud/assemble.py` → `results/cloud-bf100ms/final/eN.csv` (cột `exp` đổi thành `eN`; chỉ chép sidecar của lượt có dòng CSV, vì lượt hỏng vẫn để lại `.timeline` mà `rq3_table.py` sẽ đếm như một lượt); hình và bảng RQ3 ở `results/cloud-bf100ms/figs/`.
+- Mã đo không đổi suốt đợt: từ `f598595` tới cuối, ngoài `results/` chỉ có `.gitignore` và `experiments/cloud/assemble.py` thay đổi. Cột `commit` vì vậy có nhiều mã (các commit chỉ thêm kết quả) và vài dòng `-dirty` (lúc `assemble.py` chưa commit); E6 chạy tiếp với `EXP_ALLOW_COMMIT_CHANGE=1`.
+
+### Không chạy được / sai lệch so với kế hoạch
+
+- **Không có E5 và F3**: kernel không có `sch_netem` (`CONFIG_NET_SCH_NETEM is not set`), nên không tạo được RTT hay node chậm. `campaign.sh` tự phát hiện và chạy E6 với `E6_KINDS="F1 F2 F4"` (cờ mới của `e6_faults.sh`; không có F3, kể cả F3 leader): 108 lượt thay vì 144. E5/F3 phải đo trên máy có netem (M3).
+- **N=7 bão hòa CPU host**: mọi điểm N=7 (E2, E6) có `saturated=1` (CPU host > 90%: 7 × 0,5 + broker 2 + TSO trên 4 CPU). Kết quả N=7 phản ánh máy 4 CPU nhiều hơn giao thức; không dùng để kết luận về khả năng mở rộng.
+- **Container của phiên khởi động lại** lúc ~22:50Z (giữa E6). Ổ đĩa giữ nguyên; lượt đang chạy dở không có dòng CSV; driver chạy tiếp và bỏ qua dòng đã có.
+- **Tendermint mất khối khi bão hòa** (như M3, xem "Tendermint: mất khối khi bão hòa"): ở c256 nhiều lượt có > 1% lượt ghi hết thời gian. E2–E4 được chạy bù với `VALID_MAX_WRITE_ERR_PCT=5` (như M3). Còn thiếu: E3 block 10 chỉ có 2/3 rep (lần thử thứ ba dừng 20 s liên tiếp, rồi 5,8% lỗi ghi); hai rep phụ của E1 c256 (CV 13%) đều hỏng.
+- **OOM ở E6 với 768m**: thông lượng cloud cao gấp 1,5–3 lần M3, nên trong lượt 180 s bộ nhớ node (veritas + sidecar + redis) chạm trần:
+  - bft2 với F4/F5-F4 (`corrupt`): mọi lượt bị OOM (F4 không làm giảm thông lượng, nên bộ nhớ tăng suốt 180 s; RSS ~590–645 MiB rồi bị kill). Đã chạy bổ sung **4 cấu hình này với `MEM=1g`** ở EXP riêng `cloud-e6mem1g-bf100ms` (12/12 lượt đạt; `final/e6mem1g.csv`, `figs/e6mem1g_*`, `figs/rq3_summary_e6mem1g.csv`). Đây là biến khác (giới hạn bộ nhớ) so với mọi lượt khác, phải ghi rõ khi trích dẫn.
+  - raft N=7: F1 leader và F4 chỉ có 2/3 rep (lượt còn lại OOM cả khi chạy lại).
+- Rep phụ do CV > 10% vẫn chạy như kế hoạch (`results/cloud-bf100ms/rerun.txt`: 15 cấu hình còn cờ, phần lớn là E6, nơi tps trộn phần lành và phần lỗi nên CV cao là bình thường).
+
+### Kết quả chính (tps trung bình, `final/`)
+
+E1 (N=4, block 100), so với E1 100 ms trên M3:
+
+| CLIENTS | kafka | raft | bft2 | tendermint | M3 (kafka / raft / bft2 / tendermint) |
+|---|---|---|---|---|---|
+| 4 | 78 | 78 | 66 | 6,1 | 78 / 76 / 64 / 6 |
+| 16 | 313 | 315 | 253 | 24 | 295 / 279 / 237 / 24 |
+| 64 | 1041 | 1039 | 856 | 93 | 845 / 824 / 693 / 95 |
+| 256 | 1789 | 1851 | 1690 | 312 | 1115 / 1150 / 1170 / 247 |
+
+- CV ≤ 7% ở mọi điểm trừ tendermint c256 (13%): máy cloud yên hơn nhiều so với M3 (CV 13–26% ở c64–c256).
+- Ở tải thấp hai máy cho cùng số (giới hạn bởi độ trễ); ở c64–c256 cloud cao hơn 25–60%.
+- Thứ hạng ổn định: kafka ≈ raft > bft2 (thấp hơn ~15–20% ở c4–c64, ~5–9% ở c256) ≫ tendermint (thấp hơn ~6 lần, do `timeout-commit = 1s`, I6). CLIENTS tốt nhất = 256 cho cả 4 backend.
+
+E2–E4 (CLIENTS 256):
+
+| | kafka | raft | bft2 | tendermint |
+|---|---|---|---|---|
+| E2 N=4 / N=7 | 1828 / 1690 | 1870 / 2004 | 1656 / 1516 | 298 / 249 |
+| E3 block 10 / 100 / 1000 | 1693 / 1811 / 1771 | 1829 / 1760 / 1891 | 1322 / 1654 / 1667 | 190 / 314 / 302 |
+| E4 workload a / b / c | 1880 / 8567 / 14357 | 1935 / 8923 / 14549 | 1688 / 7178 / 13335 | 327 / 2224 / 13560 |
+
+- E2: N=7 bão hòa CPU host (trên), không kết luận.
+- E3: ở flush 100 ms, block 10 làm giảm bft2 (−20%) và tendermint (−40%), gần như không ảnh hưởng kafka/raft. **Block 100 và 1000 vẫn bằng nhau**: với 256 client mỗi node chỉ có ~CLIENTS/(2N) ≈ 32 `Set` đang chờ, nên block 100 vẫn không đầy; flush 100 ms làm hết hiện tượng bộ hẹn giờ che giao thức, nhưng không làm block đầy. Muốn block đầy cần nhiều client hơn (tendermint bị chặn ở 256).
+- E4: như M3; đọc phục vụ cục bộ nên workload c gần như bằng nhau.
+
+### RQ3 (E6, cloud)
+
+Chỉ số dùng ở đây: **tỉ lệ ghi** = lượt ghi thành công/giây trung bình sau lỗi (t = 70–180 s) chia cho trước lỗi (t = 0–60 s), từ `.wtimeline`. Lưu ý:
+
+- Thông lượng tự giảm trong lượt 180 s (ledger/badger lớn dần ở thông lượng cao): ở F4, lỗi không chạm tới đồng thuận nhưng tỉ lệ của kafka/raft/bft2 vẫn chỉ 0,7–0,85. So các lỗi khác với mức F4, không với 1,0.
+- `recovery_status` của `rq3.py` (giây đầu tiên ≥ 90% mức trước lỗi) cho kết quả sai với tendermint: timeline ghi của tendermint theo đợt (vd. 192, 0, 192 mỗi giây), một giây vượt ngưỡng là tính "recovered" dù sau đó ghi = 0 hẳn. Bảng `figs/rq3_summary.csv` vẫn được tạo như M3, nhưng kết luận dưới đây dựa trên tỉ lệ ghi.
+
+| Tỉ lệ ghi (rep) | kafka | raft | tendermint | bft2 |
+|---|---|---|---|---|
+| F1 N=4 (node4) | 0,00 | 0,60–0,67 | 0,33–0,50 | 0,24 |
+| F1 N=7 (2 node) | 0,00 | 0,64–0,72 | 0,38–0,51 | 0,09–0,11 |
+| F2 N=4 | 0,43–0,48 | 0,63–0,69 | 0,00–0,02 | 0,17–0,19 |
+| F2 N=7 | 0,00 | 0,66–0,80 | 0,00–0,01 | 0,00–0,07 |
+| F4 N=4 | 0,65–0,71 | 0,71–0,74 | 0,85–0,94 | 0,78–0,79 (1g) |
+| F4 N=7 | 0,71–0,83 | 0,68–0,80 | 0,88–1,57 | 0,79–0,84 (1g) |
+
+- **F1/F2 kafka**: như M3 — crash làm dừng ghi hẳn (approve-all); F2 N=4 chỉ còn client của node im lặng ghi được.
+- **raft**: mọi lỗi f node (kể cả crash leader node1: bầu lại, dừng ghi 1–2 s) giữ mức ngang F4 (~0,65–0,8): không mất gì ngoài client của node lỗi.
+- **tendermint F2 (1 node bị cô lập, N=4) và F2 N=7: mất liveness** (ghi = 0 từ ~10–20 s sau lỗi tới hết lượt, 3/3 và 5/5 rep), trái với giả thuyết và với M3 (M3: dừng 16,6 s rồi chạy tiếp ở ~1/3). F1 (crash) thì chạy tiếp ở 0,33–0,51. Khả năng là áp lực ngược của adapter ABCI (kênh Deliver đầy → `DeliverTx` giữ mutex) bị kích hoạt khi một validator im lặng ở tải cao; **cần điều tra trước khi dùng làm kết luận**.
+- **bft2 F1/F2**: vẫn chạy (dừng ghi ≤ 1 s, trừ F2 N=7) nhưng ghi chỉ còn 0,17–0,24 (N=4) và 0,0–0,11 (N=7): khác M3 (ở M3, tps tổng của bft2 F1 còn ~80% mốc không lỗi). Nguyên nhân phù hợp với giới hạn adapter (I3): mỗi view chỉ đề xuất từ hàng đợi của leader hiện tại, view của node chết hết thời gian, và client của node đó bị mất.
+- **F5-F2 (f+1 node im lặng)**: tendermint và bft2 mất liveness như M3 (bft2 vẫn còn ghi lẻ tẻ: tps tổng ~620 gồm đọc).
+- **F4 / F5-F4**: đồng thuận không bị ảnh hưởng; auditor phát hiện sau 0,2–1,5 s ở mọi lượt có dòng CSV; client đọc từ node lỗi nhận giá trị sai (`wrong_gets` 1,7–42 nghìn mỗi lượt, cao hơn M3 vì đọc nhiều hơn). bft2 F4/F5-F4 chỉ có ở 1g (trên).
