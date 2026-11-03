@@ -28,3 +28,6 @@ results/ycsb/
 
 # Per-run sidecars of the final data set (rebuilt by experiments/plot/assemble_final.py)
 results/final/*/
+
+# Per-run sidecars of the cloud final data set (rebuilt by experiments/cloud/assemble.py)
+results/cloud-bf100ms/final/*/
