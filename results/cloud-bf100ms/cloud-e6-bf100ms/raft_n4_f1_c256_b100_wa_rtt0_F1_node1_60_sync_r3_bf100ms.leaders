@@ -1,0 +1,6 @@
+node1 node1-1  | 2026-11-03T01:53:26.661570297Z 2026-11-03T01:53:26.661Z [INFO]  raft: entering leader state: leader="Node at 172.28.0.11:7100 [Leader]"
+node2 node2-1  | 2026-11-03T01:54:45.445347908Z 2026-11-03T01:54:45.445Z [INFO]  raft: entering leader state: leader="Node at 172.28.0.12:7100 [Leader]"
+node2 node2-1  | 2026-11-03T01:55:56.151669640Z 2026-11-03T01:55:56.150Z [INFO]  raft: entering leader state: leader="Node at 172.28.0.12:7100 [Leader]"
+node4 node4-1  | 2026-11-03T01:54:59.119463098Z 2026-11-03T01:54:59.119Z [INFO]  raft: entering leader state: leader="Node at 172.28.0.14:7100 [Leader]"
+node4 node4-1  | 2026-11-03T01:55:34.021448033Z 2026-11-03T01:55:34.021Z [INFO]  raft: entering leader state: leader="Node at 172.28.0.14:7100 [Leader]"
+node4 node4-1  | 2026-11-03T01:56:41.728803243Z 2026-11-03T01:56:41.728Z [INFO]  raft: entering leader state: leader="Node at 172.28.0.14:7100 [Leader]"

@@ -1,0 +1,4 @@
+utc,epoch_ms,t_s,timeline_s,fault,action,node,detail
+2026-11-03T01:18:54Z,1793668734412,-9.976,0.024,F1:node7+node6@60,run_phase_start,,ycsbbench run phase (timeline line 0); measurement t=0 is 10000 ms later
+2026-11-03T01:20:04Z,1793668804409,60.021,70.021,F1:node7+node6@60,docker_stop,node7+node6,containers node7=48bb29cd7ad3442499bb6e657dadf08c0095fc832a3581e10790327069724d83 node6=427405f5c4d67cdb61b91d57c86b6e146f0c7451e81665aedffd5866cf30bfef
+2026-11-03T01:20:04Z,1793668804893,60.505,70.505,F1:node7+node6@60,stopped,node7+node6,docker stop returned
