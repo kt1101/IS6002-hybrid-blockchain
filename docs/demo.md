@@ -204,17 +204,15 @@ Dùng theo thứ tự, khi phương án trước gặp sự cố:
 
 ### Dựng lại dashboard kết quả
 
-Dashboard (`results/dashboard.html`) và trang `/overview` của demo (`demo/web/static/overview.html`) được sinh từ cùng một lệnh, đọc `results/final/*.csv` và `results/figs/rq3_summary.csv`:
+Dashboard (`results/dashboard.html`) và trang `/overview` của demo (`demo/web/static/overview.html`) được sinh từ cùng một lệnh. Các bộ dữ liệu được khai báo trong `experiments/plot/dashboard_datasets.json`: **Cloud · flush 100 ms** (`results/cloud-bf100ms/`, mặc định, có sidecar nên có write latency và tỉ lệ ghi E6), **M3 · flush 1 s** (`results/final/`) và baseline P0 (`results/p0-baseline.csv`). Mỗi bộ có mô tả máy và danh sách lưu ý (lấy từ `experiments/NOTES.md`) hiện ngay trên trang. Chạy từ gốc repo:
 
 ```bash
 python3 experiments/plot/build_dashboard.py \
-    --final results/final \
-    --rq3 results/figs/rq3_summary.csv \
     --out results/dashboard.html \
     --out demo/web/static/overview.html
 ```
 
-`--out` có thể lặp lại; mọi file nhận cùng nội dung. Chỉ dùng thư viện chuẩn của Python. Sau khi sinh lại `overview.html`, build lại demo (`go run ./cmd/demo` tự biên dịch lại) vì file được nhúng vào binary bằng `go:embed`.
+Thêm một đợt đo mới: thêm một mục vào `dashboard_datasets.json` (thư mục `final`, các file RQ3, thư mục sidecar nếu có, lưu ý), rồi chạy lại lệnh trên. `--out` có thể lặp lại; mọi file nhận cùng nội dung. Chỉ dùng thư viện chuẩn của Python. Sau khi sinh lại `overview.html`, build lại demo (`go run ./cmd/demo` tự biên dịch lại) vì file được nhúng vào binary bằng `go:embed`.
 
 ### Smoke test cần Playwright
 

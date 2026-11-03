@@ -2,10 +2,11 @@
 //
 //   node experiments/plot/smoke_dashboard.cjs [screenshot-dir]
 //
-// Opens results/dashboard.html via file:// in Chromium (Playwright), clicks
-// every tab, checks that each chart tab draws SVG data marks, toggles one
-// backend off and on, and fails on any console error or page error.
-// Screenshots dash-<tab>.png go to screenshot-dir (default: the system temp
+// Opens results/dashboard.html via file:// in Chromium (Playwright), switches
+// to every dataset and clicks every tab, checks that each chart draws SVG data
+// marks (or says why it has none), toggles one backend off and on, and fails
+// on any console error or page error.
+// Screenshots dash-<dataset>-<tab>.png go to screenshot-dir (default: the system temp
 // directory). Exits 0 on success.
 'use strict';
 
@@ -36,28 +37,43 @@ async function main() {
     if (title.trim() !== 'Results overview') fail('h1 = ' + JSON.stringify(title));
     if (await page.isVisible('#pages')) fail('Live demo link visible under file://');
 
-    const tabs = await page.$$eval('[role=tab]', (els) => els.map((e) => ({ id: e.id, label: e.textContent })));
-    if (tabs.length !== 5) fail('expected 5 tabs, got ' + tabs.length);
-    for (const t of tabs) {
-      await page.click('#' + t.id);
-      const panel = '#' + t.id.replace('tab-', 'panel-');
-      await page.waitForSelector(panel, { state: 'visible' });
-      const name = t.id.replace('tab-', '');
-      if (name === 'overview') {
-        const cards = await page.$$eval(panel + ' .card', (els) => els.length);
-        const big = await page.$$eval(panel + ' .hero .big', (els) => els.map((e) => e.textContent));
-        if (cards < 4 || big.length < 2 || big.some((v) => !/^\d+\.\d\d×$/.test(v))) fail('overview cards incomplete: ' + cards + ' cards, hero ' + JSON.stringify(big));
-      } else {
-        const charts = await page.$$eval(panel + ' .chart', (els) => els.map((e) => e.querySelectorAll('svg .mark, svg .bar').length));
-        if (!charts.length || charts.some((n) => n === 0)) fail(name + ': chart without data marks: ' + JSON.stringify(charts));
-        console.log(name + ': ' + charts.length + ' charts, marks ' + JSON.stringify(charts));
+    const datasets = await page.$$eval('#datasets button[data-dataset]', (els) => els.map((e) => e.getAttribute('data-dataset')));
+    if (datasets.length < 2) fail('expected a dataset switch, got ' + JSON.stringify(datasets));
+    const heroes = {};
+    for (const ds of datasets) {
+      await page.click('#datasets button[data-dataset=' + ds + ']');
+      if ((await page.getAttribute('#datasets button[data-dataset=' + ds + ']', 'aria-pressed')) !== 'true') fail(ds + ': switch not pressed');
+      const tabs = await page.$$eval('[role=tab]', (els) => els.map((e) => ({ id: e.id, label: e.textContent })));
+      if (tabs.length !== 6) fail('expected 6 tabs, got ' + tabs.length);
+      for (const t of tabs) {
+        await page.click('#' + t.id);
+        const panel = '#' + t.id.replace('tab-', 'panel-');
+        await page.waitForSelector(panel, { state: 'visible' });
+        const name = t.id.replace('tab-', '');
+        if (name === 'overview') {
+          const cards = await page.$$eval(panel + ' .card', (els) => els.length);
+          const big = await page.$$eval(panel + ' .hero .big', (els) => els.map((e) => e.textContent));
+          if (cards < 4 || big.length < 2 || big.some((v) => !/^\d+\.\d\d×$/.test(v))) fail(ds + ' overview cards incomplete: ' + cards + ' cards, hero ' + JSON.stringify(big));
+          heroes[ds] = big.join(',');
+          if (!(await page.isVisible(panel + ' .ds-card li'))) fail(ds + ': dataset caveats not shown on the overview');
+        } else if (name === 'scope') {
+          const rows = await page.$$eval(panel + ' table tbody tr', (els) => els.length);
+          if (rows < 20) fail('scope tables too small: ' + rows + ' rows');
+        } else {
+          // every chart box draws marks or says why it has no data
+          const charts = await page.$$eval(panel + ' .chart', (els) => els.map((e) => e.querySelector('.empty') ? -1 : e.querySelectorAll('svg .mark, svg .bar').length));
+          if (!charts.some((n) => n > 0) || charts.some((n) => n === 0)) fail(ds + ' ' + name + ': chart without data marks: ' + JSON.stringify(charts));
+          console.log(ds + ' ' + name + ': ' + charts.length + ' charts, marks ' + JSON.stringify(charts));
+        }
+        if (name === 'rq3') {
+          const rows = await page.$$eval(panel + ' table tbody tr', (els) => els.length);
+          if (rows === 0) fail(ds + ' rq3 tables empty');
+        }
+        await page.screenshot({ path: path.join(SHOTS, 'dash-' + ds + '-' + name + '.png'), fullPage: true });
       }
-      if (name === 'rq3') {
-        const rows = await page.$$eval(panel + ' table tbody tr', (els) => els.length);
-        if (rows === 0) fail('rq3 table empty');
-      }
-      await page.screenshot({ path: path.join(SHOTS, 'dash-' + name + '.png'), fullPage: true });
     }
+    if (new Set(Object.values(heroes)).size !== datasets.length) fail('overview identical across datasets: ' + JSON.stringify(heroes));
+    await page.click('#datasets button[data-dataset=m3]');
 
     // Toggle one backend off on the Sensitivity tab: its marks disappear, then return.
     await page.click('#tab-sens');

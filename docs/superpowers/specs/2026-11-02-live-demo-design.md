@@ -255,6 +255,7 @@ Mỗi bước là một nút. Bấm nút thì gọi đúng các API ở trên (k
 ## 8. Dashboard kết quả (`results/dashboard.html`)
 
 - `experiments/plot/build_dashboard.py`:
+  - (cập nhật 2026-11-03) đọc các bộ dữ liệu khai báo trong `experiments/plot/dashboard_datasets.json`: Cloud flush 100 ms (`results/cloud-bf100ms/`, có sidecar → write latency, tỉ lệ ghi E6, số thao tác Kafka) và M3 (`results/final/`), cộng baseline P0; trang có công tắc chọn bộ dữ liệu, thẻ lưu ý của từng bộ, biểu đồ byte mạng mỗi block, latency p99 theo lỗi, bảng `wrong_gets`, và tab **Scope & baseline** (phạm vi so với bài gốc, P0, đối chiếu hai máy, giới hạn, phase 2 dự kiến);
   - đọc `results/final/e1.csv`, `e1-bf100ms.csv`, `e2.csv`, …, `e6.csv`, `results/figs/rq3_summary.csv`;
   - gom theo cấu hình (backend, n, clients, block_size, workload, rtt_ms, fault): mean, std mẫu, số rep cho `tps`, `lat_mean_ms`, `lat_p99_ms`;
   - ghi **một file HTML** với dữ liệu JSON nhúng trong `<script type="application/json">`, CSS và JS inline. Không CDN, mở bằng double-click.
