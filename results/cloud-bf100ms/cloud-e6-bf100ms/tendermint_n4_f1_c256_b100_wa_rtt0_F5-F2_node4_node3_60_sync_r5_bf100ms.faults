@@ -1,0 +1,6 @@
+utc,epoch_ms,t_s,timeline_s,fault,action,node,detail
+2026-11-03T04:56:31Z,1793681791003,-9.974,0.026,F5-F2:node4+node3@60,run_phase_start,,ycsbbench run phase (timeline line 0); measurement t=0 is 10000 ms later
+2026-11-03T04:57:40Z,1793681860994,60.017,70.017,F5-F2:node4+node3@60,iptables_drop,node4,tcp OUTPUT --dport/--sport 26656
+2026-11-03T04:57:41Z,1793681861312,60.335,70.335,F5-F2:node4+node3@60,iptables_applied,node4,iptables returned
+2026-11-03T04:57:41Z,1793681861346,60.369,70.369,F5-F2:node4+node3@60,iptables_drop,node3,tcp OUTPUT --dport/--sport 26656
+2026-11-03T04:57:41Z,1793681861493,60.516,70.516,F5-F2:node4+node3@60,iptables_applied,node3,iptables returned

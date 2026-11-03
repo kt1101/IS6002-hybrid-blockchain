@@ -1,0 +1,5 @@
+utc,epoch_ms,t_s,timeline_s,fault,action,node,detail
+2026-11-03T07:24:27Z,1793690667901,-9.991,0.009,F4:node4@60,run_phase_start,,ycsbbench run phase (timeline line 0); measurement t=0 is 10000 ms later
+2026-11-03T07:25:37Z,1793690737928,60.036,70.036,F4:node4@60,corrupt_on,node4,SIGUSR1 to veritas (--fault=corrupt)
+2026-11-03T07:25:38Z,1793690738189,60.297,70.297,F4:node4@60,corrupt_applied,node4,kill returned
+2026-11-03T07:25:38Z,1793690738480,60.588,70.588,F4:node4@60,corrupt_confirmed,node4,/tmp/hbdb-fault-active reads corrupt

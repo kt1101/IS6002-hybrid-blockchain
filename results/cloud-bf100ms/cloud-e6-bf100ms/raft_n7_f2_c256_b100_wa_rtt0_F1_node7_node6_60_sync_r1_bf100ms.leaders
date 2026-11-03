@@ -1,0 +1,2 @@
+node1 node1-1  | 2026-11-02T19:50:56.484240225Z 2026-11-02T19:50:56.483Z [INFO]  raft: entering leader state: leader="Node at 172.28.0.11:7100 [Leader]"
+node1 node1-1  | 2026-11-02T19:54:09.123482343Z 2026-11-02T19:54:09.123Z [INFO]  raft: entering leader state: leader="Node at 172.28.0.11:7100 [Leader]"

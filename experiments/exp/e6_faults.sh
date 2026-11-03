@@ -41,7 +41,10 @@
 #
 # Other env: E6_NF="4:1 7:2" (N:f pairs), E6_AT=60 (injection second),
 # E6_DURATION=180s, F5_KINDS="F5-F2 F5-F4", E6_LEADER=1,
-# E6_LEADER_BACKENDS="raft kafka", and the common env, resumability, retry,
+# E6_LEADER_BACKENDS="raft kafka", E6_KINDS="F1 F2 F3 F4" (the f-node faults
+# run for every backend; the leader faults are those of F1 F3 in E6_KINDS:
+# e.g. E6_KINDS="F1 F2 F4" on a kernel without sch_netem, where F3 cannot be
+# injected), and the common env, resumability, retry,
 # noise rule and exit codes described in experiments/exp/exp_lib.sh.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/exp_lib.sh"
@@ -51,6 +54,7 @@ E6_AT="${E6_AT:-60}"
 F5_KINDS="${F5_KINDS:-F5-F2 F5-F4}"
 E6_LEADER="${E6_LEADER:-1}"
 E6_LEADER_BACKENDS="${E6_LEADER_BACKENDS:-raft kafka}"
+E6_KINDS="${E6_KINDS:-F1 F2 F3 F4}"
 case "$E6_LEADER" in 0 | 1) ;; *) die "E6_LEADER must be 0 or 1, got '$E6_LEADER'" ;; esac
 if [ -n "${DURATION:-}" ] && [ "$DURATION" != "${E6_DURATION:-180s}" ]; then
   log "note: DURATION=$DURATION is ignored: E6 runs DURATION=${E6_DURATION:-180s} (the fault is at second ${E6_AT}); set E6_DURATION to change it"
@@ -67,6 +71,14 @@ done
 for k in $F5_KINDS; do
   case "$k" in F5-F2 | F5-F4) ;; *) die "F5_KINDS entries must be F5-F2 or F5-F4, got '$k'" ;; esac
 done
+[ -n "$E6_KINDS" ] || die "E6_KINDS must list at least one of F1 F2 F3 F4"
+for k in $E6_KINDS; do
+  case "$k" in F1 | F2 | F3 | F4) ;; *) die "E6_KINDS entries must be F1, F2, F3 or F4, got '$k'" ;; esac
+done
+E6_LEADER_KINDS=""
+for k in F1 F3; do
+  hbdb_in_list "$k" "$E6_KINDS" && E6_LEADER_KINDS="$E6_LEADER_KINDS $k"
+done
 for b in $E6_LEADER_BACKENDS; do
   hbdb_in_list "$b" "$EXP_BACKENDS_ALL" || die "E6_LEADER_BACKENDS: '$b' is not an E1-E6 backend (one of: $EXP_BACKENDS_ALL)"
 done
@@ -79,7 +91,7 @@ exp_plan() {
       n="${p%%:*}"
       f="${p##*:}"
       nodes="$(fault_default_nodes "$n" "$f")"
-      for kind in F1 F2 F3 F4; do
+      for kind in $E6_KINDS; do
         exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:$nodes@$E6_AT"
       done
       if hbdb_in_list "$b" "tendermint bft2"; then
@@ -89,7 +101,7 @@ exp_plan() {
         done
       fi
       if [ "$E6_LEADER" = 1 ] && hbdb_in_list "$b" "$E6_LEADER_BACKENDS"; then
-        for kind in F1 F3; do
+        for kind in $E6_LEADER_KINDS; do
           exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:node1@$E6_AT"
         done
       fi

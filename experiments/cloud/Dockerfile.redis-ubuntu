@@ -1,0 +1,15 @@
+# Stand-in for redis:6.2-bookworm when Debian mirrors are not reachable (cloud
+# session: deb.debian.org is denied by the egress policy). Same Redis 6.2
+# binaries (copied from the official image), on Ubuntu 24.04 (glibc 2.39 runs
+# the bookworm/bullseye-built binaries), with the official image's /data volume.
+# BASE = hbdb-cloud-base:ubuntu24.04 (Dockerfile.ca on ubuntu:24.04).
+ARG BASE
+FROM redis:6.2-bookworm AS redis
+FROM ${BASE}
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libssl3t64 procps ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=redis /usr/local/bin/redis-* /usr/local/bin/
+RUN redis-server --version && mkdir -p /data
+VOLUME /data
+WORKDIR /data
