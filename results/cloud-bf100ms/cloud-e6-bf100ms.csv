@@ -109,3 +109,4 @@ ts,commit,exp,backend,n,f,clients,block_size,workload,rtt_ms,fault,rep,commit_mo
 2026-11-03T04:59:45Z,af2416b,cloud-e6-bf100ms,tendermint,4,1,256,100,a,0,F5-F4:node4+node3@60,5,sync,249.49,653.836,86.457,1705.145,512,4420,53.26,0,
 2026-11-03T05:04:25Z,af2416b,cloud-e6-bf100ms,tendermint,7,2,256,100,a,0,F2:node7+node6@60,5,sync,100.17,663.158,30.670,2959.315,952,0,55.31,0,
 2026-11-03T05:10:10Z,af2416b,cloud-e6-bf100ms,bft2,7,2,256,100,a,0,F2:node7+node6@60,5,sync,652.13,169.680,72.105,1968.557,790,0,93.31,1,
+2026-11-03T06:51:03Z,b4c54ab,cloud-e6-bf100ms,raft,7,2,256,100,a,0,F1:node1@60,3,sync,1822.97,124.093,66.835,1482.635,3135,0,96.20,1,
