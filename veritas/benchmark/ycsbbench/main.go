@@ -37,6 +37,8 @@ var (
 	loadTimeout       = kingpin.Flag("load-timeout", "Deadline of the data-load phase; exceeding it or any failed load Set aborts the run").Default("20m").Duration()
 	loadOpTimeout     = kingpin.Flag("load-op-timeout", "Deadline of one load Set attempt (bounded by --load-timeout)").Default("30s").Duration()
 	loadAttempts      = kingpin.Flag("load-attempts", "Attempts per record in the data-load phase; a record failing all of them is a failed load Set").Default("3").Int()
+	rate              = kingpin.Flag("rate", "Open-loop load: total requests per second issued at fixed intervals regardless of completions, latency measured from the scheduled time (0: closed loop, every worker waits for its reply)").Default("0").Float64()
+	maxInflight       = kingpin.Flag("max-inflight", "Open-loop load: at most this many outstanding requests; an operation due while the cap is reached is dropped and counted, not queued").Default("4096").Int()
 	settleTimeout     = kingpin.Flag("settle-timeout", "Deadline for every node to serve Get for a sample of loaded keys before the run phase").Default("10m").Duration()
 )
 
@@ -96,6 +98,12 @@ func main() {
 	}
 	if *errBackoffMin < 0 || *errBackoffMax < *errBackoffMin {
 		kingpin.Fatalf("want 0 <= --error-backoff <= --error-backoff-max, got %v and %v", *errBackoffMin, *errBackoffMax)
+	}
+	if *rate < 0 {
+		kingpin.Fatalf("--rate must be >= 0")
+	}
+	if *maxInflight < 1 {
+		kingpin.Fatalf("--max-inflight must be >= 1")
 	}
 	if *mode == "tm" {
 		*tsoAddr = ""
@@ -223,7 +231,14 @@ func main() {
 		}
 	}()
 
-	for i := 0; i < *driverNum; i++ {
+	if *rate > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runOpenLoop(runCtx, rec, clis, runBuf)
+		}()
+	}
+	for i := 0; *rate == 0 && i < *driverNum; i++ {
 		for j := 0; j < *driverConcurrency; j++ {
 			wg.Add(1)
 			go func(seq int) {
@@ -271,6 +286,9 @@ func main() {
 		*driverNum, *driverConcurrency, s.TPS)
 	fmt.Printf("Latency mean/p50/p99: %.3f / %.3f / %.3f ms; errors: %d; wrong gets: %d\n",
 		s.LatMeanMs, s.LatP50Ms, s.LatP99Ms, s.Errors, s.WrongGets)
+	if *rate > 0 {
+		fmt.Printf("Open loop: offered %.2f req/s, max in flight %d, dropped %d\n", *rate, *maxInflight, s.Dropped)
+	}
 	for _, o := range rec.OpSummaries() {
 		fmt.Printf("  %-5s %d ok (%.2f req/s), latency mean/p50/p99: %.3f / %.3f / %.3f ms; errors: %d; aborted: %d\n",
 			o.Op, o.Count, o.TPS, o.LatMeanMs, o.LatP50Ms, o.LatP99Ms, o.Errors, o.Aborted)
@@ -298,9 +316,48 @@ func main() {
 		}
 	}
 	if *opsPath != "" {
-		if err := benchmark.WriteOpsCSV(*opsPath, rec.OpSummaries()); err != nil {
+		if err := benchmark.WriteOpsCSV(*opsPath, rec.OpSummaries(), s.Dropped); err != nil {
 			panic(err)
 		}
+	}
+}
+
+// runOpenLoop issues the operations of runBuf at --rate (benchmark.OpenLoop);
+// operation i goes to driver i mod len(clis). Latency is measured from the
+// scheduled time; dropped operations are recorded with ObserveDropped.
+func runOpenLoop(ctx context.Context, rec *benchmark.Recorder, clis []*driver.Driver, runBuf <-chan *benchmark.Request) {
+	var idx uint64
+	var mu sync.Mutex
+	next := func() *benchmark.Request {
+		select {
+		case op, ok := <-runBuf:
+			if !ok {
+				return nil
+			}
+			return op
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	do := func(ctx context.Context, op *benchmark.Request, scheduled time.Time) {
+		mu.Lock()
+		cli := clis[idx%uint64(len(clis))]
+		idx++
+		mu.Unlock()
+		switch op.ReqType {
+		case benchmark.GetOp:
+			val, err := cli.Get(ctx, op.Key)
+			rec.ObserveGet(time.Now(), time.Since(scheduled), val, err)
+		case benchmark.SetOp:
+			err := cli.Set(ctx, op.Key, op.Val)
+			rec.ObserveSet(time.Now(), time.Since(scheduled), err)
+		default:
+			panic(fmt.Sprintf("invalid operation: %v", op.ReqType))
+		}
+	}
+	_, dropped := benchmark.OpenLoop{Rate: *rate, MaxInflight: *maxInflight}.Run(ctx, next, do)
+	for i := int64(0); i < dropped; i++ {
+		rec.ObserveDropped()
 	}
 }
 

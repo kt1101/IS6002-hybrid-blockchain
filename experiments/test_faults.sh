@@ -909,7 +909,7 @@ awk -v t="$t_s" -v l="$tl_s" 'BEGIN { exit !(t >= 1.0 && t < 1.6 && l >= 2.0 && 
 grep -q '^docker stop c3 c4$' "$SB/state/calls" && ok || bad "itest f1 docker stop: $(grep stop "$SB/state/calls")"
 contains "itest f1 exemption logged" "$it_err" "container node3 is exited (exit code 0): stopped on purpose by FAULT=F1:node3,node4@1"
 row="$(tail -n 1 "$SB_RAW/it_f1.csv")"
-eq "itest f1 row fields" "$(echo "$row" | awk -F, '{ print NF }')" 22
+eq "itest f1 row fields" "$(echo "$row" | awk -F, '{ print NF }')" 23
 eq "itest f1 fault column" "$(echo "$row" | cut -d, -f11)" "F1:node3+node4@1"
 eq "itest f1 temp files removed" "$(ls -a "$SB_RAW/it_f1" | grep -c -e '\.stopped$' -e '\.fault\.stop$')" 0
 
@@ -1048,7 +1048,7 @@ eq "itest snapshots signalled on every node twice" "$(grep -c '^node[1-4] sh -c 
 eq "itest snapshots collected" "$(ls "$SB_RAW/it_side/"*.breakdown/ 2>/dev/null | grep -c 'snap[12]\.json$')" 8
 nb="$(tail -n 1 "$SB_RAW/it_side.csv" 2>/dev/null | cut -d, -f22)"
 eq "itest net_bytes_per_block (4 x 1 MB / 10 blocks)" "$nb" 400000
-eq "itest row has 22 fields" "$(tail -n 1 "$SB_RAW/it_side.csv" | awk -F, '{ print NF }')" 22
+eq "itest row has 23 fields" "$(tail -n 1 "$SB_RAW/it_side.csv" | awk -F, '{ print NF }')" 23
 eq "itest final audit" "$(cat "$(it_tag it_side .final_audit)" 2>/dev/null)" "CONSISTENT"
 grep -q '^auditor --addrs=172.28.0.11:1990,172.28.0.12:1990,172.28.0.13:1990,172.28.0.14:1990 --once$' "$SB/state/auditor_once" 2>/dev/null && ok ||
   bad "itest auditor --once call: $(cat "$SB/state/auditor_once" 2>/dev/null)"

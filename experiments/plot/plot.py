@@ -54,6 +54,7 @@ Figures (main)
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import sys
 from pathlib import Path
@@ -105,8 +106,11 @@ EXPECTED_COLUMNS = [
     "ts", "commit", "exp", "backend", "n", "f", "clients", "block_size",
     "workload", "rtt_ms", "fault", "rep", "commit_mode", "tps", "lat_mean_ms",
     "lat_p50_ms", "lat_p99_ms", "errors", "wrong_gets", "host_cpu_max_pct",
-    "saturated", "net_bytes_per_block",
+    "saturated", "net_bytes_per_block", "offered_rps",
 ]  # same as HBDB_CSV_HEADER in experiments/lib.sh
+# Phase-1 CSVs (results/final/, results/cloud-bf100ms/) have the 22 columns
+# before offered_rps; load_csvs reads them with offered_rps = 0 (closed loop).
+OLD_COLUMNS = EXPECTED_COLUMNS[:-1]
 
 
 class InputError(ValueError):
@@ -127,22 +131,26 @@ def _read_one(path) -> pd.DataFrame:
     if not first:
         raise InputError("%s: empty CSV" % p)
     header = first.split(",")
-    if header != EXPECTED_COLUMNS:
+    if header not in (EXPECTED_COLUMNS, OLD_COLUMNS):
         raise InputError(
             "%s: unexpected CSV header (expected %d columns starting %s,... ending ...,%s; got %d columns: %s)"
             % (p, len(EXPECTED_COLUMNS), EXPECTED_COLUMNS[0], EXPECTED_COLUMNS[-1],
                len(header), first))
     try:
-        return pd.read_csv(p, keep_default_na=False, na_values=[""], encoding="utf-8-sig")
+        df = pd.read_csv(p, keep_default_na=False, na_values=[""], encoding="utf-8-sig")
     except (pd.errors.ParserError, UnicodeDecodeError) as e:
         raise InputError("%s: cannot parse CSV (%s)" % (p, e))
+    if header == OLD_COLUMNS:
+        df["offered_rps"] = 0
+    return df
 
 
 def load_csvs(paths) -> pd.DataFrame:
     """Read and concatenate result CSVs.
 
-    Every file must have exactly the fixed 22-column header (EXPECTED_COLUMNS);
-    otherwise InputError names the file.  Only the empty string counts as
+    Every file must have the fixed 23-column header (EXPECTED_COLUMNS) or the
+    phase-1 22-column one (OLD_COLUMNS, read with offered_rps = 0); otherwise
+    InputError names the file.  Only the empty string counts as
     missing (so a fault named "none" stays a string); empty numeric cells, e.g.
     net_bytes_per_block, become NaN.
     """
@@ -198,14 +206,36 @@ def read_write_latency(path):
     return None
 
 
+def rate_suffix(row) -> str:
+    """run_one.sh's "_rate<RATE>" tag suffix of an open-loop row ("" for
+    offered_rps 0 or missing)."""
+    r = row.get("offered_rps", 0) if hasattr(row, "get") else 0
+    try:
+        if r is None or float(r) <= 0 or math.isnan(float(r)):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    return "_rate" + _cell(float(r) if not isinstance(r, str) else float(r))
+
+
 def _ops_path(base, row):
+    """The ops sidecar of a CSV row: <base>/<exp>/<tag>[_bf..][_kc..][_tc..]
+    [_rate..].ops.csv, or None (missing or ambiguous)."""
+    return run_sidecar(base, row, ".ops.csv")
+
+
+def run_sidecar(base, row, ext):
     d = Path(base) / str(row["exp"])
     tag = run_tag(row)
-    p = d / (tag + ".ops.csv")
+    rs = rate_suffix(row)
+    p = d / (tag + rs + ext)
     if p.exists():
         return p
-    bf = sorted(d.glob(tag + "_bf*.ops.csv"))  # a non-default BATCH_FLUSH
-    return bf[0] if len(bf) == 1 else None
+    # a non-default BATCH_FLUSH / KAFKA_* / TM_TIMEOUT_COMMIT suffix
+    hits = sorted(d.glob(tag + "_*" + rs + ext))
+    if not rs:
+        hits = [h for h in hits if "_rate" not in h.name[len(tag):]]
+    return hits[0] if len(hits) == 1 else None
 
 
 def apply_write_latency(df: pd.DataFrame, base_dirs) -> pd.DataFrame:

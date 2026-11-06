@@ -207,18 +207,18 @@ func TestWriteOpsCSV(t *testing.T) {
 		{Op: "read", Count: 30, TPS: 3, LatMeanMs: 1, LatP50Ms: 1, LatP99Ms: 1.25, Errors: 1},
 		{Op: "write", Count: 0, Aborted: 7},
 	}
-	if err := WriteOpsCSV(path, ops); err != nil {
+	if err := WriteOpsCSV(path, ops, 5); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := OpsCSVHeader + "\nread,30,3.00,1.000,1.000,1.250,1,0\nwrite,0,0.00,0.000,0.000,0.000,0,7\n"
+	want := OpsCSVHeader + "\nread,30,3.00,1.000,1.000,1.250,1,0,5\nwrite,0,0.00,0.000,0.000,0.000,0,7,5\n"
 	if string(data) != want {
 		t.Fatalf("ops csv=%q want %q", data, want)
 	}
-	if OpsCSVHeader != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted" {
+	if OpsCSVHeader != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped" {
 		t.Fatalf("OpsCSVHeader changed: %q (experiments/run_one.sh parses it)", OpsCSVHeader)
 	}
 }
@@ -282,7 +282,7 @@ func TestAppendCSVRowWritesHeaderOnce(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("got %d lines, want 3:\n%s", len(lines), data)
 	}
-	const header = "ts,commit,exp,backend,n,f,clients,block_size,workload,rtt_ms,fault,rep,commit_mode,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,wrong_gets,host_cpu_max_pct,saturated,net_bytes_per_block"
+	const header = "ts,commit,exp,backend,n,f,clients,block_size,workload,rtt_ms,fault,rep,commit_mode,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,wrong_gets,host_cpu_max_pct,saturated,net_bytes_per_block,offered_rps"
 	if lines[0] != header {
 		t.Fatalf("header=%q", lines[0])
 	}
@@ -292,7 +292,7 @@ func TestAppendCSVRowWritesHeaderOnce(t *testing.T) {
 	if want := ",e1,kafka,4,,,,,,,,,10.00,2.000,2.000,3.000,1,0,,,"; !strings.Contains(lines[1], want) {
 		t.Fatalf("row=%q does not contain %q", lines[1], want)
 	}
-	if len(strings.Split(lines[1], ",")) != 22 {
+	if len(strings.Split(lines[1], ",")) != 23 {
 		t.Fatalf("row has wrong column count: %q", lines[1])
 	}
 	if err := AppendCSVRow(path, map[string]string{"bogus": "1"}, s); err == nil {

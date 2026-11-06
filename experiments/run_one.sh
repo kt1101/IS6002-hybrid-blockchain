@@ -44,11 +44,19 @@
 #                 --batch-flush (a partial block is sent after this long),
 #                 e.g. BATCH_FLUSH=100ms; core backends only (kafka, raft,
 #                 tendermint, bft2; the original servers have no such flag).
-#                 Not a CSV column (the 22-column schema is fixed): a value
+#                 Not a CSV column (the 23-column schema is fixed): a value
 #                 other than the default adds "_bf<value>" to the run tag
 #                 (file names) and is in the "run ..." log line, and the CSV
 #                 rows of different BATCH_FLUSH values must go to different
 #                 EXPs.
+# RATE (default 0 = closed loop, as in phase 1): open-loop load, ycsbbench
+#                 --rate=RATE total requests per second issued at fixed
+#                 intervals (latency from the scheduled time); MAX_INFLIGHT
+#                 (default 4096, ycsbbench --max-inflight) caps outstanding
+#                 requests, operations due above it are dropped and counted
+#                 (the `dropped` column of <tag>.ops.csv). The offered rate is
+#                 the CSV column offered_rps (0 for a closed-loop run); a
+#                 RATE > 0 adds "_rate<RATE>" to the run tag.
 # PRE_DOWN_HOOK (default empty): path of an executable run once, after a
 #                 successful run's CSV row was appended and BEFORE the cluster
 #                 is torn down (down.sh), with EXP, BACKEND, N, F, CLIENTS,
@@ -98,9 +106,9 @@
 # tm-orig are not audited (their Verify races with commits / returns nothing,
 # see check_consistency.sh). A missing or empty .audit file is only a warning.
 #
-# Per-run sidecars in results/raw/<EXP>/ (the CSV keeps its 22 columns):
+# Per-run sidecars in results/raw/<EXP>/ (the CSV keeps its 23 columns):
 #   <tag>.ops.csv    ycsbbench --ops: `op,count,tps,lat_mean_ms,lat_p50_ms,
-#                    lat_p99_ms,errors,aborted`, one line for read (Get) and
+#                    lat_p99_ms,errors,aborted,dropped`, one line for read (Get) and
 #                    one for write (Set), measurement window only (the CSV row
 #                    mixes both: on a sync backend a Get is a local read, a Set
 #                    waits for a block); errors = failed ops other than gRPC
@@ -207,6 +215,8 @@ LOAD_OP_TIMEOUT="${LOAD_OP_TIMEOUT:-30s}"
 SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-10m}"
 KEEP_LOGS="${KEEP_LOGS:-0}"
 BATCH_FLUSH="${BATCH_FLUSH:-}"
+RATE="${RATE:-0}"
+MAX_INFLIGHT="${MAX_INFLIGHT:-4096}"
 PRE_DOWN_HOOK="${PRE_DOWN_HOOK:-}"
 VALID_MAX_WRITE_ERR_PCT="${VALID_MAX_WRITE_ERR_PCT:-1}"
 VALID_ZERO_RUN_SECS="${VALID_ZERO_RUN_SECS:-5}"
@@ -230,6 +240,11 @@ hbdb_require_uint VALID_MAX_WRITE_ERR_PCT "$VALID_MAX_WRITE_ERR_PCT"
 hbdb_require_uint VALID_ZERO_RUN_SECS "$VALID_ZERO_RUN_SECS"
 [ "$VALID_ZERO_RUN_SECS" -ge 1 ] || die "VALID_ZERO_RUN_SECS must be >= 1"
 hbdb_require_uint AUDIT_WAIT_SECS "$AUDIT_WAIT_SECS"
+echo "$RATE" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "RATE must be a non-negative number (requests per second, 0 = closed loop), got '$RATE'"
+hbdb_require_uint MAX_INFLIGHT "$MAX_INFLIGHT"
+[ "$MAX_INFLIGHT" -ge 1 ] || die "MAX_INFLIGHT must be >= 1"
+rate_on=0
+awk -v r="$RATE" 'BEGIN { exit !(r > 0) }' && rate_on=1
 case "$WORKLOAD" in
   '' | *[!A-Za-z0-9_-]*) die "WORKLOAD must match [A-Za-z0-9_-]+, got '$WORKLOAD'" ;;
 esac
@@ -312,6 +327,9 @@ tag="${BACKEND}_n${N}_f${F}_c${CLIENTS}_b${BLOCK_SIZE}_w${WORKLOAD}_rtt${RTT_MS}
 if [ -n "$BATCH_FLUSH" ] && [ "$BATCH_FLUSH" != 1s ]; then
   tag="${tag}_bf${BATCH_FLUSH}"
 fi
+if [ "$rate_on" = 1 ]; then
+  tag="${tag}_rate${RATE}"
+fi
 tag="$(echo "$tag" | tr -c 'A-Za-z0-9._\n-' '_')"
 exp_dir="$HBDB_RESULTS_RAW/$EXP"
 csv="$HBDB_RESULTS_RAW/$EXP.csv"
@@ -348,7 +366,7 @@ ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # -dirty marks rows measured with uncommitted changes to tracked files.
 commit="$(git -C "$HBDB_ROOT" describe --always --dirty --abbrev=7 2>/dev/null | tr -d ',' || true)"
 commit="${commit:-unknown}"
-tags="ts=$ts,commit=$commit,exp=$EXP,backend=$BACKEND,n=$N,f=$F,clients=$CLIENTS,block_size=$BLOCK_SIZE,workload=$WORKLOAD,rtt_ms=$RTT_MS,fault=$fault_rec,rep=$REP,commit_mode=$COMMIT_MODE"
+tags="ts=$ts,commit=$commit,exp=$EXP,backend=$BACKEND,n=$N,f=$F,clients=$CLIENTS,block_size=$BLOCK_SIZE,workload=$WORKLOAD,rtt_ms=$RTT_MS,fault=$fault_rec,rep=$REP,commit_mode=$COMMIT_MODE,offered_rps=$RATE"
 
 # ---- cleanup on every exit path ----
 bench_pid=""
@@ -767,6 +785,10 @@ hbdb_require_uint NCPU "$ncpu"
 container_ids="$(hbdb_compose ps -q)"
 [ -n "$container_ids" ] || die "no running containers in project $HBDB_PROJECT"
 
+rate_args=""
+if [ "$rate_on" = 1 ]; then
+  rate_args="--rate=$RATE --max-inflight=$MAX_INFLIGHT"
+fi
 log "starting ycsbbench: $CLIENTS clients over $N nodes, mode $(hbdb_bench_mode "$BACKEND")"
 hbdb_compose exec -T client ycsbbench \
   --load-path="/ycsb/$WORKLOAD.load.dat" --run-path="/ycsb/$WORKLOAD.run.dat" \
@@ -776,7 +798,7 @@ hbdb_compose exec -T client ycsbbench \
   --warmup="$WARMUP" --duration="$DURATION" \
   --out="/results/$EXP/.$tag.row.csv" --tags="$tags" \
   --timeline="/results/$EXP/$tag.timeline" --wtimeline="/results/$EXP/$tag.wtimeline" \
-  --ops="/results/$EXP/$tag.ops.csv" >"$bench_log" 2>&1 &
+  --ops="/results/$EXP/$tag.ops.csv" $rate_args >"$bench_log" 2>&1 &
 bench_pid=$!
 # Core backends: breakdown snapshot 1 at the start of the measurement window
 # (snapshot 2 follows when the bench ends), for net_bytes_per_block.
@@ -887,7 +909,7 @@ final_audit() {
 # reason and returns 1 if the run must not get a row.
 check_validity() {
   local line wok werr wab w d zero i hits bad=0 arc
-  if [ ! -s "$ops_file" ] || [ "$(head -n 1 "$ops_file")" != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted" ]; then
+  if [ ! -s "$ops_file" ] || ! head -n 1 "$ops_file" | grep -q '^op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted\(,\|$\)'; then
     log "invalid run: ycsbbench wrote no usable $ops_file (image older than this harness? rebuild with experiments/build.sh)"
     return 1
   fi
@@ -1016,7 +1038,7 @@ fi
 [ "$(head -n 1 "$row_tmp")" = "$HBDB_CSV_HEADER" ] || die "unexpected header in $row_tmp: $(head -n 1 "$row_tmp")"
 row="$(sed -n 2p "$row_tmp")"
 nf="$(echo "$row" | awk -F, '{ print NF }')"
-[ "$nf" -eq 22 ] || die "expected 22 CSV fields from ycsbbench, got $nf: $row"
+[ "$nf" -eq 23 ] || die "expected 23 CSV fields from ycsbbench, got $nf: $row"
 
 host_cpu_max_pct="$(awk 'NF { if (!seen || $1 > m) { m = $1; seen = 1 } } END { if (seen) printf "%.2f", m }' "$samples")"
 if [ -n "$host_cpu_max_pct" ]; then
@@ -1048,7 +1070,7 @@ elif hbdb_backend_has_fault_policy "$BACKEND"; then
   fi
 fi
 
-final="$(echo "$row" | cut -d, -f1-19),$host_cpu_max_pct,$saturated,$net_bytes_per_block"
+final="$(echo "$row" | cut -d, -f1-19),$host_cpu_max_pct,$saturated,$net_bytes_per_block,$(echo "$row" | cut -d, -f23)"
 if [ ! -s "$csv" ]; then
   echo "$HBDB_CSV_HEADER" >"$csv"
 fi

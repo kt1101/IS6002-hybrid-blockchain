@@ -28,6 +28,9 @@ type Summary struct {
 	LatP99Ms  float64
 	Errors    int64
 	WrongGets int64
+	// Dropped is the number of open-loop operations skipped because
+	// --max-inflight requests were outstanding (ObserveDropped).
+	Dropped int64
 }
 
 // OpKind classifies an observation for the per-kind statistics (OpSummaries,
@@ -63,6 +66,7 @@ type Recorder struct {
 	start     time.Time
 	kinds     [numOpKinds]kindStats
 	wrongGets int64
+	dropped   int64
 	errKinds  map[string]int64 // in-window errors by message, at most MaxErrorKinds keys
 	errOther  int64            // in-window errors whose message did not fit in errKinds
 	timeline  []int64          // successful ops per second since start, incl. warmup
@@ -96,6 +100,14 @@ func (r *Recorder) Observe(at time.Time, lat time.Duration, err error) {
 // ends with CorruptMarker is also counted as a wrong get.
 func (r *Recorder) ObserveGet(at time.Time, lat time.Duration, val string, err error) {
 	r.observe(OpRead, at, lat, err, err == nil && strings.HasSuffix(val, CorruptMarker))
+}
+
+// ObserveDropped records one open-loop operation that was not sent because
+// the in-flight cap was reached (OpenLoop). It counts in Summary.Dropped.
+func (r *Recorder) ObserveDropped() {
+	r.mu.Lock()
+	r.dropped++
+	r.mu.Unlock()
 }
 
 // ObserveSet records a finished Set (OpWrite); a successful one also counts
@@ -225,7 +237,7 @@ func summarize(lats []time.Duration) latStats {
 func (r *Recorder) Summary() Summary {
 	r.mu.Lock()
 	var lats []time.Duration
-	s := Summary{WrongGets: r.wrongGets}
+	s := Summary{WrongGets: r.wrongGets, Dropped: r.dropped}
 	for i := range r.kinds {
 		lats = append(lats, r.kinds[i].lats...)
 		s.Errors += r.kinds[i].errors
@@ -284,22 +296,24 @@ func (r *Recorder) OpSummaries() []OpSummary {
 }
 
 // OpsCSVHeader is the header line of the per-run ops sidecar (WriteOpsCSV).
-const OpsCSVHeader = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted"
+// The trailing dropped column is the run's open-loop drop count
+// (Summary.Dropped, the same on every line; 0 for a closed-loop run).
+const OpsCSVHeader = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped"
 
 // WriteOpsCSV writes ops (OpSummaries) to path as a small CSV: the
 // OpsCSVHeader line, then one line per kind (experiments/run_one.sh keeps it
 // as results/raw/<EXP>/<tag>.ops.csv next to the 22-column row).
-func WriteOpsCSV(path string, ops []OpSummary) error {
+func WriteOpsCSV(path string, ops []OpSummary, dropped int64) error {
 	var sb strings.Builder
 	sb.WriteString(OpsCSVHeader)
 	sb.WriteByte('\n')
 	for _, o := range ops {
-		fmt.Fprintf(&sb, "%s,%d,%s,%s,%s,%s,%d,%d\n", o.Op, o.Count,
+		fmt.Fprintf(&sb, "%s,%d,%s,%s,%s,%s,%d,%d,%d\n", o.Op, o.Count,
 			strconv.FormatFloat(o.TPS, 'f', 2, 64),
 			strconv.FormatFloat(o.LatMeanMs, 'f', 3, 64),
 			strconv.FormatFloat(o.LatP50Ms, 'f', 3, 64),
 			strconv.FormatFloat(o.LatP99Ms, 'f', 3, 64),
-			o.Errors, o.Aborted)
+			o.Errors, o.Aborted, dropped)
 	}
 	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }
@@ -345,7 +359,7 @@ var csvColumns = []string{
 	"ts", "commit", "exp", "backend", "n", "f", "clients", "block_size",
 	"workload", "rtt_ms", "fault", "rep", "commit_mode",
 	"tps", "lat_mean_ms", "lat_p50_ms", "lat_p99_ms", "errors", "wrong_gets",
-	"host_cpu_max_pct", "saturated", "net_bytes_per_block",
+	"host_cpu_max_pct", "saturated", "net_bytes_per_block", "offered_rps",
 }
 
 // metricColumns are filled from Summary and may not be given as tags.

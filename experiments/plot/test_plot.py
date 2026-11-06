@@ -52,7 +52,7 @@ def make_df(tps, saturated=None, **cfg):
                    fault="none", rep=i, commit_mode="async", tps=float(v),
                    lat_mean_ms=1.0, lat_p50_ms=0.5, lat_p99_ms=5.0, errors=0,
                    wrong_gets=0, host_cpu_max_pct=10.0, saturated=s,
-                   net_bytes_per_block=float("nan"))
+                   net_bytes_per_block=float("nan"), offered_rps=0)
         row.update(cfg)
         rows.append(row)
     return pd.DataFrame(rows)
@@ -643,3 +643,32 @@ def test_main_draws_e6_bars_per_n_and_not_lines(tmp_path, capsys):
     assert not (out / "e6_tps_vs_n.png").exists()
     # e2 has no varying axis here
     assert "exp e2: none of" in stdout
+
+
+def test_load_csvs_accepts_old_and_new_header(tmp_path):
+    old_lines = FIXTURE.read_text().splitlines()
+    old = tmp_path / "old.csv"
+    old.write_text("\n".join(old_lines[:2]) + "\n")
+    new = tmp_path / "new.csv"
+    new.write_text(old_lines[0] + ",offered_rps\n" + old_lines[1] + ",500\n")
+    df_old = plot.load_csvs([old])
+    assert list(df_old.columns) == plot.EXPECTED_COLUMNS
+    assert df_old["offered_rps"].tolist() == [0]
+    df_new = plot.load_csvs([new])
+    assert df_new["offered_rps"].tolist() == [500]
+    both = plot.load_csvs([old, new])
+    assert sorted(both["offered_rps"].tolist()) == [0, 500]
+
+
+def test_ops_path_matches_rate_suffix(tmp_path):
+    row = dict(exp="e7", backend="raft", n=4, f=0, clients=256, block_size=100, workload="a",
+               rtt_ms=0, fault="none", commit_mode="sync", rep=1, offered_rps=500)
+    d = tmp_path / "e7"
+    d.mkdir()
+    base = plot.run_tag(row)
+    for r in (500, 1000):
+        (d / ("%s_bf100ms_rate%d.ops.csv" % (base, r))).write_text("x")
+    assert plot._ops_path(tmp_path, row).name == base + "_bf100ms_rate500.ops.csv"
+    row0 = dict(row, offered_rps=0)
+    (d / (base + "_bf100ms.ops.csv")).write_text("x")
+    assert plot._ops_path(tmp_path, row0).name == base + "_bf100ms.ops.csv"

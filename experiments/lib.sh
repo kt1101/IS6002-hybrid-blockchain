@@ -37,7 +37,7 @@ HBDB_ALL_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
 HBDB_IMPLEMENTED_BACKENDS="kafka-orig tm-orig kafka raft tendermint bft2"
 
 # Must match csvColumns in veritas/benchmark/recorder.go.
-HBDB_CSV_HEADER="ts,commit,exp,backend,n,f,clients,block_size,workload,rtt_ms,fault,rep,commit_mode,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,wrong_gets,host_cpu_max_pct,saturated,net_bytes_per_block"
+HBDB_CSV_HEADER="ts,commit,exp,backend,n,f,clients,block_size,workload,rtt_ms,fault,rep,commit_mode,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,wrong_gets,host_cpu_max_pct,saturated,net_bytes_per_block,offered_rps"
 
 HBDB_SCRIPT="$(basename "$0")"
 

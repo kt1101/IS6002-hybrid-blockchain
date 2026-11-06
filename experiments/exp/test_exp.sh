@@ -104,7 +104,7 @@ newtree() {
   done
   cat >"$ROOT/experiments/run_one.sh" <<'STUB'
 #!/usr/bin/env bash
-# Stub of run_one.sh: log the environment, append one row (22 columns).
+# Stub of run_one.sh: log the environment, append one row (23 columns).
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "EXP=$EXP BACKEND=$BACKEND N=$N F=$F CLIENTS=$CLIENTS BLOCK_SIZE=$BLOCK_SIZE WORKLOAD=$WORKLOAD RTT_MS=$RTT_MS FAULT=$FAULT REP=$REP COMMIT_MODE=$COMMIT_MODE DURATION=${DURATION:-} HOOK=${PRE_DOWN_HOOK:-}" >>"$root/stub.log"
 if [ -n "${STUB_RC:-}" ] && { [ -z "${STUB_BACKEND:-}" ] || [ "$STUB_BACKEND" = "$BACKEND" ]; }; then
@@ -117,8 +117,8 @@ fi
 tps=100
 if [ "${STUB_NOISY_REP2:-}" = 1 ] && [ "$REP" = 2 ]; then tps=300; fi
 csv="$root/results/raw/$EXP.csv"
-[ -s "$csv" ] || echo "ts,commit,exp,backend,n,f,clients,block_size,workload,rtt_ms,fault,rep,commit_mode,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,wrong_gets,host_cpu_max_pct,saturated,net_bytes_per_block" >"$csv"
-echo "2026-10-30T00:00:00Z,abc1234,$EXP,$BACKEND,$N,$F,$CLIENTS,$BLOCK_SIZE,$WORKLOAD,$RTT_MS,$(echo "$FAULT" | tr ',' '+'),$REP,$COMMIT_MODE,$tps,1,1,1,0,0,10,0," >>"$csv"
+[ -s "$csv" ] || echo "ts,commit,exp,backend,n,f,clients,block_size,workload,rtt_ms,fault,rep,commit_mode,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,wrong_gets,host_cpu_max_pct,saturated,net_bytes_per_block,offered_rps" >"$csv"
+echo "2026-10-30T00:00:00Z,abc1234,$EXP,$BACKEND,$N,$F,$CLIENTS,$BLOCK_SIZE,$WORKLOAD,$RTT_MS,$(echo "$FAULT" | tr ',' '+'),$REP,$COMMIT_MODE,$tps,1,1,1,0,0,10,0,,${RATE:-0}" >>"$csv"
 STUB
   chmod +x "$ROOT/experiments/run_one.sh"
   : >"$ROOT/stub.log"
