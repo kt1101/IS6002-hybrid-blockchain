@@ -137,6 +137,7 @@ Run **E1 first**: E2–E6 use each backend's best `CLIENTS` from `results/raw/e1
 | E6 | 3 | F1–F5 × (N, f) ∈ {(4, 1), (7, 2)} | 180 s, fault at second 60 | 144 | `experiments/exp/e6_faults.sh` |
 | E7 | 1, 2 (phase 2) | open-loop rate (`RATES`, tendermint `TM_RATES`) | N = 4, block 100, YCSB-A, 256 drivers, `MEM=1g`, flush 100 ms | 81 | `experiments/exp/e7_rate.sh`, then `experiments/plot/saturation.py` |
 | E8 | 4 (phase 2) | `VERIFY_SIGS` {none, ingress, all} × `READ_MODE` {plain, verified} × workload {a, c} | raft, bft2; N = 4; `E8_RATE_<BACKEND>` (80% of E7 saturation) | 72 | `experiments/exp/e8_verify.sh` (EXPs `e8-<sigs>-<read>`) |
+| E9 | 5 (phase 2) | `ATTEST_EVERY` {0, 1, 10} × fault {none, F4, F5-F4 (bft2)} × `READ_MODE` {plain, certified} | raft, bft2; N = 4; 180 s, fault at second 60; `E9_RATE_<BACKEND>` | 75 | `experiments/exp/e9_attest.sh` (EXPs `e9-a<K>-<read>`), then `experiments/plot/rq5.py` |
 
 Each run takes about 2–3 minutes including cluster setup (E6: about 4 minutes). The four backends are run in the order `kafka raft tendermint bft2`.
 

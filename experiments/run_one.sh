@@ -416,6 +416,7 @@ snaps_file="$exp_dir/$tag.snaps"         # "k,epoch_ms,node1 status" per breakdo
 snap_stop="$exp_dir/.$tag.snap.stop"     # aborts a pending window-start snapshot
 final_audit_file="$exp_dir/$tag.final_audit" # auditor --once output, FAULT=none (kept)
 leaders_file="$exp_dir/$tag.leaders"     # raft leader changes, FAULT != none (kept)
+diverged_file="$exp_dir/$tag.diverged"   # "core: diverged" log lines, ATTEST_EVERY > 0 (kept)
 lock_dir="$HBDB_RESULTS_RAW/.hbdb.lock"
 mkdir -p "$exp_dir"
 
@@ -1046,6 +1047,22 @@ collect_leaders() {
   [ -s "$leaders_file" ] || log "warning: no 'entering leader state' line in the node logs; $leaders_file is empty"
 }
 
+# collect_diverged: ATTEST_EVERY > 0: every "core: diverged at height" line
+# of every node log (docker timestamps, `nodeK <compose line>`) to
+# $diverged_file; empty when no node diverged (experiments/plot/rq5.py).
+collect_diverged() {
+  local i=1
+  : >"$diverged_file"
+  while [ "$i" -le "$N" ]; do
+    hbdb_compose logs --no-color --timestamps "node$i" 2>/dev/null | grep 'core: diverged at height' |
+      sed "s/^/node$i /" >>"$diverged_file" || true
+    i=$((i + 1))
+  done
+  if [ -s "$diverged_file" ]; then
+    log "diverged: $(cut -d' ' -f1 "$diverged_file" | sort -u | tr '\n' ' ')(see $diverged_file)"
+  fi
+}
+
 if wait "$bench_pid"; then
   bench_rc=0
 else
@@ -1090,6 +1107,9 @@ if [ -n "$audit_started" ] && [ ! -s "$audit_file" ]; then
 fi
 if [ "$BACKEND" = raft ] && [ "$FAULT" != none ]; then
   collect_leaders
+fi
+if [ "$ATTEST_EVERY" != 0 ]; then
+  collect_diverged
 fi
 if [ "$FAULT" = none ]; then
   if ! check_validity; then

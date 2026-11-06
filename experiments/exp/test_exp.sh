@@ -592,5 +592,20 @@ eq "e8: 2 runs (workloads a, c)" "$(calls)" 2
 contains "e8: run_one gets VERIFY_SIGS and READ_MODE" "$(cat "$ROOT/stub.log")" "VERIFY_SIGS=all READ_MODE=verified"
 eq "e8: rows in e8-all-verified" "$(rows e8-all-verified)" 2
 
+# ------------------------------------------------------------ E9 attest ----
+newtree e9
+OUT="$("$ROOT/experiments/exp/e9_attest.sh" --dry-run 2>/dev/null)"
+eq "e9 --dry-run: 75 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 75
+eq "e9: 5 EXPs" "$(printf '%s\n' "$OUT" | grep -o 'EXP=[^ ]*' | sort -u | tr '\n' ' ')" "EXP=e9-a0-plain EXP=e9-a1-certified EXP=e9-a1-plain EXP=e9-a10-certified EXP=e9-a10-plain "
+eq "e9: raft runs" "$(printf '%s\n' "$OUT" | grep -c 'BACKEND=raft ')" 30
+eq "e9: F5-F4 only on bft2" "$(printf '%s\n' "$OUT" | grep 'FAULT=F5-F4' | grep -vc 'BACKEND=bft2 ')" 0
+eq "e9: F5-F4 runs" "$(printf '%s\n' "$OUT" | grep -c 'FAULT=F5-F4:node4,node3@60 ')" 15
+eq "e9: F4 on node4" "$(printf '%s\n' "$OUT" | grep -c 'FAULT=F4:node4@60 ')" 30
+BACKENDS=raft REPS=1 EXTRA_REPS=0 E9_ATTEST="1" E9_FAULTS="none" drv e9_attest.sh
+eq "e9 real run ok" "$RC" 0
+eq "e9: 2 runs (plain, certified)" "$(calls)" 2
+contains "e9: run_one gets ATTEST_EVERY and READ_MODE" "$(cat "$ROOT/stub.log")" "READ_MODE=certified ATTEST_EVERY=1"
+eq "e9: certified rows in e9-a1-certified" "$(rows e9-a1-certified)" 1
+
 echo "test_exp.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

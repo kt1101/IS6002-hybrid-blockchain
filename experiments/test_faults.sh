@@ -1157,6 +1157,14 @@ grep -q '^node1 node1 | .*entering leader state' "$(it_tag it_lead .leaders)" 2>
 itest noleaders EXP=it_nolead FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1
 contains "itest no leader line warns" "$it_err" "no 'entering leader state' line"
 
+# V: ATTEST_EVERY > 0 keeps the "core: diverged" lines of the node logs.
+itest diverged EXP=it_div FAULT=F4:node4@0 ATTEST_EVERY=1 DURATION=2s STUB_BENCH_SECS=1 STUB_LOG_NODE=node4 STUB_LOG_LINE="2026-11-07T10:00:01.450000000Z core: diverged at height 12 (node 4)"
+eq "itest diverged rc" "$it_rc" 0
+grep -q '^node4 node4 | 2026-11-07T10:00:01.450000000Z core: diverged at height 12' "$(it_tag it_div .diverged)" 2>/dev/null && ok || bad "itest diverged file: $(cat "$(it_tag it_div .diverged)" 2>/dev/null) $it_err"
+eq "itest diverged: only node4" "$(wc -l <"$(it_tag it_div .diverged)" | tr -d ' ')" 1
+itest nodiverged EXP=it_nodiv FAULT=none DURATION=2s STUB_BENCH_SECS=1
+eq "itest attest off: no .diverged" "$(it_tag it_nodiv .diverged)" ""
+
 # up.sh turns NODE_FAULTS into gen_compose.py --node-fault flags.
 grep -q 'node_fault_args="$node_fault_args --node-fault $nf"' "$HERE/cluster/up.sh" && ok || bad "up.sh --node-fault"
 grep -q -- '--kafka-mem "$KAFKA_MEM" $core_args $node_fault_args' "$HERE/cluster/up.sh" && ok || bad "up.sh passes node_fault_args"
