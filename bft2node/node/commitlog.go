@@ -22,10 +22,66 @@ type CommitLog struct {
 	maxBytes int64
 	changed  chan struct{} // closed and replaced on append, Advance and Close
 	closed   bool
+	dedup    *idRing // ids of the last appendOnce commands
 }
 
 func NewCommitLog(maxBytes int64) *CommitLog {
-	return &CommitLog{maxBytes: maxBytes, changed: make(chan struct{})}
+	return &CommitLog{maxBytes: maxBytes, changed: make(chan struct{}), dedup: newIDRing(DefaultDedupWindow)}
+}
+
+// idRing remembers the last cap ids added.
+type idRing struct {
+	ring []([32]byte)
+	next int
+	full bool
+	set  map[[32]byte]int // id -> times present in ring
+}
+
+func newIDRing(cap int) *idRing {
+	if cap < 1 {
+		cap = 1
+	}
+	return &idRing{ring: make([][32]byte, cap), set: make(map[[32]byte]int, cap)}
+}
+
+func (r *idRing) has(id [32]byte) bool { return r.set[id] > 0 }
+
+func (r *idRing) add(id [32]byte) {
+	if r.full {
+		old := r.ring[r.next]
+		if r.set[old]--; r.set[old] <= 0 {
+			delete(r.set, old)
+		}
+	}
+	r.ring[r.next] = id
+	r.set[id]++
+	r.next++
+	if r.next == len(r.ring) {
+		r.next, r.full = 0, true
+	}
+}
+
+// appendOnce adds cmd (as Add) unless id is among the last DedupWindow
+// committed ids; it returns false (nothing added) for such a duplicate: a
+// shared pending block that two leaders proposed commits twice in the
+// chain but is delivered once.
+func (l *CommitLog) appendOnce(id [32]byte, cmd []byte) bool {
+	l.mu.Lock()
+	if l.dedup.has(id) {
+		l.mu.Unlock()
+		return false
+	}
+	l.dedup.add(id)
+	l.mu.Unlock()
+	l.Add(cmd)
+	return true
+}
+
+// seen reports whether id was committed recently (within the dedup window).
+func (l *CommitLog) seen(id [32]byte) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.dedup.has(id)
 }
 
 func (l *CommitLog) signal() {

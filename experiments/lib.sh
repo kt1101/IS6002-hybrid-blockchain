@@ -25,8 +25,10 @@ HBDB_RAFT_PORT=7100
 HBDB_RAFT_FORWARD_PORT=7101
 HBDB_TM_P2P_PORT=26656
 # bft2: HotStuff replica-to-replica port of bft2-node (its local API, 7201,
-# is loopback only and is not a consensus port).
+# is loopback only and is not a consensus port) and its forward endpoint
+# (phase 2: every /submit is forwarded to the peers' POST /forward).
 HBDB_BFT2_PORT=7200
+HBDB_BFT2_FORWARD_PORT=7202
 # File holding the veritas server's pid in every core node container
 # (gen_compose.py VERITAS_PIDFILE); faults.sh fault_signal sends SIGUSR1 there.
 HBDB_VERITAS_PIDFILE=/tmp/hbdb-veritas.pid
@@ -124,14 +126,14 @@ hbdb_check_tendermint_limits() {
 # with its peers, space-separated; the network-level silent fault (F2,
 # experiments/faults.sh fault_silent_net) drops them. raft: the raft transport
 # and the submit-forward HTTP endpoint; tendermint: the tendermint p2p port;
-# bft2: the HotStuff replica port of bft2-node. Prints nothing for backends
+# bft2: the HotStuff replica port and the forward endpoint of bft2-node. Prints nothing for backends
 # without a network-silent mode (kafka-orig, tm-orig: none; kafka: its F2 is
 # veritas --fault=silent, FaultPolicy.OnVote).
 hbdb_consensus_ports() {
   case "$1" in
     raft) echo "$HBDB_RAFT_PORT $HBDB_RAFT_FORWARD_PORT" ;;
     tendermint) echo "$HBDB_TM_P2P_PORT" ;;
-    bft2) echo "$HBDB_BFT2_PORT" ;;
+    bft2) echo "$HBDB_BFT2_PORT $HBDB_BFT2_FORWARD_PORT" ;;
     *) ;;
   esac
 }

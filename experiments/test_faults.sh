@@ -141,7 +141,7 @@ parse_rc() {
 # ---- lib.sh: consensus ports ----
 eq "ports raft" "$(hbdb_consensus_ports raft)" "7100 7101"
 eq "ports tendermint" "$(hbdb_consensus_ports tendermint)" "26656"
-eq "ports bft2" "$(hbdb_consensus_ports bft2)" "7200"
+eq "ports bft2" "$(hbdb_consensus_ports bft2)" "7200 7202"
 for b in kafka-orig tm-orig kafka; do
   eq "ports $b" "$(hbdb_consensus_ports "$b")" ""
 done
@@ -266,7 +266,7 @@ contains "F5 N=3" "$r" "F5 needs N >= 4"
 r="$(parse_rc F5-F4:node4@20 bft2 4 40)"
 contains "F5 bft2 one node at N=4" "$r" "exactly f+1 = 2 nodes"
 r="$(parse_rc F2:node4@20 bft2 4 40)"
-eq "F2 bft2 parses (network, port 7200)" "${r%%|*}" 0
+eq "F2 bft2 parses (network, ports 7200 7202)" "${r%%|*}" 0
 r="$(parse_rc F5-F3:node3,node4@20 tendermint 4 40)"
 contains "F5-F3" "$r" "F5 combines F2 or F4"
 r="$(parse_rc F4-F2:node4@20 tendermint 4 40)"
@@ -1003,7 +1003,7 @@ itest f5nb EXP=it_f5nb BACKEND=bft2 FAULT=F5-F2:node3,node4@0 DURATION=2s STUB_B
 eq "itest f5-f2 bft2 rc" "$it_rc" 0
 eq "itest f5-f2 bft2 NODE_FAULTS empty" "$(cat "$SB/state/node_faults" 2>/dev/null)" ""
 eq "itest f5-f2 bft2 iptables" "$(grep -c ',iptables_applied,node[34],' "$(raw_tag it_f5nb)" 2>/dev/null)" 2
-grep -q ',iptables_drop,node3,tcp OUTPUT --dport/--sport 7200$' "$(raw_tag it_f5nb)" 2>/dev/null && ok || bad "itest f5-f2 bft2 port: $(cat "$(raw_tag it_f5nb)" 2>/dev/null)"
+grep -q ',iptables_drop,node3,tcp OUTPUT --dport/--sport 7200 7202$' "$(raw_tag it_f5nb)" 2>/dev/null && ok || bad "itest f5-f2 bft2 port: $(cat "$(raw_tag it_f5nb)" 2>/dev/null)"
 
 # L: a failed signal (no pid file in the container) is exit 3, no row.
 itest f4fail EXP=it_f4fail BACKEND=kafka FAULT=F2:node4@0 DURATION=2s STUB_BENCH_SECS=1 STUB_EXEC_RC=1

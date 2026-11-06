@@ -62,6 +62,9 @@ func main() {
 		maxCmd     = flag.Int("max-command-bytes", node.DefaultMaxCommandBytes, "largest command (Veritas block) accepted")
 		logLevel   = flag.String("log-level", "warn", "hotstuff library log level: debug|info|warn|error")
 		statsEvery = flag.Duration("stats-interval", 10*time.Second, "log view/commit counters this often (0: never)")
+		fwdPort    = flag.Int("forward-port", 0, "port of the forward endpoint (POST /forward on 0.0.0.0) on every replica; every /submit is forwarded to the other replicas' (host of --peers):PORT so any leader can propose it (0: no forwarding, phase-1 behaviour)")
+		requeueV   = flag.Int("requeue-views", node.DefaultRequeueViews, "a pending command seen in a proposal and not committed this many views later is queued again")
+		dedupWin   = flag.Int("dedup-window", node.DefaultDedupWindow, "committed command ids remembered to deliver a command committed twice only once")
 	)
 	flag.Parse()
 	logging.SetLogLevel(*logLevel)
@@ -72,6 +75,14 @@ func main() {
 	}
 	if *id == 0 {
 		log.Fatalf("bft2-node: --id is required")
+	}
+	if *fwdPort < 0 || *fwdPort > 65535 {
+		log.Fatalf("bft2-node: --forward-port must be 0..65535")
+	}
+	if *fwdPort > 0 {
+		if ps, err = withForwardAddrs(ps, *fwdPort); err != nil {
+			log.Fatalf("bft2-node: %v", err)
+		}
 	}
 	n, err := node.New(node.Config{
 		ID:                hotstuff.ID(*id),
@@ -91,6 +102,8 @@ func main() {
 		MaxQueueBytes:     *maxQueueB,
 		MaxBacklogBytes:   *maxBacklog,
 		MaxCommandBytes:   *maxCmd,
+		RequeueViews:      *requeueV,
+		DedupWindow:       *dedupWin,
 	})
 	if err != nil {
 		log.Fatalf("%v", err)
@@ -108,6 +121,23 @@ func main() {
 			log.Printf("bft2-node: local API: %v", err)
 		}
 	}()
+	var fwdSrv *http.Server
+	if *fwdPort > 0 {
+		fl, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", *fwdPort))
+		if err != nil {
+			srv.Close()
+			n.Stop()
+			log.Fatalf("bft2-node: forward listen :%d: %v", *fwdPort, err)
+		}
+		fwdSrv = &http.Server{Handler: api.ForwardHandler(n), ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			if err := fwdSrv.Serve(fl); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("bft2-node: forward endpoint: %v", err)
+			}
+		}()
+		defer fwdSrv.Close()
+		log.Printf("bft2-node %d: forward endpoint on :%d", *id, *fwdPort)
+	}
 	log.Printf("bft2-node %d: local API on %s, waiting for %d replicas", *id, *apiAddr, len(ps))
 
 	started := make(chan error, 1)
@@ -149,6 +179,19 @@ func main() {
 		n.Stop()
 		os.Exit(3)
 	}
+}
+
+// withForwardAddrs sets every peer's ForwardAddr to its --peers host and port.
+func withForwardAddrs(ps []node.Peer, port int) ([]node.Peer, error) {
+	out := append([]node.Peer(nil), ps...)
+	for i := range out {
+		host, _, err := net.SplitHostPort(out[i].Addr)
+		if err != nil {
+			return nil, fmt.Errorf("--peers %s: %v", out[i].Addr, err)
+		}
+		out[i].ForwardAddr = net.JoinHostPort(host, strconv.Itoa(port))
+	}
+	return out, nil
 }
 
 // parsePeers parses --peers: comma-separated ID=HOST:PORT (empty entries

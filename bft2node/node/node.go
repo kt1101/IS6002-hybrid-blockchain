@@ -65,6 +65,11 @@ const (
 	DefaultMaxQueueBytes    = 16 << 20
 	DefaultMaxBacklogBytes  = 32 << 20
 	DefaultMaxCommandBytes  = 4 << 20
+	DefaultRequeueViews     = 8
+	DefaultDedupWindow      = 65536
+	DefaultForwardPort      = 7202
+	forwardQueueLen         = 1024
+	forwardTimeout          = 2 * time.Second
 	grpcMaxMsgBytes         = 4*DefaultMaxCommandBytes + 1<<20
 	peerProbeInterval       = 200 * time.Millisecond
 	peerProbeTimeout        = time.Second
@@ -75,6 +80,11 @@ const (
 type Peer struct {
 	ID   hotstuff.ID
 	Addr string // host:port of its replica (gorums) server
+	// ForwardAddr is host:port of its forward endpoint (POST wire.ForwardPath,
+	// served by api.ForwardHandler; port 7202 in the cluster). When set on
+	// the other replicas, Submit forwards every command to them, so every
+	// replica holds every pending command and any leader can propose it.
+	ForwardAddr string
 }
 
 // Config configures one replica. Zero fields take the defaults above.
@@ -122,6 +132,13 @@ type Config struct {
 	MaxQueueBytes   int64
 	MaxBacklogBytes int64
 	MaxCommandBytes int
+	// RequeueViews: a pending command seen in a proposal that has not
+	// committed this many views later goes back to the front of the queue.
+	// DedupWindow: how many committed command ids are remembered so that a
+	// command committed twice (two leaders proposed the same shared block)
+	// is delivered once.
+	RequeueViews int
+	DedupWindow  int
 }
 
 func (c *Config) setDefaults() {
@@ -173,6 +190,12 @@ func (c *Config) setDefaults() {
 	if c.MaxCommandBytes <= 0 {
 		c.MaxCommandBytes = DefaultMaxCommandBytes
 	}
+	if c.RequeueViews <= 0 {
+		c.RequeueViews = DefaultRequeueViews
+	}
+	if c.DedupWindow <= 0 {
+		c.DedupWindow = DefaultDedupWindow
+	}
 }
 
 // validatePeers checks that the IDs are exactly 1..N (the leader rotation
@@ -220,6 +243,7 @@ type Node struct {
 	adapter *adapter
 
 	viewDuration *boundedViewDuration
+	forwarders   []*forwarder
 
 	view           atomic.Uint64 // current view (from the synchronizer's view-change events)
 	timeouts       atomic.Uint64 // views ended by a timeout certificate
@@ -302,7 +326,15 @@ func New(cfg Config) (*Node, error) {
 		)),
 	)
 
-	n.adapter = &adapter{id: cfg.ID, queue: n.queue, log: n.log, idle: cfg.IdleWait}
+	n.queue.requeueViews = uint64(cfg.RequeueViews)
+	n.log.dedup = newIDRing(cfg.DedupWindow)
+	n.queue.seen = n.log.seen
+	n.adapter = &adapter{id: cfg.ID, queue: n.queue, log: n.log, idle: cfg.IdleWait, view: n.view.Load}
+	for _, p := range peers {
+		if p.ID != cfg.ID && p.ForwardAddr != "" {
+			n.forwarders = append(n.forwarders, newForwarder(cfg.ID, p))
+		}
+	}
 
 	ms := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 	// The library's estimator only sees successful views: the wrapper does
@@ -344,6 +376,9 @@ func New(cfg Config) (*Node, error) {
 		n.view.Store(uint64(e.View))
 		if e.Timeout {
 			n.timeouts.Add(1)
+		}
+		if k := n.queue.requeueStale(uint64(e.View)); k > 0 {
+			n.adapter.requeued.Add(uint64(k))
 		}
 	})
 	n.server.StartOnListener(lis)
@@ -446,12 +481,28 @@ func leaderSeed(keySeed string) int64 {
 	return int64(binary.BigEndian.Uint64(h[:8]) >> 1)
 }
 
-// Submit queues cmd (copied) for proposal in this replica's next views as
-// leader. A nil error means accepted, not committed: the command may still
-// be lost (e.g. this replica crashes before proposing it) or, very rarely,
-// committed twice (Fork re-queues blocks proposed here that fell off the
-// committed chain). Errors: ErrEmpty, ErrTooLarge, ErrQueueFull, ErrStopped.
+// Submit queues cmd (copied) for proposal and, with forwarding configured
+// (Peer.ForwardAddr), sends it to every other replica's forward endpoint in
+// the background (best effort: a failed forward is logged, the command stays
+// queued here). A nil error means accepted, not committed: the command may
+// still be lost (e.g. every replica holding it crashes). A command committed
+// more than once (two leaders proposed it) is delivered once (dedup window).
+// Errors: ErrEmpty, ErrTooLarge, ErrQueueFull, ErrStopped.
 func (n *Node) Submit(cmd []byte) error {
+	if err := n.enqueue(cmd); err != nil {
+		return err
+	}
+	for _, f := range n.forwarders {
+		f.send(cmd)
+	}
+	return nil
+}
+
+// Forward queues cmd received from another replica's Submit (POST
+// wire.ForwardPath); it is not forwarded further. Same errors as Submit.
+func (n *Node) Forward(cmd []byte) error { return n.enqueue(cmd) }
+
+func (n *Node) enqueue(cmd []byte) error {
 	if len(cmd) == 0 {
 		return ErrEmpty
 	}
@@ -468,15 +519,17 @@ type Stats struct {
 	ViewTimeout    time.Duration // the view timeout last handed to the synchronizer
 	Committed      uint64        // committed non-empty commands (= Veritas blocks)
 	Proposed       uint64        // non-empty commands this replica proposed (re-proposals included)
-	Requeued       uint64        // own forked commands put back in the queue
+	Requeued       uint64        // forked or stale commands put back in the queue
+	Duplicates     uint64        // committed commands skipped as already delivered
 	Queued         int           // commands waiting for proposal
+	Inflight       int           // pending commands seen in a proposal, not committed yet
 	CommitFailures uint64        // "failed to commit" (missing ancestor); see Failed
 	Dropped        uint64        // events dropped by the full event queue
 }
 
 func (s Stats) String() string {
-	return fmt.Sprintf("view=%d timeouts=%d view_timeout=%v committed=%d proposed=%d requeued=%d queued=%d commit_failures=%d dropped_events=%d",
-		s.View, s.Timeouts, s.ViewTimeout, s.Committed, s.Proposed, s.Requeued, s.Queued, s.CommitFailures, s.Dropped)
+	return fmt.Sprintf("view=%d timeouts=%d view_timeout=%v committed=%d proposed=%d requeued=%d duplicates=%d queued=%d inflight=%d commit_failures=%d dropped_events=%d",
+		s.View, s.Timeouts, s.ViewTimeout, s.Committed, s.Proposed, s.Requeued, s.Duplicates, s.Queued, s.Inflight, s.CommitFailures, s.Dropped)
 }
 
 // Stats returns a snapshot of the replica's progress.
@@ -488,7 +541,9 @@ func (n *Node) Stats() Stats {
 		Committed:      n.adapter.committed.Load(),
 		Proposed:       n.adapter.proposed.Load(),
 		Requeued:       n.adapter.requeued.Load(),
+		Duplicates:     n.adapter.duplicates.Load(),
 		Queued:         n.queue.len(),
+		Inflight:       n.queue.inflightLen(),
 		CommitFailures: n.commitFailures.Load(),
 		Dropped:        n.dropped.Load(),
 	}
@@ -538,6 +593,9 @@ func (n *Node) Stop() {
 	// Get, an Exec waiting for room in the commit log).
 	n.queue.close()
 	n.log.Close()
+	for _, f := range n.forwarders {
+		f.close()
+	}
 	if cancel != nil {
 		cancel()
 		<-n.done

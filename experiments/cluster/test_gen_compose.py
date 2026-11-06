@@ -388,7 +388,7 @@ def test_bft2_backend_runs_sidecar_and_core_server_without_kafka_or_tso():
         assert s["volumes"] == ["node%d-data:/data" % i, "/res:/results"]
         cmd = s["command"][-1]
         # Replica i of the static set 1..4, every node gets the same peers.
-        assert ("\nGOMEMLIMIT=153MiB bft2-node --id=%d --peers=%s --listen=0.0.0.0:7200 --api=127.0.0.1:7201 &"
+        assert ("\nGOMEMLIMIT=153MiB bft2-node --id=%d --peers=%s --listen=0.0.0.0:7200 --api=127.0.0.1:7201 --forward-port=7202 &"
                 % (i, BFT2_PEERS_4)) in cmd
         assert ("GOMEMLIMIT=430MiB veritas-kafka --consensus=bft2 --commit-mode=sync"
                 " --version-mode=ordered --node-id=%d --signature=node%d " % (i, i)) in cmd

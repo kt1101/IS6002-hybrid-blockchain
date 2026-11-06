@@ -8,6 +8,10 @@
 //	               bytes. 200: accepted (queued for proposal on this replica);
 //	               400 empty body, 413 too large, 503 queue full or stopping,
 //	               500 other; the body of an error reply is a text reason.
+//	POST /forward  (replica-to-replica, port 7202 in the cluster) body = one
+//	               command another replica's /submit received; queued here
+//	               for proposal, not forwarded further. Same replies as
+//	               /submit (an already known command: 200).
 //	GET  /deliver  200 and a never-ending body of frames, one per committed
 //	               command in commit order (empty filler blocks are never
 //	               sent). One subscriber at a time: a second one gets 409.
@@ -28,6 +32,7 @@ const (
 	// SubmitPath and DeliverPath are the two endpoints of the local API.
 	SubmitPath  = "/submit"
 	DeliverPath = "/deliver"
+	ForwardPath = "/forward"
 	// HeaderLen is the size of a frame header (seq + length).
 	HeaderLen = 12
 	// MaxFrame bounds the payload a reader accepts by default (64 MiB).

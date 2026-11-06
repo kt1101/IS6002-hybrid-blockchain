@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"sync"
 	"testing"
@@ -61,6 +63,14 @@ func logStats(t *testing.T, nodes []*Node, interval time.Duration) {
 // is stopped at the end of the test.
 func testCluster(t *testing.T, n int) []*Node {
 	t.Helper()
+	return testClusterOpts(t, n, false)
+}
+
+// testClusterOpts is testCluster; with forward, every replica also serves
+// POST /forward (wire.ForwardPath) on its own 127.0.0.1 port, set as its
+// Peer.ForwardAddr, so Submit on one replica queues the command on all.
+func testClusterOpts(t *testing.T, n int, forward bool) []*Node {
+	t.Helper()
 	level, verbose := testLogLevel()
 	logOnce.Do(func() { logging.SetLogLevel(level) })
 	lis := make([]net.Listener, n)
@@ -72,6 +82,18 @@ func testCluster(t *testing.T, n int) []*Node {
 		}
 		lis[i] = l
 		peers[i] = Peer{ID: hotstuff.ID(i + 1), Addr: l.Addr().String()}
+	}
+	var fwdLis []net.Listener
+	if forward {
+		fwdLis = make([]net.Listener, n)
+		for i := range fwdLis {
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			fwdLis[i] = l
+			peers[i].ForwardAddr = l.Addr().String()
+		}
 	}
 	nodes := make([]*Node, n)
 	for i := range nodes {
@@ -91,7 +113,24 @@ func testCluster(t *testing.T, n int) []*Node {
 		}
 		nodes[i] = nd
 	}
+	var srvs []*http.Server
+	for i, l := range fwdLis {
+		nd := nodes[i]
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			if err := nd.Forward(body); err != nil {
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		})}
+		srvs = append(srvs, srv)
+		go srv.Serve(l)
+	}
 	t.Cleanup(func() {
+		for _, srv := range srvs {
+			srv.Close()
+		}
 		for _, nd := range nodes {
 			nd.Stop()
 		}
@@ -375,12 +414,12 @@ func TestNewValidatesConfig(t *testing.T) {
 	a := lis.Addr().String()
 	for name, cfg := range map[string]Config{
 		"no peers":      {ID: 1, Listener: lis},
-		"one replica":   {ID: 1, Peers: []Peer{{1, a}}, Listener: lis},
-		"id not in set": {ID: 3, Peers: []Peer{{1, a}, {2, a}}, Listener: lis},
-		"ids not 1..n":  {ID: 1, Peers: []Peer{{1, a}, {3, a}}, Listener: lis},
-		"duplicate id":  {ID: 1, Peers: []Peer{{1, a}, {1, a}}, Listener: lis},
-		"empty address": {ID: 1, Peers: []Peer{{1, a}, {2, ""}}, Listener: lis},
-		"id zero":       {ID: 0, Peers: []Peer{{0, a}, {1, a}}, Listener: lis},
+		"one replica":   {ID: 1, Peers: []Peer{{ID: 1, Addr: a}}, Listener: lis},
+		"id not in set": {ID: 3, Peers: []Peer{{ID: 1, Addr: a}, {ID: 2, Addr: a}}, Listener: lis},
+		"ids not 1..n":  {ID: 1, Peers: []Peer{{ID: 1, Addr: a}, {ID: 3, Addr: a}}, Listener: lis},
+		"duplicate id":  {ID: 1, Peers: []Peer{{ID: 1, Addr: a}, {ID: 1, Addr: a}}, Listener: lis},
+		"empty address": {ID: 1, Peers: []Peer{{ID: 1, Addr: a}, {ID: 2, Addr: ""}}, Listener: lis},
+		"id zero":       {ID: 0, Peers: []Peer{{ID: 0, Addr: a}, {ID: 1, Addr: a}}, Listener: lis},
 	} {
 		if nd, err := New(cfg); err == nil {
 			nd.Stop()
@@ -396,7 +435,7 @@ func TestSubmitBeforeStartAndAfterStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nd, err := New(Config{ID: 1, Peers: []Peer{{1, lis.Addr().String()}, {2, "127.0.0.1:1"}}, Listener: lis})
+	nd, err := New(Config{ID: 1, Peers: []Peer{{ID: 1, Addr: lis.Addr().String()}, {ID: 2, Addr: "127.0.0.1:1"}}, Listener: lis})
 	if err != nil {
 		t.Fatal(err)
 	}
