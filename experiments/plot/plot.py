@@ -629,6 +629,106 @@ def plot_fault_bars(agg: pd.DataFrame, exp: str, n, metric: str, out_png, refere
     return fig
 
 
+E8_EXP = re.compile(r"^(?P<prefix>.+)-(?P<sigs>none|ingress|all)-(?P<read>plain|verified|certified)$")
+E8_SIGS = ("none", "ingress", "all")
+E8_READS = ("plain", "verified", "certified")
+
+
+def read_ops(path) -> dict:
+    """{op: {column: value}} of an ops sidecar (numbers as float), {} when
+    missing or unreadable. The per-run columns (dropped, read_bytes_mean,
+    verify_cpu_us_mean) are on every line."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError, TypeError):
+        return {}
+    if not lines or lines[0].split(",")[:len(OPS_HEADER_PREFIX)] != OPS_HEADER_PREFIX:
+        return {}
+    head = lines[0].split(",")
+    out = {}
+    for line in lines[1:]:
+        f = line.split(",")
+        if len(f) != len(head):
+            continue
+        try:
+            out[f[0]] = {h: float(v) for h, v in zip(head[1:], f[1:])}
+        except ValueError:
+            continue
+    return out
+
+
+def e8_table(df: pd.DataFrame, base_dirs) -> pd.DataFrame:
+    """One row per (backend, workload, sigs, read) of the E8 EXPs
+    (<prefix>-<sigs>-<read>): means over reps of tps, the write and read p99
+    and the verified-read bytes and proof-check CPU from the ops sidecars,
+    and tps_vs_base_pct = change of tps against none/plain of the same
+    backend and workload."""
+    rows = []
+    for _, row in df.iterrows():
+        m = E8_EXP.match(str(row["exp"]))
+        if not m:
+            continue
+        ops = {}
+        for b in base_dirs:
+            side = run_sidecar(b, row, ".ops.csv")
+            if side is not None:
+                ops = read_ops(side)
+                break
+        rd, wr = ops.get("read", {}), ops.get("write", {})
+        rows.append({"backend": row["backend"], "workload": row["workload"], "sigs": m.group("sigs"),
+                     "read": m.group("read"), "tps": float(row["tps"]),
+                     "write_p99_ms": wr.get("lat_p99_ms", float("nan")),
+                     "read_p99_ms": rd.get("lat_p99_ms", float("nan")),
+                     "read_bytes_mean": rd.get("read_bytes_mean", float("nan")),
+                     "verify_cpu_us_mean": rd.get("verify_cpu_us_mean", float("nan"))})
+    cols = ["backend", "workload", "sigs", "read", "reps", "tps_mean", "tps_vs_base_pct",
+            "write_p99_ms", "read_p99_ms", "read_bytes_mean", "verify_cpu_us_mean"]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    r = pd.DataFrame(rows)
+    t = r.groupby(["backend", "workload", "sigs", "read"], as_index=False).agg(
+        reps=("tps", "size"), tps_mean=("tps", "mean"), write_p99_ms=("write_p99_ms", "mean"),
+        read_p99_ms=("read_p99_ms", "mean"), read_bytes_mean=("read_bytes_mean", "mean"),
+        verify_cpu_us_mean=("verify_cpu_us_mean", "mean"))
+    base = t[(t["sigs"] == "none") & (t["read"] == "plain")].set_index(["backend", "workload"])["tps_mean"]
+    t["tps_vs_base_pct"] = [
+        100.0 * (v / base[(b, w)] - 1) if (b, w) in base.index and base[(b, w)] > 0 else float("nan")
+        for b, w, v in zip(t["backend"], t["workload"], t["tps_mean"])]
+    order = {k: i for i, k in enumerate(E8_SIGS)}
+    rorder = {k: i for i, k in enumerate(E8_READS)}
+    t = t.assign(_s=t["sigs"].map(order), _r=t["read"].map(rorder)).sort_values(
+        ["backend", "workload", "_s", "_r"]).drop(columns=["_s", "_r"])
+    return t[cols].reset_index(drop=True)
+
+
+def plot_e8(t: pd.DataFrame, out_png):
+    """E8 figure: tps, write p99 and read p99 per (sigs/read) configuration,
+    one bar group per backend and workload."""
+    metrics = [("tps_mean", "throughput (req/s)"), ("write_p99_ms", "write p99 (ms)"),
+               ("read_p99_ms", "read p99 (ms)")]
+    groups = list(t.groupby(["backend", "workload"], sort=True))
+    cfgs = [(s, r) for s in E8_SIGS for r in E8_READS if ((t["sigs"] == s) & (t["read"] == r)).any()]
+    fig, axes = plt.subplots(1, len(metrics), figsize=(4.2 * len(metrics), 3.6), squeeze=False)
+    width = 0.8 / max(len(cfgs), 1)
+    for ax, (col, label) in zip(axes[0], metrics):
+        for k, (s, r) in enumerate(cfgs):
+            ys = []
+            for _, g in groups:
+                v = g[(g["sigs"] == s) & (g["read"] == r)][col]
+                ys.append(float(v.iloc[0]) if len(v) else float("nan"))
+            ax.bar([i + (k - (len(cfgs) - 1) / 2) * width for i in range(len(groups))], ys, width,
+                   label="%s / %s" % (s, r))
+        ax.set_xticks(range(len(groups)))
+        ax.set_xticklabels(["%s\n%s" % key for key, _ in groups])
+        ax.set_ylabel(label)
+        ax.grid(axis="y", alpha=0.3)
+    axes[0][0].legend(fontsize=7, title="verify-sigs / read", title_fontsize=7)
+    fig.suptitle("E8: signatures and verified reads")
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=120)
+    return fig
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("csv", nargs="+", help="result CSV files (results/raw/*.csv)")
@@ -656,7 +756,17 @@ def main(argv=None) -> int:
 
     written = []
     notes = []
+    e8_exps = {e for e in agg["exp"].unique() if E8_EXP.match(str(e))}
+    if e8_exps:
+        t = e8_table(raw[raw["exp"].isin(e8_exps)], sorted({str(Path(p).parent) for p in args.csv}))
+        t.to_csv(out_dir / "e8_verify.csv", index=False)
+        written.append(out_dir / "e8_verify.csv")
+        png = out_dir / "e8_verify.png"
+        plt.close(plot_e8(t, png))
+        written.append(png)
     for exp in sorted(agg["exp"].unique()):
+        if exp in e8_exps:
+            continue
         sub = agg[agg["exp"] == exp]
         made = False
         if sub["fault"].nunique() > 1:  # E6: bars per fault scenario, one figure per n

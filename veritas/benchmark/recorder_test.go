@@ -207,18 +207,18 @@ func TestWriteOpsCSV(t *testing.T) {
 		{Op: "read", Count: 30, TPS: 3, LatMeanMs: 1, LatP50Ms: 1, LatP99Ms: 1.25, Errors: 1},
 		{Op: "write", Count: 0, Aborted: 7},
 	}
-	if err := WriteOpsCSV(path, ops, 5); err != nil {
+	if err := WriteOpsCSV(path, ops, OpsExtra{Dropped: 5, ReadBytesMean: 812.25, VerifyMicrosMean: 31}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := OpsCSVHeader + "\nread,30,3.00,1.000,1.000,1.250,1,0,5\nwrite,0,0.00,0.000,0.000,0.000,0,7,5\n"
+	want := OpsCSVHeader + "\nread,30,3.00,1.000,1.000,1.250,1,0,5,812.2,31.0\nwrite,0,0.00,0.000,0.000,0.000,0,7,5,812.2,31.0\n"
 	if string(data) != want {
 		t.Fatalf("ops csv=%q want %q", data, want)
 	}
-	if OpsCSVHeader != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped" {
+	if OpsCSVHeader != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped,read_bytes_mean,verify_cpu_us_mean" {
 		t.Fatalf("OpsCSVHeader changed: %q (experiments/run_one.sh parses it)", OpsCSVHeader)
 	}
 }

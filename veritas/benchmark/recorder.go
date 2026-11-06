@@ -310,24 +310,35 @@ func (r *Recorder) OpSummaries() []OpSummary {
 }
 
 // OpsCSVHeader is the header line of the per-run ops sidecar (WriteOpsCSV).
-// The trailing dropped column is the run's open-loop drop count
-// (Summary.Dropped, the same on every line; 0 for a closed-loop run).
-const OpsCSVHeader = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped"
+// The trailing columns are per run (OpsExtra, the same on every line):
+// dropped = open-loop drops (Summary.Dropped, 0 for a closed loop),
+// read_bytes_mean / verify_cpu_us_mean = mean response size and client
+// proof-check time of the verified reads (0 without them).
+const OpsCSVHeader = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped,read_bytes_mean,verify_cpu_us_mean"
+
+// OpsExtra are the per-run columns of the ops sidecar.
+type OpsExtra struct {
+	Dropped          int64
+	ReadBytesMean    float64
+	VerifyMicrosMean float64
+}
 
 // WriteOpsCSV writes ops (OpSummaries) to path as a small CSV: the
 // OpsCSVHeader line, then one line per kind (experiments/run_one.sh keeps it
 // as results/raw/<EXP>/<tag>.ops.csv next to the 22-column row).
-func WriteOpsCSV(path string, ops []OpSummary, dropped int64) error {
+func WriteOpsCSV(path string, ops []OpSummary, x OpsExtra) error {
 	var sb strings.Builder
 	sb.WriteString(OpsCSVHeader)
 	sb.WriteByte('\n')
 	for _, o := range ops {
-		fmt.Fprintf(&sb, "%s,%d,%s,%s,%s,%s,%d,%d,%d\n", o.Op, o.Count,
+		fmt.Fprintf(&sb, "%s,%d,%s,%s,%s,%s,%d,%d,%d,%s,%s\n", o.Op, o.Count,
 			strconv.FormatFloat(o.TPS, 'f', 2, 64),
 			strconv.FormatFloat(o.LatMeanMs, 'f', 3, 64),
 			strconv.FormatFloat(o.LatP50Ms, 'f', 3, 64),
 			strconv.FormatFloat(o.LatP99Ms, 'f', 3, 64),
-			o.Errors, o.Aborted, dropped)
+			o.Errors, o.Aborted, x.Dropped,
+			strconv.FormatFloat(x.ReadBytesMean, 'f', 1, 64),
+			strconv.FormatFloat(x.VerifyMicrosMean, 'f', 1, 64))
 	}
 	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }

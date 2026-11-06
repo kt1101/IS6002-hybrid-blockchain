@@ -672,3 +672,47 @@ def test_ops_path_matches_rate_suffix(tmp_path):
     row0 = dict(row, offered_rps=0)
     (d / (base + "_bf100ms.ops.csv")).write_text("x")
     assert plot._ops_path(tmp_path, row0).name == base + "_bf100ms.ops.csv"
+
+
+def _e8_fixture(tmp_path):
+    raw = tmp_path / "raw"
+    paths = []
+    for sg in ("none", "all"):
+        for rd in ("plain", "verified"):
+            exp = "e8-%s-%s" % (sg, rd)
+            (raw / exp).mkdir(parents=True)
+            df = make_df([100.0 - 10 * (sg == "all") - 5 * (rd == "verified")] * 2, exp=exp,
+                         backend="raft", clients=256, workload="a", commit_mode="sync")
+            p = raw / (exp + ".csv")
+            df[plot.EXPECTED_COLUMNS].to_csv(p, index=False)
+            paths.append(p)
+            for _, row in df.iterrows():
+                (raw / exp / (plot.run_tag(row) + "_bf100ms.ops.csv")).write_text(
+                    "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped,read_bytes_mean,verify_cpu_us_mean\n"
+                    "read,1,1.00,1.000,1.000,%.3f,0,0,0,%s,%s\nwrite,1,1.00,1.000,1.000,50.000,0,0,0,0,0\n"
+                    % (2.0 + 3 * (rd == "verified"), 900 if rd == "verified" else 0, 30 if rd == "verified" else 0))
+    return raw, paths
+
+
+def test_e8_table_and_figure(tmp_path):
+    raw, paths = _e8_fixture(tmp_path)
+    df = plot.load_csvs(paths)
+    t = plot.e8_table(df, [raw])
+    assert len(t) == 4
+    r = t[(t["sigs"] == "all") & (t["read"] == "verified")].iloc[0]
+    assert r["tps_mean"] == 85.0
+    assert r["read_p99_ms"] == 5.0 and r["write_p99_ms"] == 50.0
+    assert r["read_bytes_mean"] == 900 and r["verify_cpu_us_mean"] == 30
+    base = t[(t["sigs"] == "none") & (t["read"] == "plain")].iloc[0]
+    assert base["tps_vs_base_pct"] == 0.0
+    assert round(r["tps_vs_base_pct"], 1) == -15.0
+    png = tmp_path / "e8.png"
+    plt.close(plot.plot_e8(t, png))
+    assert png.read_bytes()[:8] == PNG_MAGIC
+
+
+def test_main_draws_e8(tmp_path, capsys):
+    raw, paths = _e8_fixture(tmp_path)
+    out = tmp_path / "figs"
+    assert plot.main([str(p) for p in paths] + ["--out", str(out)]) == 0
+    assert (out / "e8_verify.png").exists() and (out / "e8_verify.csv").exists()

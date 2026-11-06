@@ -106,7 +106,7 @@ newtree() {
 #!/usr/bin/env bash
 # Stub of run_one.sh: log the environment, append one row (23 columns).
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-echo "EXP=$EXP BACKEND=$BACKEND N=$N F=$F CLIENTS=$CLIENTS BLOCK_SIZE=$BLOCK_SIZE WORKLOAD=$WORKLOAD RTT_MS=$RTT_MS FAULT=$FAULT REP=$REP COMMIT_MODE=$COMMIT_MODE DURATION=${DURATION:-} RATE=${RATE:-0} HOOK=${PRE_DOWN_HOOK:-}" >>"$root/stub.log"
+echo "EXP=$EXP BACKEND=$BACKEND N=$N F=$F CLIENTS=$CLIENTS BLOCK_SIZE=$BLOCK_SIZE WORKLOAD=$WORKLOAD RTT_MS=$RTT_MS FAULT=$FAULT REP=$REP COMMIT_MODE=$COMMIT_MODE DURATION=${DURATION:-} RATE=${RATE:-0} VERIFY_SIGS=${VERIFY_SIGS:-none} READ_MODE=${READ_MODE:-plain} ATTEST_EVERY=${ATTEST_EVERY:-0} HOOK=${PRE_DOWN_HOOK:-}" >>"$root/stub.log"
 if [ -n "${STUB_RC:-}" ] && { [ -z "${STUB_BACKEND:-}" ] || [ "$STUB_BACKEND" = "$BACKEND" ]; }; then
   exit "$STUB_RC"
 fi
@@ -571,6 +571,21 @@ OUT="$(E6_RATE_BFT2=1300 BACKENDS="raft bft2" E6_KINDS="F1" F5_KINDS=F5-F2 E6_LE
 eq "e6: raft without its rate stays closed loop" "$(printf '%s\n' "$OUT" | grep 'BACKEND=raft' | grep -c 'RATE=')" 0
 E6_RATE_BFT2=abc BACKENDS=bft2 drv e6_faults.sh --dry-run
 eq "e6 bad E6_RATE_BFT2 refused" "$RC" 1
+
+# ------------------------------------------------------------- E8 verify ----
+newtree e8
+OUT="$("$ROOT/experiments/exp/e8_verify.sh" --dry-run 2>/dev/null)"
+eq "e8 --dry-run: 72 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 72
+eq "e8: 6 EXPs" "$(printf '%s\n' "$OUT" | grep -o 'EXP=[^ ]*' | sort -u | tr '\n' ' ')" "EXP=e8-all-plain EXP=e8-all-verified EXP=e8-ingress-plain EXP=e8-ingress-verified EXP=e8-none-plain EXP=e8-none-verified "
+eq "e8: only raft and bft2" "$(printf '%s\n' "$OUT" | grep -o 'BACKEND=[^ ]*' | sort -u | tr '\n' ' ')" "BACKEND=bft2 BACKEND=raft "
+eq "e8: workloads a and c" "$(printf '%s\n' "$OUT" | grep -o 'WORKLOAD=[^ ]*' | sort -u | tr '\n' ' ')" "WORKLOAD=a WORKLOAD=c "
+OUT="$(E8_RATE_RAFT=800 "$ROOT/experiments/exp/e8_verify.sh" --dry-run 2>/dev/null)"
+eq "e8: E8_RATE_RAFT on every raft run" "$(printf '%s\n' "$OUT" | grep 'BACKEND=raft' | grep -vc ' RATE=800 ')" 0
+BACKENDS=raft REPS=1 EXTRA_REPS=0 E8_SIGS="all" E8_READS="verified" drv e8_verify.sh
+eq "e8 real run ok" "$RC" 0
+eq "e8: 2 runs (workloads a, c)" "$(calls)" 2
+contains "e8: run_one gets VERIFY_SIGS and READ_MODE" "$(cat "$ROOT/stub.log")" "VERIFY_SIGS=all READ_MODE=verified"
+eq "e8: rows in e8-all-verified" "$(rows e8-all-verified)" 2
 
 echo "test_exp.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

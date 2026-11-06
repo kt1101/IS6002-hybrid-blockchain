@@ -354,7 +354,8 @@ func main() {
 		}
 	}
 	if *opsPath != "" {
-		if err := benchmark.WriteOpsCSV(*opsPath, rec.OpSummaries(), s.Dropped); err != nil {
+		rb, vu := verifyStats.means()
+		if err := benchmark.WriteOpsCSV(*opsPath, rec.OpSummaries(), benchmark.OpsExtra{Dropped: s.Dropped, ReadBytesMean: rb, VerifyMicrosMean: vu}); err != nil {
 			panic(err)
 		}
 	}
