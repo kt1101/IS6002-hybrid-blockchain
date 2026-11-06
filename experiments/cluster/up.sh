@@ -13,7 +13,8 @@
 #      veritas --batch-flush of every node of a core backend).
 #      KAFKA_CPUS=2 KAFKA_MEM=1536m (Kafka broker caps, gen_compose.py
 #      --kafka-cpus/--kafka-mem), TM_TIMEOUT_COMMIT="" (tendermint: tm_config.py
-#      --timeout-commit; empty = Tendermint's default).
+#      --timeout-commit; empty = Tendermint's default), VERIFY_SIGS=none and
+#      KEY_SEED (phase 2: veritas --verify-sigs/--key-seed of every core node).
 # Writes experiments/cluster/generated/{compose.json,tm/}.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
@@ -28,6 +29,12 @@ BATCH_FLUSH="${BATCH_FLUSH:-}"
 KAFKA_CPUS="${KAFKA_CPUS:-2}"
 KAFKA_MEM="${KAFKA_MEM:-1536m}"
 TM_TIMEOUT_COMMIT="${TM_TIMEOUT_COMMIT:-}"
+VERIFY_SIGS="${VERIFY_SIGS:-none}"
+KEY_SEED="${KEY_SEED:-}"
+core_args=""
+if [ "$VERIFY_SIGS" != none ]; then
+  core_args="--verify-sigs $VERIFY_SIGS${KEY_SEED:+ --key-seed $KEY_SEED}"
+fi
 
 hbdb_check_backend
 hbdb_check_n "$N"
@@ -65,7 +72,7 @@ log "generating compose: backend=$BACKEND n=$N block_size=$BLOCK_SIZE commit_mod
 # shellcheck disable=SC2086
 python3 "$HBDB_CLUSTER_DIR/gen_compose.py" \
   --backend "$BACKEND" --n "$N" --block-size "$BLOCK_SIZE" --commit-mode "$COMMIT_MODE" \
-  --cpus "$CPUS" --mem "$MEM" --kafka-cpus "$KAFKA_CPUS" --kafka-mem "$KAFKA_MEM" $node_fault_args $batch_flush_args \
+  --cpus "$CPUS" --mem "$MEM" --kafka-cpus "$KAFKA_CPUS" --kafka-mem "$KAFKA_MEM" $core_args $node_fault_args $batch_flush_args \
   --tm-dir "$HBDB_GEN_DIR/tm" --ycsb-dir "$HBDB_YCSB_DIR" --results-dir "$HBDB_RESULTS_RAW" \
   --out "$HBDB_COMPOSE_FILE"
 

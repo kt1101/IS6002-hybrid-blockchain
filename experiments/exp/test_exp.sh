@@ -224,7 +224,7 @@ eq "E1 N=4 block 100 workload a rtt 0 no fault" "$(grep -vc 'N=4 F=0 CLIENTS=[0-
 eq "E1 clients" "$(grep 'BACKEND=raft ' "$ROOT/stub.log" | sed 's/.*CLIENTS=\([0-9]*\) .*REP=\([0-9]\) .*/\1\/\2/' | tr '\n' ' ')" "4/1 16/1 64/1 256/1 4/2 16/2 64/2 256/2 4/3 16/3 64/3 256/3 "
 eq "E1 rep outermost across backends" "$(sed -n '1p;16p;17p' "$ROOT/stub.log" | sed 's/.*BACKEND=\([a-z0-9]*\) .*REP=\([0-9]\) .*/\1\/\2/' | tr '\n' ' ')" "kafka/1 bft2/1 kafka/2 "
 eq "E1 re-executed once under caffeinate -dims" "$(grep -c "^caffeinate -dims $ROOT/experiments/exp/e1_clients.sh$" "$CAFFEINATE_LOG")" 1
-eq "E1 params file" "$(cut -d= -f1 "$ROOT/results/raw/e1.params" | tr '\n' ' ')" "DURATION WARMUP CPUS MEM LOAD_THREADS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT RATE MAX_INFLIGHT commit "
+eq "E1 params file" "$(cut -d= -f1 "$ROOT/results/raw/e1.params" | tr '\n' ' ')" "DURATION WARMUP CPUS MEM LOAD_THREADS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT RATE MAX_INFLIGHT VERIFY_SIGS READ_MODE ATTEST_EVERY commit "
 contains "E1 params values" "$(cat "$ROOT/results/raw/e1.params")" "DURATION=60s"
 eq "E1 no hook" "$(grep -vc 'HOOK=$' "$ROOT/stub.log")" 0
 contains "E1 summary" "$OUT" "rows present: 48 / 48 planned"
@@ -429,12 +429,12 @@ EXP_ALLOW_COMMIT_CHANGE=1 KAFKA_CPUS=0.5 BACKENDS=raft REPS=2 drv e1_clients.sh
 eq "params: KAFKA_CPUS refused" "$RC" 1
 contains "params: KAFKA_CPUS message names the setting" "$OUT" "KAFKA_CPUS=0.5 (EXP started with 2)"
 contains "params: KAFKA_CPUS message names .params" "$OUT" "e1.params"
-for kv in KAFKA_MEM=768m TM_TIMEOUT_COMMIT=0s RATE=500 MAX_INFLIGHT=10; do
+for kv in KAFKA_MEM=768m TM_TIMEOUT_COMMIT=0s RATE=500 MAX_INFLIGHT=10 VERIFY_SIGS=all READ_MODE=verified ATTEST_EVERY=1; do
   env EXP_ALLOW_COMMIT_CHANGE=1 "$kv" BACKENDS=raft REPS=2 drv e1_clients.sh --dry-run
   eq "params: $kv refused" "$RC" 1
 done
 # A .params file of phase 1 (without the new keys) accepts their defaults.
-sed -i.bak '/^\(KAFKA_CPUS\|KAFKA_MEM\|TM_TIMEOUT_COMMIT\|RATE\|MAX_INFLIGHT\)=/d' "$ROOT/results/raw/e1.params"
+sed -i.bak '/^\(KAFKA_CPUS\|KAFKA_MEM\|TM_TIMEOUT_COMMIT\|RATE\|MAX_INFLIGHT\|VERIFY_SIGS\|READ_MODE\|ATTEST_EVERY\)=/d' "$ROOT/results/raw/e1.params"
 EXP_ALLOW_COMMIT_CHANGE=1 BACKENDS=raft REPS=2 drv e1_clients.sh --dry-run
 eq "params: old .params, new keys at their defaults" "$RC" 0
 EXP_ALLOW_COMMIT_CHANGE=1 RATE=500 BACKENDS=raft REPS=2 drv e1_clients.sh --dry-run
@@ -528,6 +528,12 @@ eq "BATCH_FLUSH on kafka-orig refused" "$RC" 1
 contains "BATCH_FLUSH on kafka-orig message" "$OUT" "original server without it"
 run_one_check BATCH_FLUSH=1s BACKEND=tm-orig
 eq "BATCH_FLUSH on tm-orig refused" "$RC" 1
+run_one_check VERIFY_SIGS=some
+eq "VERIFY_SIGS=some refused" "$RC" 1
+run_one_check READ_MODE=x
+eq "READ_MODE=x refused" "$RC" 1
+run_one_check READ_MODE=verified BACKEND=kafka-orig COMMIT_MODE=async
+eq "READ_MODE on kafka-orig refused" "$RC" 1
 run_one_check PRE_DOWN_HOOK=/nonexistent/hook
 eq "missing PRE_DOWN_HOOK refused" "$RC" 1
 contains "missing PRE_DOWN_HOOK message" "$OUT" "is not an executable file"

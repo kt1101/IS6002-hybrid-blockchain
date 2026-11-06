@@ -8,6 +8,8 @@ service Node {
     rpc Set (SetRequest) returns (SetResponse);
     rpc Verify(VerifyRequest) returns (VerifyResponse);
     rpc BatchSet (BatchSetRequest) returns (BatchSetResponse);
+    // Phase 2: a read with a Merkle proof the client checks (RQ4).
+    rpc GetVerified (GetVerifiedRequest) returns (GetVerifiedResponse);
 }
 
 message VerifyRequest {
@@ -50,6 +52,10 @@ message SetRequest {
     string key = 2;
     string value = 3;
     int64 version = 4;
+    // Phase 2 (--verify-sigs): the signing client's id ("client<k>") and its
+    // Ed25519 signature on key 0x00 value 0x00 version(8 bytes big-endian).
+    string client_id = 5;
+    bytes sig = 6;
 }
 
 message SetResponse {
@@ -63,4 +69,19 @@ message BatchSetRequest {
 
 message BatchSetResponse {
     // Empty.
+}
+
+// Phase 2: value, version, Merkle proof and root of one key, all taken at
+// the same height (one hold of the executor lock).
+message GetVerifiedRequest {
+    string key = 1;
+}
+
+message GetVerifiedResponse {
+    string value = 1;
+    int64 version = 2;
+    int64 height = 3;
+    bytes root_digest = 4;
+    repeated bytes side_nodes = 5;
+    bytes non_membership_leaf_data = 6;
 }

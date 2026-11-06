@@ -170,8 +170,22 @@ type ErrorKind struct {
 // replaced by "seq N" so that messages of the same cause count together.
 var seqRE = regexp.MustCompile(`\bseq [0-9]+`)
 
+// ErrKindProof and ErrKindCert are the ErrorKinds of a verified read whose
+// Merkle proof failed (driver.ErrProofInvalid) and of a certified read
+// without a valid attestation quorum (driver.ErrCertInvalid).
+const (
+	ErrKindProof = "proof"
+	ErrKindCert  = "cert"
+)
+
 // countErrorKind must be called with r.mu held.
 func (r *Recorder) countErrorKind(msg string) {
+	switch {
+	case strings.Contains(msg, "driver: proof invalid"):
+		msg = ErrKindProof
+	case strings.Contains(msg, "driver: certification invalid"):
+		msg = ErrKindCert
+	}
 	msg = seqRE.ReplaceAllString(msg, "seq N")
 	if len(msg) > maxErrorMsgLen {
 		msg = msg[:maxErrorMsgLen]

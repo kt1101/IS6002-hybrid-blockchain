@@ -13,6 +13,7 @@ import (
 	raftcons "hybrid/consensus/raft"
 	"hybrid/veritas/benchmark"
 	"hybrid/veritas/core"
+	"hybrid/veritas/sigs"
 )
 
 func TestParseRaftPeers(t *testing.T) {
@@ -156,5 +157,25 @@ func TestSnapshotSignalWritesNumberedSnapshots(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("snapshot %d not written 5 s after SIGUSR2", k)
 		}
+	}
+}
+
+func TestSigConfig(t *testing.T) {
+	m, keys, err := sigConfig("none", "s")
+	if err != nil || m != sigs.SigNone || keys != nil {
+		t.Fatalf("none: %v %v %v", m, keys != nil, err)
+	}
+	m, keys, err = sigConfig("all", "s")
+	if err != nil || m != sigs.SigAll || keys == nil {
+		t.Fatalf("all: %v %v %v", m, keys != nil, err)
+	}
+	if _, ok := keys("client3"); !ok {
+		t.Fatal("client3 unknown")
+	}
+	if _, _, err := sigConfig("bogus", "s"); err == nil {
+		t.Fatal("bogus mode accepted")
+	}
+	if _, _, err := sigConfig("ingress", ""); err == nil {
+		t.Fatal("empty seed accepted")
 	}
 }

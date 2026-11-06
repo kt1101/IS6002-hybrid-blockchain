@@ -29,6 +29,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -56,6 +57,7 @@ import (
 	"hybrid/veritas/benchmark"
 	"hybrid/veritas/core"
 	"hybrid/veritas/ledger"
+	"hybrid/veritas/sigs"
 )
 
 var (
@@ -80,6 +82,8 @@ var (
 	breakdownOut  = kingpin.Flag("breakdown-out", "core: breakdown JSON written on SIGTERM/SIGINT (default /results/breakdown-node<node-id>.json)").Default("").String()
 	faultSpec     = kingpin.Flag("fault", "core: injected replica fault: none, silent (--consensus=kafka only: send no votes) or corrupt (append "+benchmark.CorruptMarker+" to every applied value)").Default(core.FaultNone).String()
 	faultAfter    = kingpin.Flag("fault-after", "core: the fault turns on this long after the process start (e.g. 60s); SIGUSR1 turns it on at once").Default("0s").Duration()
+	verifySigs    = kingpin.Flag("verify-sigs", "core (phase 2): client Set signatures checked: none, ingress (at the receiving node: Unauthenticated) or all (also by every replica before applying: aborted)").Default("none").String()
+	keySeed       = kingpin.Flag("key-seed", "core (phase 2): seed every Ed25519 key is derived from (clients client<k>, nodes node<i>); the same on every node and client").Default(sigs.DefaultSeed).String()
 	faultActive   = kingpin.Flag("fault-active-file", "core: written (the --fault spec) when SIGUSR1 activates the fault; removed at start (empty: none)").Default(defaultFaultActiveFile).String()
 
 	// --consensus=raft only. The raft server ID is --signature.
@@ -117,6 +121,22 @@ func main() {
 		return
 	}
 	runCore()
+}
+
+// sigConfig parses --verify-sigs and builds the client key lookup of
+// --key-seed (nil for none).
+func sigConfig(mode, seed string) (sigs.SigMode, func(string) (ed25519.PublicKey, bool), error) {
+	m, err := sigs.ParseSigMode(mode)
+	if err != nil {
+		return sigs.SigNone, nil, fmt.Errorf("--verify-sigs: %v", err)
+	}
+	if m == sigs.SigNone {
+		return m, nil, nil
+	}
+	if seed == "" {
+		return m, nil, fmt.Errorf("--verify-sigs=%s needs a non-empty --key-seed", mode)
+	}
+	return m, sigs.ClientKeys(seed), nil
 }
 
 // requireFlag fails like kingpin does for a missing required flag.
@@ -323,6 +343,10 @@ func runCore() {
 		}
 	}
 
+	sigMode, clientKeys, err := sigConfig(*verifySigs, *keySeed)
+	if err != nil {
+		kingpin.Fatalf("%v", err)
+	}
 	srv := core.NewServer(core.ServerConfig{
 		NodeID:        *nodeID,
 		Signature:     *signature,
@@ -330,6 +354,8 @@ func runCore() {
 		Mode:          vm,
 		Commit:        cm,
 		FlushInterval: *batchFlush, // > 0 (checked above)
+		Sigs:          sigMode,
+		ClientKeys:    clientKeys,
 	}, cons, ex, l)
 	drops.set(srv.AbortBlock)
 	// SIGUSR2: breakdown snapshots for the measurement window (the harness

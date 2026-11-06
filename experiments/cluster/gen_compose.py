@@ -242,7 +242,7 @@ def _kafka_orig_node(i, n, block_size, memlimit):
     ] + _exit_when_any_exits(["redis-server", "veritas-kafka"])
 
 
-def _kafka_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None):
+def _kafka_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None, extra=""):
     """Node of the deterministic Kafka backend (consensus/kafka + core.Server).
 
     Same Kafka/TSO/redis wiring as kafka-orig; the signature node<i> is the
@@ -263,7 +263,7 @@ def _kafka_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush
         " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
         " --breakdown-out=/results/breakdown-node%d.json &"
         % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT, KAFKA_IP, KAFKA_PORT,
-           KAFKA_TOPIC, i, i), fault, batch_flush
+           KAFKA_TOPIC, i, i), fault, batch_flush, extra
     ) + _exit_when_any_exits(["redis-server", "veritas-kafka"])
 
 
@@ -304,7 +304,7 @@ def check_batch_flush(batch_flush):
         raise ValueError("invalid --batch-flush %r: want a positive duration like 1s, 250ms, 2m" % (batch_flush,))
 
 
-def _forward_sigterm(start, fault=None, batch_flush=None):
+def _forward_sigterm(start, fault=None, batch_flush=None, extra=""):
     """Lines that start veritas (start ends with ' &') so that SIGTERM/SIGINT
     reaching bash is passed on to it and bash waits for it (core backends:
     the server writes its breakdown on SIGTERM).
@@ -313,7 +313,8 @@ def _forward_sigterm(start, fault=None, batch_flush=None):
     trap; until veritas runs the trap only exits. The server's pid is written
     to VERITAS_PIDFILE (the fault injector signals it there). fault (None,
     'silent' or 'corrupt') adds the --fault flags (_fault_args); batch_flush
-    (None or a duration) adds --batch-flush (_batch_flush_arg).
+    (None or a duration) adds --batch-flush (_batch_flush_arg); extra (phase-2
+    core flags, core_flags()) is appended as is.
     """
     if not start.endswith(" &"):
         raise ValueError("veritas start line must end with ' &': %r" % (start,))
@@ -321,10 +322,33 @@ def _forward_sigterm(start, fault=None, batch_flush=None):
         "veritas_pid=",
         "trap 'if [ -n \"$veritas_pid\" ]; then kill -TERM \"$veritas_pid\" 2>/dev/null || true;"
         " wait \"$veritas_pid\" || true; fi; exit 143' TERM INT",
-        start[:-2] + _fault_args(fault) + _batch_flush_arg(batch_flush) + " &",
+        start[:-2] + _fault_args(fault) + _batch_flush_arg(batch_flush) + extra + " &",
         "veritas_pid=$!",
         "echo \"$veritas_pid\" >%s" % VERITAS_PIDFILE,
     ]
+
+
+VERIFY_SIGS_MODES = ("none", "ingress", "all")
+
+
+def core_flags(verify_sigs="none", key_seed=None):
+    """Phase-2 veritas flags of every core node ("" for the phase-1 defaults).
+
+    >>> core_flags()
+    ''
+    >>> core_flags("all", "s1")
+    ' --verify-sigs=all --key-seed=s1'
+    """
+    if verify_sigs not in VERIFY_SIGS_MODES:
+        raise ValueError("verify_sigs must be one of %s, got %r" % (VERIFY_SIGS_MODES, verify_sigs))
+    if key_seed is not None and not re.fullmatch(r"[A-Za-z0-9._-]+", key_seed):
+        raise ValueError("key_seed must match [A-Za-z0-9._-]+, got %r" % (key_seed,))
+    out = ""
+    if verify_sigs != "none":
+        out += " --verify-sigs=%s" % verify_sigs
+    if key_seed is not None:
+        out += " --key-seed=%s" % key_seed
+    return out
 
 
 def raft_peers(n):
@@ -338,7 +362,7 @@ def raft_peers(n):
         for j in range(1, n + 1))
 
 
-def _raft_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None):
+def _raft_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None, extra=""):
     """Node of the Raft backend (consensus/raft + core.Server).
 
     Same binary, TSO and redis wiring as kafka, no Kafka. The raft server ID
@@ -358,11 +382,11 @@ def _raft_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=
         " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
         " --breakdown-out=/results/breakdown-node%d.json &"
         % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT,
-           raft_peers(n), RAFT_PORT, " --raft-bootstrap" if i == 1 else "", i, i), fault, batch_flush
+           raft_peers(n), RAFT_PORT, " --raft-bootstrap" if i == 1 else "", i, i), fault, batch_flush, extra
     ) + _exit_when_any_exits(["redis-server", "veritas-kafka"])
 
 
-def _tendermint_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None):
+def _tendermint_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_flush=None, extra=""):
     """Node of the Tendermint backend (consensus/tendermint + core.Server).
 
     Same layout as tm-orig (tendermint home copied from the read-only /tmcfg
@@ -384,7 +408,7 @@ def _tendermint_node(i, n, block_size, commit_mode, memlimit, fault=None, batch_
         " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
         " --breakdown-out=/results/breakdown-node%d.json &"
         % (memlimit, commit_mode, i, i, parties, block_size, VERITAS_PORT,
-           TM_ABCI_LISTEN, TM_RPC, i, i), fault, batch_flush
+           TM_ABCI_LISTEN, TM_RPC, i, i), fault, batch_flush, extra
     ) + [
         # tendermint exits if the ABCI app is not listening yet. The wait is
         # bounded (ABCI_WAIT_TRIES x 0.2 s) and stops early if the server
@@ -409,7 +433,7 @@ def bft2_peers(n):
     return ",".join("%d=%s:%d" % (j, node_ip(j), BFT2_PORT) for j in range(1, n + 1))
 
 
-def _bft2_node(i, n, block_size, commit_mode, memlimit, mem, fault=None, batch_flush=None):
+def _bft2_node(i, n, block_size, commit_mode, memlimit, mem, fault=None, batch_flush=None, extra=""):
     """Node of the bft2 backend (consensus/bft2 + core.Server, HotStuff sidecar).
 
     redis, then bft2-node (replica i of the static set 1..n, replica server
@@ -448,7 +472,7 @@ def _bft2_node(i, n, block_size, commit_mode, memlimit, mem, fault=None, batch_f
         " --redis-addr=127.0.0.1:6379 --redis-db=0 --ledger-path=/data/veritas%d"
         " --breakdown-out=/results/breakdown-node%d.json &"
         % (bft2_veritas_gomemlimit(mem), commit_mode, i, i, parties, block_size, VERITAS_PORT, BFT2_API_ADDR, i, i),
-        fault, batch_flush
+        fault, batch_flush, extra
     ) + _exit_when_any_exits(["redis-server", "bft2-node", "veritas-kafka"])
 
 
@@ -540,7 +564,7 @@ def check_node_faults(backend, n, node_faults):
 
 def gen(backend, n, block_size, commit_mode, cpus, mem,
         tm_dir=None, ycsb_dir=None, results_dir=None, node_faults=None, batch_flush=None,
-        kafka_cpus=KAFKA_CPUS, kafka_mem=KAFKA_MEM):
+        kafka_cpus=KAFKA_CPUS, kafka_mem=KAFKA_MEM, verify_sigs="none", key_seed=None):
     """Return the compose document (a dict) for one cluster.
 
     commit_mode is accepted for every backend; the original backends have a
@@ -555,7 +579,8 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
     leaves the flag out (the binary's default, 1 s). The original backends
     have no such flag.
     kafka_cpus / kafka_mem are the Kafka broker's caps (default 2 CPUs,
-    1536m as in phase 1).
+    1536m as in phase 1). verify_sigs / key_seed are the phase-2 veritas
+    --verify-sigs / --key-seed of every core node (core_flags).
     """
     if backend not in ALL_BACKENDS:
         raise ValueError("unknown backend %r" % backend)
@@ -574,6 +599,9 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
     node_faults = dict(node_faults or {})
     check_node_faults(backend, n, node_faults)
     check_batch_flush(batch_flush)
+    extra = core_flags(verify_sigs, key_seed)
+    if extra and backend not in CORE_BACKENDS:
+        raise ValueError("--verify-sigs/--key-seed need a core backend (%s), got %s" % (", ".join(CORE_BACKENDS), backend))
     if batch_flush is not None and backend not in CORE_BACKENDS:
         raise ValueError("--batch-flush needs a core backend (%s), got %s" % (", ".join(CORE_BACKENDS), backend))
 
@@ -608,18 +636,18 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
             s["command"] = _bash(_kafka_orig_node(i, n, block_size, memlimit))
             s["depends_on"] = {"kafka": {"condition": "service_healthy"}}
         elif backend == "kafka":
-            s["command"] = _bash(_kafka_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush))
+            s["command"] = _bash(_kafka_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, extra))
             s["depends_on"] = {"kafka": {"condition": "service_healthy"}}
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "raft":
-            s["command"] = _bash(_raft_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush))
+            s["command"] = _bash(_raft_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, extra))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "tendermint":
-            s["command"] = _bash(_tendermint_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush))
+            s["command"] = _bash(_tendermint_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, extra))
             s["volumes"].append("%s:/tmcfg:ro" % os.path.join(tm_dir, "node%d" % (i - 1)))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "bft2":
-            s["command"] = _bash(_bft2_node(i, n, block_size, commit_mode, memlimit, mem, node_faults.get(i), batch_flush))
+            s["command"] = _bash(_bft2_node(i, n, block_size, commit_mode, memlimit, mem, node_faults.get(i), batch_flush, extra))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "tm-orig":
             s["command"] = _bash(_tm_orig_node(i, n, block_size, memlimit))
@@ -665,6 +693,9 @@ def main(argv=None):
     p.add_argument("--kafka-cpus", type=float, default=KAFKA_CPUS,
                    help="CPU cap of the Kafka broker container (kafka-orig, kafka)")
     p.add_argument("--kafka-mem", default=KAFKA_MEM, help="memory cap of the Kafka broker container")
+    p.add_argument("--verify-sigs", default="none", choices=VERIFY_SIGS_MODES,
+                   help="veritas --verify-sigs of every core node (phase 2)")
+    p.add_argument("--key-seed", default=None, help="veritas --key-seed of every core node (default: flag left out)")
     a = p.parse_args(argv)
 
     cpus = int(a.cpus) if a.cpus == int(a.cpus) else a.cpus
@@ -673,7 +704,8 @@ def main(argv=None):
         doc = gen(a.backend, a.n, a.block_size, a.commit_mode, cpus, a.mem,
                   tm_dir=a.tm_dir, ycsb_dir=a.ycsb_dir, results_dir=a.results_dir,
                   node_faults=parse_node_faults(a.node_fault), batch_flush=a.batch_flush,
-                  kafka_cpus=kafka_cpus, kafka_mem=a.kafka_mem)
+                  kafka_cpus=kafka_cpus, kafka_mem=a.kafka_mem,
+                  verify_sigs=a.verify_sigs, key_seed=a.key_seed)
     except NotImplementedError as e:
         sys.stderr.write("gen_compose: %s\n" % e)
         return 2

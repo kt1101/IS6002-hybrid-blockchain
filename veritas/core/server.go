@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log"
@@ -17,6 +18,7 @@ import (
 	pbv "hybrid/proto/veritas"
 	"hybrid/veritas"
 	"hybrid/veritas/ledger"
+	"hybrid/veritas/sigs"
 )
 
 // CommitMode selects when Set returns.
@@ -84,6 +86,23 @@ type ServerConfig struct {
 
 	FlushInterval time.Duration // <= 0 means DefaultFlushInterval (1 s)
 	SyncTimeout   time.Duration // <= 0 means DefaultSyncTimeout
+
+	// Sigs (--verify-sigs): SigIngress checks the client signature of every
+	// Set at Set/BatchSet (codes.Unauthenticated on a bad or missing one);
+	// SigAll also makes the executor check every Set before applying it
+	// (a bad SharedLog is aborted). ClientKeys maps a SetRequest.ClientId
+	// to its public key; it is required unless Sigs is SigNone.
+	Sigs       sigs.SigMode
+	ClientKeys func(id string) (ed25519.PublicKey, bool)
+}
+
+// SetVerifier is the executor check of --verify-sigs=all: the Set carries a
+// known client id and that client's valid signature.
+func SetVerifier(keys func(id string) (ed25519.PublicKey, bool)) func(*pbv.SetRequest) bool {
+	return func(s *pbv.SetRequest) bool {
+		pub, ok := keys(s.GetClientId())
+		return ok && sigs.VerifySet(pub, s.GetKey(), s.GetValue(), s.GetVersion(), s.GetSig())
+	}
 }
 
 // Server is the shared Veritas node core: it batches client Sets into
@@ -165,6 +184,12 @@ func NewServer(cfg ServerConfig, c consensus.Consensus, ex *Executor, l *ledger.
 	}
 	if cfg.SyncTimeout <= 0 {
 		cfg.SyncTimeout = DefaultSyncTimeout
+	}
+	if cfg.Sigs != sigs.SigNone && cfg.ClientKeys == nil {
+		panic("core: NewServer: Sigs set without ClientKeys")
+	}
+	if cfg.Sigs == sigs.SigAll {
+		ex.SetSetVerifier(SetVerifier(cfg.ClientKeys))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
@@ -248,6 +273,9 @@ func (s *Server) Get(ctx context.Context, req *pbv.GetRequest) (*pbv.GetResponse
 // take a per-key lock: that lock only serialised the channel send and gave
 // no ordering guarantee.
 func (s *Server) Set(ctx context.Context, req *pbv.SetRequest) (*pbv.SetResponse, error) {
+	if err := s.checkSig(req); err != nil {
+		return nil, err
+	}
 	if err := s.commit(ctx, []*pbv.SetRequest{copySet(req)}); err != nil {
 		return nil, err
 	}
@@ -264,6 +292,9 @@ func (s *Server) BatchSet(ctx context.Context, req *pbv.BatchSetRequest) (*pbv.B
 	}
 	sets := make([]*pbv.SetRequest, len(req.GetSets()))
 	for i, r := range req.GetSets() {
+		if err := s.checkSig(r); err != nil {
+			return nil, err
+		}
 		sets[i] = copySet(r)
 	}
 	if err := s.commit(ctx, sets); err != nil {
@@ -290,12 +321,54 @@ func (s *Server) Verify(ctx context.Context, req *pbv.VerifyRequest) (*pbv.Verif
 	}, nil
 }
 
+// GetVerified returns key's value and version with a Merkle proof, the root
+// and the height they all belong to (Executor.ProveValue, one lock hold), so
+// the client can check the value against the root (driver.GetVerified). A
+// missing key is codes.NotFound.
+func (s *Server) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest) (*pbv.GetVerifiedResponse, error) {
+	if err := s.stoppedErr(); err != nil {
+		return nil, err
+	}
+	val, ver, h, root, proof, err := s.ex.ProveValue([]byte(req.GetKey()))
+	if errors.Is(err, ErrKeyNotFound) {
+		return nil, status.Errorf(codes.NotFound, "key %q not found", req.GetKey())
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &pbv.GetVerifiedResponse{
+		Value:                 val,
+		Version:               ver,
+		Height:                h,
+		RootDigest:            root,
+		SideNodes:             proof.SideNodes,
+		NonMembershipLeafData: proof.NonMembershipLeafData,
+	}, nil
+}
+
+// checkSig is the ingress check of --verify-sigs (SigIngress, SigAll).
+func (s *Server) checkSig(r *pbv.SetRequest) error {
+	if s.cfg.Sigs == sigs.SigNone {
+		return nil
+	}
+	pub, ok := s.cfg.ClientKeys(r.GetClientId())
+	if !ok {
+		return status.Errorf(codes.Unauthenticated, "unknown client %q", r.GetClientId())
+	}
+	if !sigs.VerifySet(pub, r.GetKey(), r.GetValue(), r.GetVersion(), r.GetSig()) {
+		return status.Errorf(codes.Unauthenticated, "bad signature of client %q on key %q", r.GetClientId(), r.GetKey())
+	}
+	return nil
+}
+
 func copySet(r *pbv.SetRequest) *pbv.SetRequest {
 	return &pbv.SetRequest{
 		Signature: r.GetSignature(),
 		Key:       r.GetKey(),
 		Value:     r.GetValue(),
 		Version:   r.GetVersion(),
+		ClientId:  r.GetClientId(),
+		Sig:       append([]byte(nil), r.GetSig()...),
 	}
 }
 

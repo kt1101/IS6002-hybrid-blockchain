@@ -69,6 +69,46 @@ type Executor struct {
 	// ledger.AppendBlk by Apply since the last TakeLedgerTime. Guarded by
 	// mu (written under the exclusive lock in Apply).
 	ledgerTime time.Duration
+
+	// height is the height of the last block Apply finished (0 before
+	// the first). Guarded by mu.
+	height int64
+	// verifySet, if set (--verify-sigs=all), is checked for every Set of
+	// a SharedLog before it is applied; a SharedLog with a Set it rejects
+	// is aborted as a whole. Set before the first Apply (SetSetVerifier).
+	verifySet func(*pbv.SetRequest) bool
+}
+
+// SetSetVerifier makes Apply check every Set with f (the BFT model of
+// --verify-sigs=all: a replica does not trust the proposer). A SharedLog
+// with a Set f rejects is skipped and reported as aborted, in both version
+// modes. Call it before the first Apply; nil turns the check off.
+func (e *Executor) SetSetVerifier(f func(*pbv.SetRequest) bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.verifySet = f
+}
+
+// sharedLogSigned reports whether every Set of sl passes verifySet (true
+// when there is no verifier). Called with mu held.
+func (e *Executor) sharedLogSigned(sl *pbv.SharedLog) bool {
+	if e.verifySet == nil {
+		return true
+	}
+	for _, s := range sl.GetSets() {
+		if !e.verifySet(s) {
+			return false
+		}
+	}
+	return true
+}
+
+// LastHeight is the height of the last block Apply finished (0 before the
+// first one).
+func (e *Executor) LastHeight() int64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.height
 }
 
 // NewExecutor builds an executor. A nil fp means NoFault{}. The executor
@@ -168,6 +208,10 @@ func (e *Executor) Apply(ctx context.Context, height int64, raw []byte, blk *pbv
 	switch e.mode {
 	case VersionClient:
 		for _, sl := range txs {
+			if !e.sharedLogSigned(sl) {
+				aborted = append(aborted, sl.GetSeq())
+				continue
+			}
 			stale, err := e.sharedLogStale(ctx, sl)
 			if err != nil {
 				return committed, aborted, err
@@ -191,6 +235,10 @@ func (e *Executor) Apply(ctx context.Context, height int64, raw []byte, blk *pbv
 			return nil, nil, fmt.Errorf("executor: block at height %d has %d shared logs, max %d in ordered mode", height, len(txs), maxOrderedTxs)
 		}
 		for i, sl := range txs {
+			if !e.sharedLogSigned(sl) {
+				aborted = append(aborted, sl.GetSeq())
+				continue
+			}
 			version := orderedVersion(height, i)
 			for _, s := range sl.GetSets() {
 				if err := e.applySet(ctx, s.GetKey(), s.GetValue(), version); err != nil {
@@ -209,6 +257,7 @@ func (e *Executor) Apply(ctx context.Context, height int64, raw []byte, blk *pbv
 	if err != nil {
 		return committed, aborted, fmt.Errorf("executor: append block at height %d: %w", height, err)
 	}
+	e.height = height
 	return committed, aborted, nil
 }
 

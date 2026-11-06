@@ -32,8 +32,8 @@
 #
 # Params guard: results/raw/<EXP>.params records DURATION, WARMUP, CPUS, MEM,
 # LOAD_THREADS, BATCH_FLUSH, KAFKA_CPUS, KAFKA_MEM, TM_TIMEOUT_COMMIT, RATE,
-# MAX_INFLIGHT (a phase-1 file without the last five compares them against
-# their defaults) and the code commit (git describe --dirty, as
+# MAX_INFLIGHT, VERIFY_SIGS, READ_MODE, ATTEST_EVERY (a phase-1 file without
+# the phase-2 keys compares them against their defaults) and the code commit (git describe --dirty, as
 # run_one.sh's commit column) of the first real invocation of an EXP; a later
 # invocation (or --dry-run) with any other value dies before running anything
 # (the CSV has no columns for them, so a resumed EXP would silently mix
@@ -166,6 +166,8 @@ exp_params_current() {
     "$DURATION" "$WARMUP" "${CPUS:-0.5}" "${MEM:-768m}" "${LOAD_THREADS:-default}" "${BATCH_FLUSH:-1s}"
   printf 'KAFKA_CPUS=%s\nKAFKA_MEM=%s\nTM_TIMEOUT_COMMIT=%s\nRATE=%s\nMAX_INFLIGHT=%s\n' \
     "${KAFKA_CPUS:-2}" "${KAFKA_MEM:-1536m}" "${TM_TIMEOUT_COMMIT:-default}" "${RATE:-0}" "${MAX_INFLIGHT:-4096}"
+  printf 'VERIFY_SIGS=%s\nREAD_MODE=%s\nATTEST_EVERY=%s\n' \
+    "${VERIFY_SIGS:-none}" "${READ_MODE:-plain}" "${ATTEST_EVERY:-0}"
   printf 'commit=%s\n' "$(exp_commit)"
 }
 
@@ -178,6 +180,9 @@ exp_params_default() {
     TM_TIMEOUT_COMMIT) echo default ;;
     RATE) echo 0 ;;
     MAX_INFLIGHT) echo 4096 ;;
+    VERIFY_SIGS) echo none ;;
+    READ_MODE) echo plain ;;
+    ATTEST_EVERY) echo 0 ;;
   esac
 }
 

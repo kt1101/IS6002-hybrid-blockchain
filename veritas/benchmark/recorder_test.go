@@ -302,3 +302,18 @@ func TestAppendCSVRowWritesHeaderOnce(t *testing.T) {
 		t.Fatal("metric column as tag should be rejected")
 	}
 }
+
+// Verified/certified read failures count under one kind each, whatever
+// the key or height in the message.
+func TestErrorKindsGroupProofAndCert(t *testing.T) {
+	s0 := time.Unix(0, 0)
+	r := NewRecorder(0, 10*time.Second, s0)
+	at := s0.Add(time.Second)
+	r.ObserveGet(at, time.Millisecond, "", errors.New(`driver: proof invalid: key "a" at height 3`))
+	r.ObserveGet(at, time.Millisecond, "", errors.New(`driver: proof invalid: key "b" at height 9`))
+	r.ObserveGet(at, time.Millisecond, "", errors.New(`driver: certification invalid: 1 of 3 signatures`))
+	got := r.ErrorKinds()
+	if len(got) != 2 || got[0] != (ErrorKind{Msg: ErrKindProof, Count: 2}) || got[1] != (ErrorKind{Msg: ErrKindCert, Count: 1}) {
+		t.Fatalf("ErrorKinds = %+v", got)
+	}
+}

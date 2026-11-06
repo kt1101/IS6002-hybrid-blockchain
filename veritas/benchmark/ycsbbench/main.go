@@ -8,13 +8,39 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	"hybrid/veritas/benchmark"
 	"hybrid/veritas/driver"
+	"hybrid/veritas/sigs"
 )
+
+// verifyStats accumulates the response size and proof-check time of the
+// verified reads (driver.Options.OnVerify), for the ops sidecar.
+var verifyStats verifyAcc
+
+type verifyAcc struct {
+	n, bytes, micros atomic.Int64
+}
+
+func (v *verifyAcc) observe(respBytes int, micros int64) {
+	v.n.Add(1)
+	v.bytes.Add(int64(respBytes))
+	v.micros.Add(micros)
+}
+
+// means returns the mean response bytes and proof-check microseconds (0, 0
+// without verified reads).
+func (v *verifyAcc) means() (float64, float64) {
+	n := v.n.Load()
+	if n == 0 {
+		return 0, 0
+	}
+	return float64(v.bytes.Load()) / float64(n), float64(v.micros.Load()) / float64(n)
+}
 
 var (
 	dataLoad          = kingpin.Flag("load-path", "Path of YCSB initial data").Required().String()
@@ -39,6 +65,9 @@ var (
 	loadAttempts      = kingpin.Flag("load-attempts", "Attempts per record in the data-load phase; a record failing all of them is a failed load Set").Default("3").Int()
 	rate              = kingpin.Flag("rate", "Open-loop load: total requests per second issued at fixed intervals regardless of completions, latency measured from the scheduled time (0: closed loop, every worker waits for its reply)").Default("0").Float64()
 	maxInflight       = kingpin.Flag("max-inflight", "Open-loop load: at most this many outstanding requests; an operation due while the cap is reached is dropped and counted, not queued").Default("4096").Int()
+	signSets          = kingpin.Flag("sign", "Sign every Set with the Ed25519 key of client<k> (driver k) derived from --key-seed (nodes with --verify-sigs)").Bool()
+	readModeFlag      = kingpin.Flag("read-mode", "Reads: plain (Get), verified (GetVerified, Merkle proof checked) or certified (also a quorum of root attestations)").Default("plain").Enum("plain", "verified", "certified")
+	keySeedFlag       = kingpin.Flag("key-seed", "Seed of the client keys (the nodes' --key-seed)").Default(sigs.DefaultSeed).String()
 	settleTimeout     = kingpin.Flag("settle-timeout", "Deadline for every node to serve Get for a sample of loaded keys before the run phase").Default("10m").Duration()
 )
 
@@ -116,8 +145,17 @@ func main() {
 			cli.Close()
 		}
 	}()
+	readMode, err := driver.ParseReadMode(*readModeFlag)
+	if err != nil {
+		kingpin.Fatalf("%v", err)
+	}
 	for i := 0; i < *driverNum; i++ {
-		cli, err := driver.Open(addrs[i%len(addrs)], *tsoAddr, benchmark.GenRandString(16))
+		opts := driver.Options{ReadMode: readMode, OnVerify: verifyStats.observe}
+		if *signSets {
+			opts.ClientID = sigs.ClientID(i)
+			opts.Key = sigs.KeyFor(*keySeedFlag, opts.ClientID)
+		}
+		cli, err := driver.OpenWith(addrs[i%len(addrs)], *tsoAddr, benchmark.GenRandString(16), opts)
 		if err != nil {
 			panic(err)
 		}

@@ -597,3 +597,20 @@ def test_kafka_resources_flag(tmp_path):
     assert main(["--backend", "kafka", "--n", "4", "--out", str(out)]) == 0
     k = json.loads(out.read_text())["services"]["kafka"]
     assert k["cpus"] == 2 and k["mem_limit"] == "1536m"
+
+
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint", "bft2"])
+def test_verify_sigs_and_key_seed_flags(backend):
+    doc = gen(backend, 4, 100, "sync", 0.5, "1g", verify_sigs="all", key_seed="seed1")
+    for i in range(1, 5):
+        cmd = doc["services"]["node%d" % i]["command"][2]
+        assert " --verify-sigs=all --key-seed=seed1 &" in cmd
+    doc = gen(backend, 4, 100, "sync", 0.5, "1g")
+    assert "--verify-sigs" not in doc["services"]["node1"]["command"][2]
+
+
+def test_verify_sigs_needs_core_backend():
+    with pytest.raises(ValueError):
+        gen("kafka-orig", 4, 100, "async", 0.5, "1g", verify_sigs="ingress")
+    with pytest.raises(ValueError):
+        gen("raft", 4, 100, "sync", 0.5, "1g", verify_sigs="some")

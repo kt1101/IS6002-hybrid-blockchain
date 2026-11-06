@@ -65,6 +65,17 @@
 #                 timeout-commit of every node (BACKEND=tendermint;
 #                 tm_config.py --timeout-commit), e.g. 100ms, 0s; adds
 #                 "_tc<value>" to the run tag.
+# VERIFY_SIGS=none (phase 2, core backends): veritas --verify-sigs of every
+#                 node: ingress (checked at the receiving node) or all (also
+#                 by every replica before applying). SIGN (default 1 when
+#                 VERIFY_SIGS != none, else 0): ycsbbench --sign, every Set
+#                 signed with client<k>'s Ed25519 key. KEY_SEED=hbdb-phase2:
+#                 the shared key seed (veritas and ycsbbench --key-seed).
+# READ_MODE=plain (phase 2): ycsbbench --read-mode: verified = GetVerified
+#                 with a Merkle proof the client checks, certified = also a
+#                 quorum of root attestations (needs ATTEST_EVERY > 0).
+#                 Not CSV columns: give each (VERIFY_SIGS, READ_MODE) its own
+#                 EXP (the params guard of the drivers records them).
 # PRE_DOWN_HOOK (default empty): path of an executable run once, after a
 #                 successful run's CSV row was appended and BEFORE the cluster
 #                 is torn down (down.sh), with EXP, BACKEND, N, F, CLIENTS,
@@ -224,6 +235,10 @@ SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-10m}"
 KEEP_LOGS="${KEEP_LOGS:-0}"
 BATCH_FLUSH="${BATCH_FLUSH:-}"
 RATE="${RATE:-0}"
+VERIFY_SIGS="${VERIFY_SIGS:-none}"
+READ_MODE="${READ_MODE:-plain}"
+KEY_SEED="${KEY_SEED:-hbdb-phase2}"
+if [ "$VERIFY_SIGS" = none ]; then SIGN="${SIGN:-0}"; else SIGN="${SIGN:-1}"; fi
 KAFKA_CPUS="${KAFKA_CPUS:-2}"
 KAFKA_MEM="${KAFKA_MEM:-1536m}"
 TM_TIMEOUT_COMMIT="${TM_TIMEOUT_COMMIT:-}"
@@ -259,6 +274,16 @@ echo "$KAFKA_MEM" | grep -Eq '^[0-9]+[mMgG]$' || die "KAFKA_MEM must be a number
 if [ -n "$TM_TIMEOUT_COMMIT" ]; then
   echo "$TM_TIMEOUT_COMMIT" | grep -Eq '^[0-9]+(ms|s)$' || die "TM_TIMEOUT_COMMIT must look like 100ms or 0s, got '$TM_TIMEOUT_COMMIT'"
   [ "$BACKEND" = tendermint ] || die "TM_TIMEOUT_COMMIT applies to BACKEND=tendermint only, got $BACKEND"
+fi
+case "$VERIFY_SIGS" in none | ingress | all) ;; *) die "VERIFY_SIGS must be none, ingress or all, got '$VERIFY_SIGS'" ;; esac
+case "$READ_MODE" in plain | verified | certified) ;; *) die "READ_MODE must be plain, verified or certified, got '$READ_MODE'" ;; esac
+case "$SIGN" in 0 | 1) ;; *) die "SIGN must be 0 or 1, got '$SIGN'" ;; esac
+echo "$KEY_SEED" | grep -Eq '^[A-Za-z0-9._-]+$' || die "KEY_SEED must match [A-Za-z0-9._-]+, got '$KEY_SEED'"
+if [ "$VERIFY_SIGS" != none ] || [ "$READ_MODE" != plain ]; then
+  hbdb_backend_has_fault_policy "$BACKEND" || die "VERIFY_SIGS/READ_MODE need a core backend (kafka, raft, tendermint, bft2), got $BACKEND"
+fi
+if [ "$VERIFY_SIGS" != none ] && [ "$SIGN" != 1 ]; then
+  log "warning: VERIFY_SIGS=$VERIFY_SIGS with SIGN=0: every Set will be refused"
 fi
 rate_on=0
 awk -v r="$RATE" 'BEGIN { exit !(r > 0) }' && rate_on=1
@@ -337,7 +362,7 @@ run_file="$HBDB_YCSB_DIR/$WORKLOAD.run.dat"
 [ -s "$load_file" ] || die "missing $load_file (run experiments/ycsb/gen.sh)"
 [ -s "$run_file" ] || die "missing $run_file (run experiments/ycsb/gen.sh)"
 
-export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT YCSB_DIR="$HBDB_YCSB_DIR"
+export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT VERIFY_SIGS KEY_SEED YCSB_DIR="$HBDB_YCSB_DIR"
 
 tag="${BACKEND}_n${N}_f${F}_c${CLIENTS}_b${BLOCK_SIZE}_w${WORKLOAD}_rtt${RTT_MS}_${FAULT}_${COMMIT_MODE}_r${REP}"
 # A non-default BATCH_FLUSH is told apart in the file names (not in the CSV).
@@ -811,6 +836,10 @@ container_ids="$(hbdb_compose ps -q)"
 rate_args=""
 if [ "$rate_on" = 1 ]; then
   rate_args="--rate=$RATE --max-inflight=$MAX_INFLIGHT"
+fi
+rate_args="$rate_args --read-mode=$READ_MODE --key-seed=$KEY_SEED"
+if [ "$SIGN" = 1 ]; then
+  rate_args="$rate_args --sign"
 fi
 log "starting ycsbbench: $CLIENTS clients over $N nodes, mode $(hbdb_bench_mode "$BACKEND")"
 hbdb_compose exec -T client ycsbbench \

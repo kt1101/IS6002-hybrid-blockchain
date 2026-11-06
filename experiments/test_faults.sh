@@ -1159,7 +1159,7 @@ contains "itest no leader line warns" "$it_err" "no 'entering leader state' line
 
 # up.sh turns NODE_FAULTS into gen_compose.py --node-fault flags.
 grep -q 'node_fault_args="$node_fault_args --node-fault $nf"' "$HERE/cluster/up.sh" && ok || bad "up.sh --node-fault"
-grep -q -- '--kafka-mem "$KAFKA_MEM" $node_fault_args' "$HERE/cluster/up.sh" && ok || bad "up.sh passes node_fault_args"
+grep -q -- '--kafka-mem "$KAFKA_MEM" $core_args $node_fault_args' "$HERE/cluster/up.sh" && ok || bad "up.sh passes node_fault_args"
 
 # The recorded fault value must be CSV/--tags safe and the tag file-name safe.
 grep -q 'fault_rec="$(echo "$FAULT" | tr '"','"' '"'+'"')"' "$HERE/run_one.sh" && ok || bad "run_one fault_rec"
