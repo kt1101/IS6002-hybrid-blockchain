@@ -46,6 +46,9 @@ type Batcher struct {
 	out     func(*pbv.Block) error
 	observe func(batch time.Duration) // optional; called before each out
 
+	idleEvery time.Duration     // > 0: call idle this often
+	idle      func() *pbv.Block // optional: a block to send although none is due (attestations)
+
 	in     chan *pbv.SharedLog
 	done   chan struct{} // closed by Close
 	exited chan struct{} // closed when loop returns
@@ -80,6 +83,23 @@ func newBatcher(size int, flush time.Duration, out func(*pbv.Block) error, obser
 		done:    make(chan struct{}),
 		exited:  make(chan struct{}),
 	}
+	go b.loop()
+	return b
+}
+
+// newBatcherIdle is newBatcher that also asks idle every idleEvery for a
+// block to send on its own (nil: none), on the batcher goroutine, so that
+// out is still only called from there.
+func newBatcherIdle(size int, flush time.Duration, out func(*pbv.Block) error, observe func(time.Duration),
+	idleEvery time.Duration, idle func() *pbv.Block) *Batcher {
+	if size < 1 {
+		size = DefaultBlockSize
+	}
+	if flush <= 0 {
+		flush = DefaultFlushInterval
+	}
+	b := &Batcher{size: size, flush: flush, out: out, observe: observe, idleEvery: idleEvery, idle: idle,
+		in: make(chan *pbv.SharedLog, batcherQueue), done: make(chan struct{}), exited: make(chan struct{})}
 	go b.loop()
 	return b
 }
@@ -120,6 +140,12 @@ func (b *Batcher) loop() {
 	defer close(b.exited)
 	t := time.NewTicker(b.flush)
 	defer t.Stop()
+	var idleC <-chan time.Time
+	if b.idle != nil && b.idleEvery > 0 {
+		it := time.NewTicker(b.idleEvery)
+		defer it.Stop()
+		idleC = it.C
+	}
 
 	var cur []*pbv.SharedLog
 	var first time.Time
@@ -152,6 +178,14 @@ func (b *Batcher) loop() {
 			add(sl)
 		case <-t.C:
 			emit()
+		case <-idleC:
+			if len(cur) == 0 {
+				if blk := b.idle(); blk != nil {
+					if err := b.out(blk); err != nil {
+						log.Printf("core: batcher: idle block dropped: %v", err)
+					}
+				}
+			}
 		case <-b.done:
 			for {
 				select {

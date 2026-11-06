@@ -331,14 +331,18 @@ def _forward_sigterm(start, fault=None, batch_flush=None, extra=""):
 VERIFY_SIGS_MODES = ("none", "ingress", "all")
 
 
-def core_flags(verify_sigs="none", key_seed=None):
+def core_flags(verify_sigs="none", key_seed=None, attest_every=0, n=None):
     """Phase-2 veritas flags of every core node ("" for the phase-1 defaults).
 
     >>> core_flags()
     ''
     >>> core_flags("all", "s1")
     ' --verify-sigs=all --key-seed=s1'
+    >>> core_flags(attest_every=10, n=4)
+    ' --attest-every=10 --n=4'
     """
+    if not isinstance(attest_every, int) or attest_every < 0:
+        raise ValueError("attest_every must be an integer >= 0, got %r" % (attest_every,))
     if verify_sigs not in VERIFY_SIGS_MODES:
         raise ValueError("verify_sigs must be one of %s, got %r" % (VERIFY_SIGS_MODES, verify_sigs))
     if key_seed is not None and not re.fullmatch(r"[A-Za-z0-9._-]+", key_seed):
@@ -348,6 +352,8 @@ def core_flags(verify_sigs="none", key_seed=None):
         out += " --verify-sigs=%s" % verify_sigs
     if key_seed is not None:
         out += " --key-seed=%s" % key_seed
+    if attest_every > 0:
+        out += " --attest-every=%d --n=%d" % (attest_every, n)
     return out
 
 
@@ -564,7 +570,7 @@ def check_node_faults(backend, n, node_faults):
 
 def gen(backend, n, block_size, commit_mode, cpus, mem,
         tm_dir=None, ycsb_dir=None, results_dir=None, node_faults=None, batch_flush=None,
-        kafka_cpus=KAFKA_CPUS, kafka_mem=KAFKA_MEM, verify_sigs="none", key_seed=None):
+        kafka_cpus=KAFKA_CPUS, kafka_mem=KAFKA_MEM, verify_sigs="none", key_seed=None, attest_every=0):
     """Return the compose document (a dict) for one cluster.
 
     commit_mode is accepted for every backend; the original backends have a
@@ -599,7 +605,7 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
     node_faults = dict(node_faults or {})
     check_node_faults(backend, n, node_faults)
     check_batch_flush(batch_flush)
-    extra = core_flags(verify_sigs, key_seed)
+    extra = core_flags(verify_sigs, key_seed, attest_every, n)
     if extra and backend not in CORE_BACKENDS:
         raise ValueError("--verify-sigs/--key-seed need a core backend (%s), got %s" % (", ".join(CORE_BACKENDS), backend))
     if batch_flush is not None and backend not in CORE_BACKENDS:
@@ -696,6 +702,8 @@ def main(argv=None):
     p.add_argument("--verify-sigs", default="none", choices=VERIFY_SIGS_MODES,
                    help="veritas --verify-sigs of every core node (phase 2)")
     p.add_argument("--key-seed", default=None, help="veritas --key-seed of every core node (default: flag left out)")
+    p.add_argument("--attest-every", type=int, default=0,
+                   help="veritas --attest-every (and --n) of every core node (phase 2; 0: off)")
     a = p.parse_args(argv)
 
     cpus = int(a.cpus) if a.cpus == int(a.cpus) else a.cpus
@@ -705,7 +713,7 @@ def main(argv=None):
                   tm_dir=a.tm_dir, ycsb_dir=a.ycsb_dir, results_dir=a.results_dir,
                   node_faults=parse_node_faults(a.node_fault), batch_flush=a.batch_flush,
                   kafka_cpus=kafka_cpus, kafka_mem=a.kafka_mem,
-                  verify_sigs=a.verify_sigs, key_seed=a.key_seed)
+                  verify_sigs=a.verify_sigs, key_seed=a.key_seed, attest_every=a.attest_every)
     except NotImplementedError as e:
         sys.stderr.write("gen_compose: %s\n" % e)
         return 2

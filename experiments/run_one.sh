@@ -76,6 +76,11 @@
 #                 quorum of root attestations (needs ATTEST_EVERY > 0).
 #                 Not CSV columns: give each (VERIFY_SIGS, READ_MODE) its own
 #                 EXP (the params guard of the drivers records them).
+# ATTEST_EVERY=0 (phase 2, core backends): veritas --attest-every: every
+#                 node signs its root after every K-th block and certifies
+#                 the others' (fail-stop "diverged" on a certified root that
+#                 is not its own); > 0 also copies every "core: diverged at
+#                 height" line of the node logs to <tag>.diverged.
 # PRE_DOWN_HOOK (default empty): path of an executable run once, after a
 #                 successful run's CSV row was appended and BEFORE the cluster
 #                 is torn down (down.sh), with EXP, BACKEND, N, F, CLIENTS,
@@ -238,6 +243,7 @@ RATE="${RATE:-0}"
 VERIFY_SIGS="${VERIFY_SIGS:-none}"
 READ_MODE="${READ_MODE:-plain}"
 KEY_SEED="${KEY_SEED:-hbdb-phase2}"
+ATTEST_EVERY="${ATTEST_EVERY:-0}"
 if [ "$VERIFY_SIGS" = none ]; then SIGN="${SIGN:-0}"; else SIGN="${SIGN:-1}"; fi
 KAFKA_CPUS="${KAFKA_CPUS:-2}"
 KAFKA_MEM="${KAFKA_MEM:-1536m}"
@@ -278,6 +284,13 @@ fi
 case "$VERIFY_SIGS" in none | ingress | all) ;; *) die "VERIFY_SIGS must be none, ingress or all, got '$VERIFY_SIGS'" ;; esac
 case "$READ_MODE" in plain | verified | certified) ;; *) die "READ_MODE must be plain, verified or certified, got '$READ_MODE'" ;; esac
 case "$SIGN" in 0 | 1) ;; *) die "SIGN must be 0 or 1, got '$SIGN'" ;; esac
+hbdb_require_uint ATTEST_EVERY "$ATTEST_EVERY"
+if [ "$ATTEST_EVERY" != 0 ]; then
+  hbdb_backend_has_fault_policy "$BACKEND" || die "ATTEST_EVERY needs a core backend (kafka, raft, tendermint, bft2), got $BACKEND"
+fi
+if [ "$READ_MODE" = certified ] && [ "$ATTEST_EVERY" = 0 ]; then
+  die "READ_MODE=certified needs ATTEST_EVERY > 0 (no attestations to certify the reads)"
+fi
 echo "$KEY_SEED" | grep -Eq '^[A-Za-z0-9._-]+$' || die "KEY_SEED must match [A-Za-z0-9._-]+, got '$KEY_SEED'"
 if [ "$VERIFY_SIGS" != none ] || [ "$READ_MODE" != plain ]; then
   hbdb_backend_has_fault_policy "$BACKEND" || die "VERIFY_SIGS/READ_MODE need a core backend (kafka, raft, tendermint, bft2), got $BACKEND"
@@ -362,7 +375,7 @@ run_file="$HBDB_YCSB_DIR/$WORKLOAD.run.dat"
 [ -s "$load_file" ] || die "missing $load_file (run experiments/ycsb/gen.sh)"
 [ -s "$run_file" ] || die "missing $run_file (run experiments/ycsb/gen.sh)"
 
-export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT VERIFY_SIGS KEY_SEED YCSB_DIR="$HBDB_YCSB_DIR"
+export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT VERIFY_SIGS KEY_SEED ATTEST_EVERY YCSB_DIR="$HBDB_YCSB_DIR"
 
 tag="${BACKEND}_n${N}_f${F}_c${CLIENTS}_b${BLOCK_SIZE}_w${WORKLOAD}_rtt${RTT_MS}_${FAULT}_${COMMIT_MODE}_r${REP}"
 # A non-default BATCH_FLUSH is told apart in the file names (not in the CSV).

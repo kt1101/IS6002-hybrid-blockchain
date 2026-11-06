@@ -125,3 +125,45 @@ func ClientKeys(seed string) func(id string) (ed25519.PublicKey, bool) {
 		return pub, true
 	}
 }
+
+// NodeID is the key identity of node i (veritas --node-id i, compose node<i>).
+func NodeID(i int) string { return "node" + strconv.Itoa(i) }
+
+// AttestBytes is what a node signs to attest its state root at height:
+// "veritas-attest" 0x00 height (int64, 8 bytes big-endian) root.
+func AttestBytes(height int64, root []byte) []byte {
+	b := make([]byte, 0, 15+8+len(root))
+	b = append(b, "veritas-attest\x00"...)
+	var h [8]byte
+	binary.BigEndian.PutUint64(h[:], uint64(height))
+	b = append(b, h[:]...)
+	return append(b, root...)
+}
+
+// SignAttest signs AttestBytes(height, root) with k.
+func SignAttest(k ed25519.PrivateKey, height int64, root []byte) []byte {
+	return ed25519.Sign(k, AttestBytes(height, root))
+}
+
+// VerifyAttest reports whether sig is pub's attestation of (height, root).
+func VerifyAttest(pub ed25519.PublicKey, height int64, root, sig []byte) bool {
+	if len(pub) != ed25519.PublicKeySize || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	return ed25519.Verify(pub, AttestBytes(height, root), sig)
+}
+
+// NodeKeys returns the public keys of nodes 1..n of seed (any other id is
+// unknown).
+func NodeKeys(seed string, n int) func(nodeID int32) (ed25519.PublicKey, bool) {
+	pubs := make([]ed25519.PublicKey, n+1)
+	for i := 1; i <= n; i++ {
+		pubs[i] = Public(KeyFor(seed, NodeID(i)))
+	}
+	return func(id int32) (ed25519.PublicKey, bool) {
+		if id < 1 || int(id) > n {
+			return nil, false
+		}
+		return pubs[id], true
+	}
+}

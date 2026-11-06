@@ -179,3 +179,22 @@ func TestSigConfig(t *testing.T) {
 		t.Fatal("empty seed accepted")
 	}
 }
+
+func TestAttestConfig(t *testing.T) {
+	c, err := attestConfig(0, 0, 0, -1, "")
+	if err != nil || c.AttestEvery != 0 || c.NodeKey != nil {
+		t.Fatalf("off: %+v %v", c, err)
+	}
+	c, err = attestConfig(10, 0, 4, 2, "s")
+	if err != nil || c.AttestEvery != 10 || c.N != 4 || c.NodeKey == nil || c.NodeKeys == nil {
+		t.Fatalf("on: %+v %v", c, err)
+	}
+	for _, bad := range [][4]int{{1, 0, 0, 1}, {1, 0, 4, 5}, {1, 0, 4, 0}, {1, 5, 4, 1}, {-1, 0, 4, 1}} {
+		if _, err := attestConfig(bad[0], bad[1], bad[2], bad[3], "s"); err == nil {
+			t.Errorf("attestConfig%v accepted", bad)
+		}
+	}
+	if _, err := attestConfig(1, 0, 4, 1, ""); err == nil {
+		t.Error("empty seed accepted")
+	}
+}

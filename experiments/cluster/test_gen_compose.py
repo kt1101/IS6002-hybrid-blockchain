@@ -614,3 +614,10 @@ def test_verify_sigs_needs_core_backend():
         gen("kafka-orig", 4, 100, "async", 0.5, "1g", verify_sigs="ingress")
     with pytest.raises(ValueError):
         gen("raft", 4, 100, "sync", 0.5, "1g", verify_sigs="some")
+
+
+def test_attest_every_flags():
+    doc = gen("bft2", 4, 100, "sync", 0.5, "1g", key_seed="s", attest_every=10)
+    assert " --key-seed=s --attest-every=10 --n=4 &" in doc["services"]["node2"]["command"][2]
+    with pytest.raises(ValueError):
+        gen("raft", 4, 100, "sync", 0.5, "1g", attest_every=-1)

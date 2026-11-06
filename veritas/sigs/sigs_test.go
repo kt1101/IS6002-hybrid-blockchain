@@ -77,3 +77,29 @@ func TestClientKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestAttestBytesAndSignature(t *testing.T) {
+	got := AttestBytes(258, []byte{9, 8})
+	want := append([]byte("veritas-attest\x00"), 0, 0, 0, 0, 0, 0, 1, 2, 9, 8)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("AttestBytes = %v, want %v", got, want)
+	}
+	k := KeyFor("s", NodeID(3))
+	sig := SignAttest(k, 7, []byte("root"))
+	if !VerifyAttest(Public(k), 7, []byte("root"), sig) {
+		t.Fatal("valid attestation rejected")
+	}
+	if VerifyAttest(Public(k), 8, []byte("root"), sig) || VerifyAttest(Public(k), 7, []byte("rooT"), sig) {
+		t.Fatal("changed height or root accepted")
+	}
+	keys := NodeKeys("s", 4)
+	if pub, ok := keys(3); !ok || !bytes.Equal(pub, Public(k)) {
+		t.Fatal("NodeKeys(3) wrong")
+	}
+	if _, ok := keys(5); ok {
+		t.Fatal("node 5 of 4 known")
+	}
+	if _, ok := keys(0); ok {
+		t.Fatal("node 0 known")
+	}
+}

@@ -62,6 +62,18 @@ type Breakdown struct {
 	QueueBlocks     int64 `json:"queue_blocks"`
 
 	Dropped int64 `json:"dropped_blocks"`
+
+	// Attestations (--attest-every > 0, else 0): AttestSent = own
+	// attestations handed to Submit; AttestInvalid = attestations dropped
+	// by the certifier (bad signature, unknown node); CertifyLag = sum
+	// over the heights this node attested and saw certified of the time
+	// from applying the height to its certification (CertifiedHeights of
+	// them).
+	AttestSent       int64         `json:"attest_sent"`
+	AttestInvalid    int64         `json:"attest_invalid"`
+	CertifyLag       time.Duration `json:"certify_lag_ns"`
+	CertifiedHeights int64         `json:"certified_heights"`
+	DivergedHeight   int64         `json:"diverged_height"`
 }
 
 const (
@@ -157,7 +169,15 @@ func (m *metrics) snapshot() Breakdown {
 // Breakdown returns a snapshot of the node's per-phase times. Safe to call
 // at any time, concurrently with everything else.
 func (s *Server) Breakdown() Breakdown {
-	return s.metrics.snapshot()
+	b := s.metrics.snapshot()
+	if s.att != nil {
+		b.AttestSent = s.att.sent.Load()
+		b.AttestInvalid = s.att.cert.Invalid()
+		b.CertifyLag = time.Duration(s.att.lag.Load())
+		b.CertifiedHeights = s.att.certs.Load()
+		b.DivergedHeight = s.att.diverged.Load()
+	}
+	return b
 }
 
 // breakdownFile is the JSON written by WriteBreakdownJSON.

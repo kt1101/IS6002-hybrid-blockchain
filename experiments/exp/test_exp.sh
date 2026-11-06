@@ -534,6 +534,11 @@ run_one_check READ_MODE=x
 eq "READ_MODE=x refused" "$RC" 1
 run_one_check READ_MODE=verified BACKEND=kafka-orig COMMIT_MODE=async
 eq "READ_MODE on kafka-orig refused" "$RC" 1
+run_one_check READ_MODE=certified
+eq "READ_MODE=certified without ATTEST_EVERY refused" "$RC" 1
+contains "certified message" "$OUT" "needs ATTEST_EVERY > 0"
+run_one_check ATTEST_EVERY=x
+eq "ATTEST_EVERY=x refused" "$RC" 1
 run_one_check PRE_DOWN_HOOK=/nonexistent/hook
 eq "missing PRE_DOWN_HOOK refused" "$RC" 1
 contains "missing PRE_DOWN_HOOK message" "$OUT" "is not an executable file"

@@ -14,7 +14,8 @@
 #      KAFKA_CPUS=2 KAFKA_MEM=1536m (Kafka broker caps, gen_compose.py
 #      --kafka-cpus/--kafka-mem), TM_TIMEOUT_COMMIT="" (tendermint: tm_config.py
 #      --timeout-commit; empty = Tendermint's default), VERIFY_SIGS=none and
-#      KEY_SEED (phase 2: veritas --verify-sigs/--key-seed of every core node).
+#      KEY_SEED, ATTEST_EVERY=0 (phase 2: veritas --verify-sigs, --key-seed,
+#      --attest-every of every core node).
 # Writes experiments/cluster/generated/{compose.json,tm/}.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
@@ -31,9 +32,17 @@ KAFKA_MEM="${KAFKA_MEM:-1536m}"
 TM_TIMEOUT_COMMIT="${TM_TIMEOUT_COMMIT:-}"
 VERIFY_SIGS="${VERIFY_SIGS:-none}"
 KEY_SEED="${KEY_SEED:-}"
+ATTEST_EVERY="${ATTEST_EVERY:-0}"
+hbdb_require_uint ATTEST_EVERY "$ATTEST_EVERY"
 core_args=""
 if [ "$VERIFY_SIGS" != none ]; then
-  core_args="--verify-sigs $VERIFY_SIGS${KEY_SEED:+ --key-seed $KEY_SEED}"
+  core_args="--verify-sigs $VERIFY_SIGS"
+fi
+if [ "$VERIFY_SIGS" != none ] || [ "$ATTEST_EVERY" != 0 ]; then
+  core_args="$core_args${KEY_SEED:+ --key-seed $KEY_SEED}"
+fi
+if [ "$ATTEST_EVERY" != 0 ]; then
+  core_args="$core_args --attest-every $ATTEST_EVERY"
 fi
 
 hbdb_check_backend
