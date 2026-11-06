@@ -3,6 +3,8 @@ package tendermint
 import (
 	"bytes"
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -120,23 +122,25 @@ func TestAppCloseIsIdempotentAndDropsLaterTxs(t *testing.T) {
 	}
 }
 
-// DeliverTx runs on Tendermint's ABCI connection goroutine and waits while
-// Deliver is full; Close must still finish and release it.
+// DeliverTx never waits, even with Deliver full (the ABCI socket server holds
+// one lock over every connection, so a waiting DeliverTx would hold CheckTx
+// too); Close returns at once, the blocks that fit in Deliver stay readable
+// and the rest are dropped.
 func TestAppCloseWithFullDeliver(t *testing.T) {
 	app := NewApp()
-	for i := 0; i < DeliverBuffer; i++ {
-		app.DeliverTx(abcitypes.RequestDeliverTx{Tx: []byte(fmt.Sprint(i))})
-	}
-	blocked := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
-		defer close(blocked)
-		app.DeliverTx(abcitypes.RequestDeliverTx{Tx: []byte("overflow")})
+		defer close(done)
+		for i := 0; i < DeliverBuffer+50; i++ {
+			app.DeliverTx(abcitypes.RequestDeliverTx{Tx: []byte(fmt.Sprint(i))})
+		}
 	}()
 	select {
-	case <-blocked:
-		t.Fatal("DeliverTx on a full Deliver returned without waiting")
-	case <-time.After(50 * time.Millisecond):
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DeliverTx blocked on a full Deliver")
 	}
+	waitFor(t, func() bool { return len(app.Deliver()) == DeliverBuffer })
 	closed := make(chan struct{})
 	go func() {
 		app.Close()
@@ -145,18 +149,133 @@ func TestAppCloseWithFullDeliver(t *testing.T) {
 	select {
 	case <-closed:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Close blocked behind a DeliverTx waiting on a full Deliver")
-	}
-	select {
-	case <-blocked:
-	case <-time.After(2 * time.Second):
-		t.Fatal("DeliverTx still blocked after Close")
+		t.Fatal("Close blocked")
 	}
 	n := 0
-	for range app.Deliver() {
+	for b := range app.Deliver() {
+		if string(b) != fmt.Sprint(n) {
+			t.Fatalf("block %d = %q", n, b)
+		}
 		n++
 	}
 	if n != DeliverBuffer {
-		t.Fatalf("drained %d blocks after Close, want %d (the overflow tx is dropped)", n, DeliverBuffer)
+		t.Fatalf("drained %d blocks after Close, want %d", n, DeliverBuffer)
 	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached within 2s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestDeliverTxDoesNotBlockWhenConsumerStalls(t *testing.T) {
+	app := NewApp()
+	defer app.Close()
+	tx := bytes.Repeat([]byte{7}, 1024)
+	stop := make(chan struct{})
+	slow := make(chan time.Duration, 1)
+	go func() {
+		var worst time.Duration
+		for {
+			select {
+			case <-stop:
+				slow <- worst
+				return
+			default:
+			}
+			t0 := time.Now()
+			app.CheckTx(abcitypes.RequestCheckTx{Tx: tx})
+			if d := time.Since(t0); d > worst {
+				worst = d
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	t0 := time.Now()
+	for i := 0; i < 10000; i++ {
+		app.DeliverTx(abcitypes.RequestDeliverTx{Tx: tx})
+	}
+	took := time.Since(t0)
+	close(stop)
+	if took > 2*time.Second {
+		t.Fatalf("10000 DeliverTx with a stalled consumer took %v, want < 2s", took)
+	}
+	if w := <-slow; w > 100*time.Millisecond {
+		t.Fatalf("CheckTx took up to %v meanwhile, want < 100ms", w)
+	}
+	if err := app.Err(); err != nil {
+		t.Fatalf("Err = %v, want nil (10 MB < DeliverQueueBytes)", err)
+	}
+}
+
+func TestDeliverOrderPreserved(t *testing.T) {
+	app := NewApp()
+	defer app.Close()
+	for i := 0; i < 1000; i++ {
+		app.DeliverTx(abcitypes.RequestDeliverTx{Tx: []byte(fmt.Sprint(i))})
+	}
+	for i := 0; i < 1000; i++ {
+		if got := recv(t, app.Deliver()); string(got) != fmt.Sprint(i) {
+			t.Fatalf("block %d = %q", i, got)
+		}
+	}
+}
+
+func TestDeliverQueueOverflowStops(t *testing.T) {
+	app := newApp(1 << 20)
+	var mu sync.Mutex
+	var logged []string
+	app.logf = func(format string, args ...interface{}) {
+		mu.Lock()
+		logged = append(logged, fmt.Sprintf(format, args...))
+		mu.Unlock()
+	}
+	tx := bytes.Repeat([]byte{1}, 64<<10)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < DeliverBuffer+64; i++ {
+			app.DeliverTx(abcitypes.RequestDeliverTx{Tx: tx})
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("DeliverTx blocked")
+	}
+	if app.Err() == nil {
+		t.Fatal("Err = nil after overflowing the deliver queue")
+	}
+	n := 0
+	timeout := time.After(5 * time.Second)
+	for open := true; open; {
+		select {
+		case _, ok := <-app.Deliver():
+			if !ok {
+				open = false
+			} else {
+				n++
+			}
+		case <-timeout:
+			t.Fatalf("Deliver not closed after the overflow (%d read)", n)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, l := range logged {
+		if strings.Contains(l, "tendermint: deliver queue overflow") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("log %q has no overflow line", logged)
+	}
+	app.Close() // still idempotent after a failure
 }

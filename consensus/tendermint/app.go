@@ -1,22 +1,34 @@
 package tendermint
 
 import (
+	"fmt"
+	"log"
 	"sync"
 
 	abcitypes "github.com/tendermint/tendermint/abci/types"
 )
 
-// DeliverBuffer is the capacity of the Deliver channel. When it is full,
-// DeliverTx waits for room, which holds Tendermint's ABCI connection and so
-// stalls this node's block execution (backpressure).
+// DeliverBuffer is the capacity of the Deliver channel.
 const DeliverBuffer = 256
+
+// DeliverQueueBytes bounds the blocks DeliverTx has taken but the core has
+// not read from Deliver yet (the internal queue behind the channel).
+// DeliverTx never waits: the ABCI socket server serialises every connection
+// (consensus, mempool, query) behind one lock, so a DeliverTx waiting for
+// a slow core would also hold CheckTx and make broadcast_tx_sync time out
+// (the tendermint F2 liveness loss of phase 1). Going over the bound is a
+// fatal error, not backpressure: the app logs "tendermint: deliver queue
+// overflow", records it (Err) and closes Deliver, so the node stops instead
+// of hanging or silently dropping a block.
+const DeliverQueueBytes = 128 << 20
 
 var _ abcitypes.Application = (*App)(nil)
 
 // App is the ABCI application of the Tendermint backend. One ABCI tx is one
-// marshalled Veritas block; the app does not interpret it. DeliverTx pushes a
-// copy of every tx to the Deliver channel, in Tendermint's DeliverTx order
-// (block by block, tx by tx), which is the same on every node.
+// marshalled Veritas block; the app does not interpret it. DeliverTx queues
+// a copy of every tx; a pump goroutine passes them to the Deliver channel
+// in Tendermint's DeliverTx order (block by block, tx by tx), which is the
+// same on every node.
 //
 // The app keeps no state of its own (the core keeps its state in redis and
 // the ledger), so Commit returns an empty app hash and Info reports height
@@ -25,19 +37,67 @@ var _ abcitypes.Application = (*App)(nil)
 type App struct {
 	abcitypes.BaseApplication
 
-	deliver chan []byte
-	closeCh chan struct{}
+	deliver  chan []byte
+	maxBytes int64
+	logf     func(format string, args ...interface{})
 
-	mu        sync.RWMutex // write-held only to close deliver
-	closed    bool
+	mu     sync.Mutex // guards queue, qbytes, closed, err; never held while sending
+	queue  [][]byte
+	qbytes int64
+	closed bool
+	err    error
+
+	wake      chan struct{} // 1-buffered: the queue got a block
+	closeCh   chan struct{}
+	pumpDone  chan struct{}
 	closeOnce sync.Once
 }
 
-// NewApp returns an App with an empty Deliver channel of DeliverBuffer.
-func NewApp() *App {
-	return &App{
-		deliver: make(chan []byte, DeliverBuffer),
-		closeCh: make(chan struct{}),
+// NewApp returns an App with an empty Deliver channel of DeliverBuffer and
+// an internal queue bounded by DeliverQueueBytes.
+func NewApp() *App { return newApp(DeliverQueueBytes) }
+
+func newApp(maxBytes int64) *App {
+	a := &App{
+		deliver:  make(chan []byte, DeliverBuffer),
+		maxBytes: maxBytes,
+		logf:     log.Printf,
+		wake:     make(chan struct{}, 1),
+		closeCh:  make(chan struct{}),
+		pumpDone: make(chan struct{}),
+	}
+	go a.pump()
+	return a
+}
+
+// pump moves queued blocks to Deliver, in order, until Close.
+func (a *App) pump() {
+	defer close(a.pumpDone)
+	for {
+		a.mu.Lock()
+		var b []byte
+		if len(a.queue) > 0 {
+			b = a.queue[0]
+		}
+		a.mu.Unlock()
+		if b == nil {
+			select {
+			case <-a.wake:
+				continue
+			case <-a.closeCh:
+				return
+			}
+		}
+		select {
+		case a.deliver <- b:
+			a.mu.Lock()
+			a.queue[0] = nil
+			a.queue = a.queue[1:]
+			a.qbytes -= int64(len(b))
+			a.mu.Unlock()
+		case <-a.closeCh:
+			return
+		}
 	}
 }
 
@@ -55,22 +115,44 @@ func (*App) CheckTx(abcitypes.RequestCheckTx) abcitypes.ResponseCheckTx {
 	return abcitypes.ResponseCheckTx{Code: abcitypes.CodeTypeOK}
 }
 
-// DeliverTx pushes a copy of req.Tx (one Veritas block) to Deliver, waiting
-// for room, and returns Code 0. After Close it drops the tx: it never sends
-// on the closed channel, and a DeliverTx blocked on a full Deliver returns
-// once Close is called.
+// DeliverTx queues a copy of req.Tx (one Veritas block) for Deliver and
+// returns Code 0 without waiting. After Close (or a failure) it drops the
+// tx. A tx that would take the queue over its byte bound fails the app
+// (see DeliverQueueBytes): Err is set and Deliver is closed.
 func (a *App) DeliverTx(req abcitypes.RequestDeliverTx) abcitypes.ResponseDeliverTx {
 	data := append([]byte(nil), req.Tx...)
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	if data == nil {
+		data = []byte{}
+	}
+	a.mu.Lock()
 	if a.closed {
+		a.mu.Unlock()
 		return abcitypes.ResponseDeliverTx{Code: abcitypes.CodeTypeOK}
 	}
+	if a.qbytes > 0 && a.qbytes+int64(len(data)) > a.maxBytes {
+		a.err = fmt.Errorf("tendermint: deliver queue overflow: %d bytes queued + %d > %d (the core does not keep up)",
+			a.qbytes, len(data), a.maxBytes)
+		err := a.err
+		a.mu.Unlock()
+		a.logf("%v; stopping this node's Deliver", err)
+		a.Close()
+		return abcitypes.ResponseDeliverTx{Code: abcitypes.CodeTypeOK}
+	}
+	a.queue = append(a.queue, data)
+	a.qbytes += int64(len(data))
+	a.mu.Unlock()
 	select {
-	case a.deliver <- data:
-	case <-a.closeCh:
+	case a.wake <- struct{}{}:
+	default:
 	}
 	return abcitypes.ResponseDeliverTx{Code: abcitypes.CodeTypeOK}
+}
+
+// Err is the failure of the app (deliver queue overflow), or nil.
+func (a *App) Err() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.err
 }
 
 // Commit returns an empty app hash (the app has no state), the same on
@@ -82,15 +164,29 @@ func (*App) Commit() abcitypes.ResponseCommit {
 // Deliver returns the channel of delivered blocks, closed by Close.
 func (a *App) Deliver() <-chan []byte { return a.deliver }
 
-// Close closes Deliver exactly once; later calls do nothing. A DeliverTx
-// waiting for room returns first (closeCh), so Close never blocks on a full
-// Deliver.
+// Close closes Deliver exactly once; later calls do nothing. It never
+// blocks on a full Deliver: the pump stops, the queued blocks that still fit
+// in Deliver are moved there (readable before the channel reports closed),
+// the rest are dropped.
 func (a *App) Close() {
 	a.closeOnce.Do(func() {
-		close(a.closeCh)
 		a.mu.Lock()
 		a.closed = true
-		close(a.deliver)
 		a.mu.Unlock()
+		close(a.closeCh)
+		<-a.pumpDone
+		a.mu.Lock()
+		for len(a.queue) > 0 {
+			select {
+			case a.deliver <- a.queue[0]:
+				a.queue = a.queue[1:]
+				continue
+			default:
+			}
+			break
+		}
+		a.queue, a.qbytes = nil, 0
+		a.mu.Unlock()
+		close(a.deliver)
 	})
 }
