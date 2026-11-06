@@ -224,7 +224,7 @@ eq "E1 N=4 block 100 workload a rtt 0 no fault" "$(grep -vc 'N=4 F=0 CLIENTS=[0-
 eq "E1 clients" "$(grep 'BACKEND=raft ' "$ROOT/stub.log" | sed 's/.*CLIENTS=\([0-9]*\) .*REP=\([0-9]\) .*/\1\/\2/' | tr '\n' ' ')" "4/1 16/1 64/1 256/1 4/2 16/2 64/2 256/2 4/3 16/3 64/3 256/3 "
 eq "E1 rep outermost across backends" "$(sed -n '1p;16p;17p' "$ROOT/stub.log" | sed 's/.*BACKEND=\([a-z0-9]*\) .*REP=\([0-9]\) .*/\1\/\2/' | tr '\n' ' ')" "kafka/1 bft2/1 kafka/2 "
 eq "E1 re-executed once under caffeinate -dims" "$(grep -c "^caffeinate -dims $ROOT/experiments/exp/e1_clients.sh$" "$CAFFEINATE_LOG")" 1
-eq "E1 params file" "$(cut -d= -f1 "$ROOT/results/raw/e1.params" | tr '\n' ' ')" "DURATION WARMUP CPUS MEM LOAD_THREADS BATCH_FLUSH commit "
+eq "E1 params file" "$(cut -d= -f1 "$ROOT/results/raw/e1.params" | tr '\n' ' ')" "DURATION WARMUP CPUS MEM LOAD_THREADS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT RATE MAX_INFLIGHT commit "
 contains "E1 params values" "$(cat "$ROOT/results/raw/e1.params")" "DURATION=60s"
 eq "E1 no hook" "$(grep -vc 'HOOK=$' "$ROOT/stub.log")" 0
 contains "E1 summary" "$OUT" "rows present: 48 / 48 planned"
@@ -425,6 +425,20 @@ eq "params: EXP_ALLOW_COMMIT_CHANGE=1 goes on" "$RC" 0
 eq "params: ... and runs rep 2" "$(calls)" 4
 EXP=e1other DURATION=30s BACKENDS=raft REPS=1 drv e1_clients.sh
 eq "params: a new EXP may use other settings" "$RC" 0
+EXP_ALLOW_COMMIT_CHANGE=1 KAFKA_CPUS=0.5 BACKENDS=raft REPS=2 drv e1_clients.sh
+eq "params: KAFKA_CPUS refused" "$RC" 1
+contains "params: KAFKA_CPUS message names the setting" "$OUT" "KAFKA_CPUS=0.5 (EXP started with 2)"
+contains "params: KAFKA_CPUS message names .params" "$OUT" "e1.params"
+for kv in KAFKA_MEM=768m TM_TIMEOUT_COMMIT=0s RATE=500 MAX_INFLIGHT=10; do
+  env EXP_ALLOW_COMMIT_CHANGE=1 "$kv" BACKENDS=raft REPS=2 drv e1_clients.sh --dry-run
+  eq "params: $kv refused" "$RC" 1
+done
+# A .params file of phase 1 (without the new keys) accepts their defaults.
+sed -i.bak '/^\(KAFKA_CPUS\|KAFKA_MEM\|TM_TIMEOUT_COMMIT\|RATE\|MAX_INFLIGHT\)=/d' "$ROOT/results/raw/e1.params"
+EXP_ALLOW_COMMIT_CHANGE=1 BACKENDS=raft REPS=2 drv e1_clients.sh --dry-run
+eq "params: old .params, new keys at their defaults" "$RC" 0
+EXP_ALLOW_COMMIT_CHANGE=1 RATE=500 BACKENDS=raft REPS=2 drv e1_clients.sh --dry-run
+eq "params: old .params, RATE=500 refused" "$RC" 1
 newtree disk
 DF_STUB_AVAIL_KB=4194304 BACKENDS=raft drv e1_clients.sh
 eq "disk: < 5 GiB free stops the batch" "$RC" 1

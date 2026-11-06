@@ -238,3 +238,32 @@ def test_tendermint_genesis_keeps_max_gas(tmp_path):
     assert main(["--dir", str(d), "--n", "2", "--backend", "tendermint"]) == 0
     block = json.loads((d / "node1" / "config" / "genesis.json").read_text())["consensus_params"]["block"]
     assert block["max_gas"] == 12345
+
+
+TOML_CONSENSUS = TOML + """
+[consensus]
+timeout-propose = "3s"
+timeout-commit = "1s"
+"""
+
+
+def test_timeout_commit(tmp_path):
+    _testnet(tmp_path, 2, toml=TOML_CONSENSUS)
+    assert main(["--dir", str(tmp_path), "--n", "2", "--backend", "tendermint",
+                 "--timeout-commit", "100ms"]) == 0
+    for j in range(2):
+        t = (tmp_path / ("node%d" % j) / "config" / "config.toml").read_text()
+        assert 'timeout-commit = "100ms"' in _section(t, "consensus")
+
+
+def test_timeout_commit_default_leaves_value(tmp_path):
+    _testnet(tmp_path, 2, toml=TOML_CONSENSUS)
+    assert main(["--dir", str(tmp_path), "--n", "2", "--backend", "tendermint"]) == 0
+    t = (tmp_path / "node0" / "config" / "config.toml").read_text()
+    assert 'timeout-commit = "1s"' in _section(t, "consensus")
+
+
+def test_timeout_commit_missing_key_is_fatal(tmp_path):
+    _testnet(tmp_path, 1)
+    with pytest.raises(SystemExit):
+        main(["--dir", str(tmp_path), "--n", "1", "--backend", "tendermint", "--timeout-commit", "0s"])

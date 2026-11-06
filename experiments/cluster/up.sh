@@ -11,6 +11,9 @@
 #      with --fault armed, see gen_compose.py --node-fault).
 #      BATCH_FLUSH="" (empty: veritas default 1s; else a duration like 250ms:
 #      veritas --batch-flush of every node of a core backend).
+#      KAFKA_CPUS=2 KAFKA_MEM=1536m (Kafka broker caps, gen_compose.py
+#      --kafka-cpus/--kafka-mem), TM_TIMEOUT_COMMIT="" (tendermint: tm_config.py
+#      --timeout-commit; empty = Tendermint's default).
 # Writes experiments/cluster/generated/{compose.json,tm/}.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
@@ -22,6 +25,9 @@ CPUS="${CPUS:-0.5}"
 MEM="${MEM:-768m}"
 NODE_FAULTS="${NODE_FAULTS:-}"
 BATCH_FLUSH="${BATCH_FLUSH:-}"
+KAFKA_CPUS="${KAFKA_CPUS:-2}"
+KAFKA_MEM="${KAFKA_MEM:-1536m}"
+TM_TIMEOUT_COMMIT="${TM_TIMEOUT_COMMIT:-}"
 
 hbdb_check_backend
 hbdb_check_n "$N"
@@ -51,14 +57,15 @@ if [ "$BACKEND" = tm-orig ] || [ "$BACKEND" = tendermint ]; then
   # testnet writes hostname-based peers (nodeK); tm_config.py replaces them
   # with the node IPs and applies the original config tweaks (plus, for
   # tendermint, the larger tx/body/block limits: one tx is a Veritas block).
-  python3 "$HBDB_CLUSTER_DIR/tm_config.py" --dir "$HBDB_GEN_DIR/tm" --n "$N" --backend "$BACKEND"
+  python3 "$HBDB_CLUSTER_DIR/tm_config.py" --dir "$HBDB_GEN_DIR/tm" --n "$N" --backend "$BACKEND" \
+    ${TM_TIMEOUT_COMMIT:+--timeout-commit "$TM_TIMEOUT_COMMIT"}
 fi
 
 log "generating compose: backend=$BACKEND n=$N block_size=$BLOCK_SIZE commit_mode=$COMMIT_MODE cpus=$CPUS mem=$MEM${NODE_FAULTS:+ node_faults=$NODE_FAULTS}${BATCH_FLUSH:+ batch_flush=$BATCH_FLUSH}"
 # shellcheck disable=SC2086
 python3 "$HBDB_CLUSTER_DIR/gen_compose.py" \
   --backend "$BACKEND" --n "$N" --block-size "$BLOCK_SIZE" --commit-mode "$COMMIT_MODE" \
-  --cpus "$CPUS" --mem "$MEM" $node_fault_args $batch_flush_args \
+  --cpus "$CPUS" --mem "$MEM" --kafka-cpus "$KAFKA_CPUS" --kafka-mem "$KAFKA_MEM" $node_fault_args $batch_flush_args \
   --tm-dir "$HBDB_GEN_DIR/tm" --ycsb-dir "$HBDB_YCSB_DIR" --results-dir "$HBDB_RESULTS_RAW" \
   --out "$HBDB_COMPOSE_FILE"
 

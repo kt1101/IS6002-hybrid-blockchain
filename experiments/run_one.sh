@@ -57,6 +57,14 @@
 #                 (the `dropped` column of <tag>.ops.csv). The offered rate is
 #                 the CSV column offered_rps (0 for a closed-loop run); a
 #                 RATE > 0 adds "_rate<RATE>" to the run tag.
+# KAFKA_CPUS=2 KAFKA_MEM=1536m: caps of the Kafka broker container
+#                 (kafka-orig, kafka; gen_compose.py --kafka-cpus/--kafka-mem);
+#                 KAFKA_CPUS=0.5 KAFKA_MEM=768m gives it one node's share. A
+#                 non-default value adds "_kc<CPUS>-<MEM>" to the run tag.
+# TM_TIMEOUT_COMMIT (default empty = Tendermint's 1s): [consensus]
+#                 timeout-commit of every node (BACKEND=tendermint;
+#                 tm_config.py --timeout-commit), e.g. 100ms, 0s; adds
+#                 "_tc<value>" to the run tag.
 # PRE_DOWN_HOOK (default empty): path of an executable run once, after a
 #                 successful run's CSV row was appended and BEFORE the cluster
 #                 is torn down (down.sh), with EXP, BACKEND, N, F, CLIENTS,
@@ -216,6 +224,9 @@ SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-10m}"
 KEEP_LOGS="${KEEP_LOGS:-0}"
 BATCH_FLUSH="${BATCH_FLUSH:-}"
 RATE="${RATE:-0}"
+KAFKA_CPUS="${KAFKA_CPUS:-2}"
+KAFKA_MEM="${KAFKA_MEM:-1536m}"
+TM_TIMEOUT_COMMIT="${TM_TIMEOUT_COMMIT:-}"
 MAX_INFLIGHT="${MAX_INFLIGHT:-4096}"
 PRE_DOWN_HOOK="${PRE_DOWN_HOOK:-}"
 VALID_MAX_WRITE_ERR_PCT="${VALID_MAX_WRITE_ERR_PCT:-1}"
@@ -243,6 +254,12 @@ hbdb_require_uint AUDIT_WAIT_SECS "$AUDIT_WAIT_SECS"
 echo "$RATE" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "RATE must be a non-negative number (requests per second, 0 = closed loop), got '$RATE'"
 hbdb_require_uint MAX_INFLIGHT "$MAX_INFLIGHT"
 [ "$MAX_INFLIGHT" -ge 1 ] || die "MAX_INFLIGHT must be >= 1"
+echo "$KAFKA_CPUS" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "KAFKA_CPUS must be a positive number, got '$KAFKA_CPUS'"
+echo "$KAFKA_MEM" | grep -Eq '^[0-9]+[mMgG]$' || die "KAFKA_MEM must be a number with suffix m, g, M or G, got '$KAFKA_MEM'"
+if [ -n "$TM_TIMEOUT_COMMIT" ]; then
+  echo "$TM_TIMEOUT_COMMIT" | grep -Eq '^[0-9]+(ms|s)$' || die "TM_TIMEOUT_COMMIT must look like 100ms or 0s, got '$TM_TIMEOUT_COMMIT'"
+  [ "$BACKEND" = tendermint ] || die "TM_TIMEOUT_COMMIT applies to BACKEND=tendermint only, got $BACKEND"
+fi
 rate_on=0
 awk -v r="$RATE" 'BEGIN { exit !(r > 0) }' && rate_on=1
 case "$WORKLOAD" in
@@ -320,12 +337,18 @@ run_file="$HBDB_YCSB_DIR/$WORKLOAD.run.dat"
 [ -s "$load_file" ] || die "missing $load_file (run experiments/ycsb/gen.sh)"
 [ -s "$run_file" ] || die "missing $run_file (run experiments/ycsb/gen.sh)"
 
-export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS BATCH_FLUSH YCSB_DIR="$HBDB_YCSB_DIR"
+export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT YCSB_DIR="$HBDB_YCSB_DIR"
 
 tag="${BACKEND}_n${N}_f${F}_c${CLIENTS}_b${BLOCK_SIZE}_w${WORKLOAD}_rtt${RTT_MS}_${FAULT}_${COMMIT_MODE}_r${REP}"
 # A non-default BATCH_FLUSH is told apart in the file names (not in the CSV).
 if [ -n "$BATCH_FLUSH" ] && [ "$BATCH_FLUSH" != 1s ]; then
   tag="${tag}_bf${BATCH_FLUSH}"
+fi
+if [ "$KAFKA_CPUS" != 2 ] || [ "$KAFKA_MEM" != 1536m ]; then
+  tag="${tag}_kc${KAFKA_CPUS}-${KAFKA_MEM}"
+fi
+if [ -n "$TM_TIMEOUT_COMMIT" ]; then
+  tag="${tag}_tc${TM_TIMEOUT_COMMIT}"
 fi
 if [ "$rate_on" = 1 ]; then
   tag="${tag}_rate${RATE}"

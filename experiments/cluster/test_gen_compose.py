@@ -586,3 +586,14 @@ def test_bft2_memory_limits_fit_the_node_cap():
     # the other core backends keep 70% of the whole cap
     c = gen(backend="raft", n=2, block_size=100, commit_mode="sync", cpus=0.5, mem="768m")
     assert "GOMEMLIMIT=537MiB veritas-kafka " in c["services"]["node1"]["command"][-1]
+
+
+def test_kafka_resources_flag(tmp_path):
+    out = tmp_path / "c.json"
+    assert main(["--backend", "kafka", "--n", "4", "--kafka-cpus", "0.5", "--kafka-mem", "768m",
+                 "--out", str(out)]) == 0
+    k = json.loads(out.read_text())["services"]["kafka"]
+    assert k["cpus"] == 0.5 and k["mem_limit"] == "768m"
+    assert main(["--backend", "kafka", "--n", "4", "--out", str(out)]) == 0
+    k = json.loads(out.read_text())["services"]["kafka"]
+    assert k["cpus"] == 2 and k["mem_limit"] == "1536m"

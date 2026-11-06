@@ -31,7 +31,9 @@
 # the re-executed process. Elsewhere it is a no-op. NO_CAFFEINATE=1 skips it.
 #
 # Params guard: results/raw/<EXP>.params records DURATION, WARMUP, CPUS, MEM,
-# LOAD_THREADS, BATCH_FLUSH and the code commit (git describe --dirty, as
+# LOAD_THREADS, BATCH_FLUSH, KAFKA_CPUS, KAFKA_MEM, TM_TIMEOUT_COMMIT, RATE,
+# MAX_INFLIGHT (a phase-1 file without the last five compares them against
+# their defaults) and the code commit (git describe --dirty, as
 # run_one.sh's commit column) of the first real invocation of an EXP; a later
 # invocation (or --dry-run) with any other value dies before running anything
 # (the CSV has no columns for them, so a resumed EXP would silently mix
@@ -160,8 +162,23 @@ exp_commit() {
 # per line (unset = run_one.sh's default; LOAD_THREADS "default" = the
 # backend's default from lib.sh).
 exp_params_current() {
-  printf 'DURATION=%s\nWARMUP=%s\nCPUS=%s\nMEM=%s\nLOAD_THREADS=%s\nBATCH_FLUSH=%s\ncommit=%s\n' \
-    "$DURATION" "$WARMUP" "${CPUS:-0.5}" "${MEM:-768m}" "${LOAD_THREADS:-default}" "${BATCH_FLUSH:-1s}" "$(exp_commit)"
+  printf 'DURATION=%s\nWARMUP=%s\nCPUS=%s\nMEM=%s\nLOAD_THREADS=%s\nBATCH_FLUSH=%s\n' \
+    "$DURATION" "$WARMUP" "${CPUS:-0.5}" "${MEM:-768m}" "${LOAD_THREADS:-default}" "${BATCH_FLUSH:-1s}"
+  printf 'KAFKA_CPUS=%s\nKAFKA_MEM=%s\nTM_TIMEOUT_COMMIT=%s\nRATE=%s\nMAX_INFLIGHT=%s\n' \
+    "${KAFKA_CPUS:-2}" "${KAFKA_MEM:-1536m}" "${TM_TIMEOUT_COMMIT:-default}" "${RATE:-0}" "${MAX_INFLIGHT:-4096}"
+  printf 'commit=%s\n' "$(exp_commit)"
+}
+
+# exp_params_default KEY: the value a key added in phase 2 had before it
+# existed (a phase-1 .params file without the key compares against it).
+exp_params_default() {
+  case "$1" in
+    KAFKA_CPUS) echo 2 ;;
+    KAFKA_MEM) echo 1536m ;;
+    TM_TIMEOUT_COMMIT) echo default ;;
+    RATE) echo 0 ;;
+    MAX_INFLIGHT) echo 4096 ;;
+  esac
 }
 
 # exp_params_record: write results/raw/<EXP>.params before the first run of
@@ -186,6 +203,9 @@ exp_params_check() {
     key="${line%%=*}"
     want="${line#*=}"
     had="$(sed -n "s/^$key=//p" "$f" | head -n 1)"
+    if ! grep -q "^$key=" "$f"; then
+      had="$(exp_params_default "$key")"
+    fi
     [ "$had" != "$want" ] || continue
     if [ "$key" = commit ] && [ "${EXP_ALLOW_COMMIT_CHANGE:-0}" = 1 ]; then
       log "note: commit $want differs from $had in $f; going on (EXP_ALLOW_COMMIT_CHANGE=1)"

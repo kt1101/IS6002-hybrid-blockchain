@@ -107,6 +107,8 @@ BFT2_API_WAIT_TRIES = 300  # 60 s
 
 # Resource caps of the non-node services (caps, not reservations).
 # Kafka: broker heap 512 MB + zookeeper heap 256 MB + topic tool 128 MB.
+# Defaults of --kafka-cpus / --kafka-mem (phase 1); KAFKA_CPUS=0.5
+# KAFKA_MEM=768m gives the broker the resources of one node.
 KAFKA_CPUS, KAFKA_MEM = 2.0, "1536m"
 TSO_CPUS, TSO_MEM = 0.5, "256m"
 # The load generator should never be the bottleneck.
@@ -464,8 +466,8 @@ def _tm_orig_node(i, n, block_size, memlimit):
     ] + _exit_when_any_exits(["redis-server", "veritas-tm", "tendermint"])
 
 
-def _kafka_service():
-    s = _service(KAFKA_IMAGE, "kafka", KAFKA_IP, KAFKA_CPUS, KAFKA_MEM)
+def _kafka_service(cpus=KAFKA_CPUS, mem=KAFKA_MEM):
+    s = _service(KAFKA_IMAGE, "kafka", KAFKA_IP, cpus, mem)
     # E5 RTT: experiments/net.sh delays the broker's egress with tc netem too
     # (iproute2 is in Dockerfile.kafka).
     s["cap_add"] = ["NET_ADMIN"]
@@ -532,7 +534,8 @@ def check_node_faults(backend, n, node_faults):
 
 
 def gen(backend, n, block_size, commit_mode, cpus, mem,
-        tm_dir=None, ycsb_dir=None, results_dir=None, node_faults=None, batch_flush=None):
+        tm_dir=None, ycsb_dir=None, results_dir=None, node_faults=None, batch_flush=None,
+        kafka_cpus=KAFKA_CPUS, kafka_mem=KAFKA_MEM):
     """Return the compose document (a dict) for one cluster.
 
     commit_mode is accepted for every backend; the original backends have a
@@ -546,6 +549,8 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
     the core batcher's flush interval, on every node of a core backend; None
     leaves the flag out (the binary's default, 1 s). The original backends
     have no such flag.
+    kafka_cpus / kafka_mem are the Kafka broker's caps (default 2 CPUs,
+    1536m as in phase 1).
     """
     if backend not in ALL_BACKENDS:
         raise ValueError("unknown backend %r" % backend)
@@ -558,6 +563,9 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
     if commit_mode not in COMMIT_MODES:
         raise ValueError("commit_mode must be one of %s" % (COMMIT_MODES,))
     memlimit = gomemlimit(mem)
+    gomemlimit(kafka_mem)  # validates the broker's memory cap
+    if not kafka_cpus > 0:
+        raise ValueError("kafka_cpus must be > 0, got %r" % (kafka_cpus,))
     node_faults = dict(node_faults or {})
     check_node_faults(backend, n, node_faults)
     check_batch_flush(batch_flush)
@@ -573,7 +581,7 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
     volumes = {}
 
     if uses_kafka(backend):
-        services["kafka"] = _kafka_service()
+        services["kafka"] = _kafka_service(kafka_cpus, kafka_mem)
 
     if uses_tso(backend):
         tso = _service(NODE_IMAGE, "tso", TSO_IP, TSO_CPUS, TSO_MEM)
@@ -649,13 +657,18 @@ def main(argv=None):
     p.add_argument("--batch-flush", default=None, metavar="DURATION",
                    help="veritas --batch-flush (batcher flush interval, e.g. 250ms) on every node of a core"
                         " backend; default: flag left out (veritas default 1s)")
+    p.add_argument("--kafka-cpus", type=float, default=KAFKA_CPUS,
+                   help="CPU cap of the Kafka broker container (kafka-orig, kafka)")
+    p.add_argument("--kafka-mem", default=KAFKA_MEM, help="memory cap of the Kafka broker container")
     a = p.parse_args(argv)
 
     cpus = int(a.cpus) if a.cpus == int(a.cpus) else a.cpus
+    kafka_cpus = int(a.kafka_cpus) if a.kafka_cpus == int(a.kafka_cpus) else a.kafka_cpus
     try:
         doc = gen(a.backend, a.n, a.block_size, a.commit_mode, cpus, a.mem,
                   tm_dir=a.tm_dir, ycsb_dir=a.ycsb_dir, results_dir=a.results_dir,
-                  node_faults=parse_node_faults(a.node_fault), batch_flush=a.batch_flush)
+                  node_faults=parse_node_faults(a.node_fault), batch_flush=a.batch_flush,
+                  kafka_cpus=kafka_cpus, kafka_mem=a.kafka_mem)
     except NotImplementedError as e:
         sys.stderr.write("gen_compose: %s\n" % e)
         return 2

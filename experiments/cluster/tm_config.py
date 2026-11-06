@@ -217,12 +217,19 @@ def main(argv=None):
     p.add_argument("--dir", required=True, help="testnet output dir (contains node0..)")
     p.add_argument("--n", type=int, required=True)
     p.add_argument("--backend", default="tm-orig", choices=BACKENDS)
+    p.add_argument("--timeout-commit", default="", metavar="DURATION",
+                   help="[consensus] timeout-commit of every node (e.g. 100ms, 0s); empty: left as"
+                        " tendermint's default (1s); a config without the key is then fatal")
     a = p.parse_args(argv)
+    if a.timeout_commit and not re.match(r"^[0-9]+(ms|s)$", a.timeout_commit):
+        raise SystemExit("tm_config: --timeout-commit must look like 100ms or 0s, got %r" % a.timeout_commit)
 
     dirs = [os.path.join(a.dir, "node%d" % j) for j in range(a.n)]
     ids = [node_id(d) for d in dirs]
     edit_genesis(dirs, a.backend)
     required = REQUIRED + (tuple(TENDERMINT_EDITS) if a.backend == "tendermint" else ())
+    if a.timeout_commit:
+        required += (("consensus", "timeout-commit"),)
     for j, d in enumerate(dirs):
         peers = ",".join("%s@%s:%d" % (ids[k], node_ip(k), P2P_PORT) for k in range(a.n) if k != j)
         edits = {
@@ -239,6 +246,8 @@ def main(argv=None):
         }
         if a.backend == "tendermint":
             edits.update(TENDERMINT_EDITS)
+        if a.timeout_commit:
+            edits[("consensus", "timeout-commit")] = '"%s"' % a.timeout_commit
         path = os.path.join(d, "config", "config.toml")
         with open(path) as f:
             text = f.read()
