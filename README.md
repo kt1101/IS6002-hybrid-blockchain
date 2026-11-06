@@ -183,7 +183,7 @@ EXP=e1-bf100ms BATCH_FLUSH=100ms experiments/exp/e1_clients.sh
 **Behaviour of the drivers:**
 
 - **Resumable.** A run whose row already exists is skipped. A failed run (exit 2 or 3) is retried once on a fresh cluster, then logged to `results/raw/<EXP>.failures`.
-- **Parameter guard.** `results/raw/<EXP>.params` stores DURATION, WARMUP, CPUS, MEM, LOAD_THREADS, BATCH_FLUSH and the commit. A later run of the same `EXP` with other values stops; use a new `EXP` instead.
+- **Parameter guard.** `results/raw/<EXP>.params` stores DURATION, WARMUP, CPUS, MEM, LOAD_THREADS, BATCH_FLUSH, the phase-2 settings (KAFKA_CPUS, KAFKA_MEM, TM_TIMEOUT_COMMIT, RATE, MAX_INFLIGHT, VERIFY_SIGS, READ_MODE, ATTEST_EVERY; a phase-1 file counts as their defaults) and the commit. A later run of the same `EXP` with other values stops; use a new `EXP` instead.
 - **Validity gate** (no-fault runs only). A run is rejected and retried in any of these cases:
   - more than 1% of its writes fail with an error other than `Aborted` (`VALID_MAX_WRITE_ERR_PCT`; tendermint needed 5% at 256 clients, see `experiments/NOTES.md`);
   - 5 consecutive seconds pass without a successful operation (`VALID_ZERO_RUN_SECS`);
@@ -197,7 +197,7 @@ Per run, under `results/raw/`:
 
 | File | Content |
 |---|---|
-| `<EXP>.csv` | One 22-column row: commit, backend, N, f, clients, block size, workload, RTT, fault, rep, tps, mean/p50/p99 latency, errors, wrong reads, host CPU, `saturated`, network bytes per block |
+| `<EXP>.csv` | One 23-column row: commit, backend, N, f, clients, block size, workload, RTT, fault, rep, tps, mean/p50/p99 latency, errors, wrong reads, host CPU, `saturated`, network bytes per block, `offered_rps` (phase 2; 0 = closed loop; the plotting scripts read the 22-column phase-1 CSVs as 0) |
 | `<EXP>/<tag>.timeline`, `.wtimeline` | Successful operations (all / writes) per second |
 | `<EXP>/<tag>.ops.csv` | Separate read and write throughput, latency and errors |
 | `<EXP>/<tag>.stats` | Every `docker stats` sample (CPU, memory, network) |
@@ -282,6 +282,63 @@ python3 experiments/plot/rq3_table.py results/cloud-bf100ms/final/e6 --out resul
 ```
 
 `build.sh` is only needed behind a TLS-intercepting proxy without Debian mirrors (a Claude Code cloud session). On a normal Docker host, use `experiments/build.sh`. `campaign.sh` itself runs anywhere.
+
+## Phase 2: fair comparison and the cost of verifiability
+
+Spec: `docs/superpowers/specs/2026-11-03-phase2-fair-comparison-and-verifiability-design.md`; plan: `docs/superpowers/plans/2026-11-03-phase2-fair-comparison-and-verifiability.md`. Every new flag defaults to the phase-1 behaviour. The drivers E7–E9 fix `MEM=1g` and `BATCH_FLUSH=100ms`.
+
+**What was added**
+
+- **Open-loop load (A1).** `ycsbbench --rate=R --max-inflight=M`: operations are issued every `1/R` s whatever the replies; latency counts from the scheduled time; an operation due while `M` requests are outstanding is dropped and counted (`dropped` in `.ops.csv`). `experiments/plot/saturation.py` finds the saturation throughput: the largest rate with tps ≥ 0.95 × rate, write p99 ≤ 2000 ms and no drop.
+- **Balanced resources (A2).** `KAFKA_CPUS`/`KAFKA_MEM` (broker caps, default 2 / 1536m; `0.5`/`768m` = one node) and `TM_TIMEOUT_COMMIT` (tendermint `[consensus] timeout-commit`).
+- **Adapter fixes (A3).** bft2: every `/submit` is forwarded to all replicas (`POST /forward`, port 7202), any leader proposes any pending block, a block seen in a proposal that has not committed 8 views later is queued again, and a block committed twice is delivered once (65536-id window). tendermint: `DeliverTx` never waits (128 MiB queue; overflow stops the node's delivery with `tendermint: deliver queue overflow`).
+- **Signatures and verified reads (B1, RQ4).** `veritas --verify-sigs=none|ingress|all --key-seed=S` (Ed25519 keys derived from the seed); `ycsbbench --sign`; RPC `GetVerified` returns value, version, Merkle proof, root and height from one executor lock hold; `ycsbbench --read-mode=verified` checks the proof (a bad proof is the error kind `proof`).
+- **Root attestations (B2, RQ5).** `veritas --attest-every=K --n=N`: nodes sign `(height, root)` and certify heights with 2f+1 matching signatures; a node whose root disagrees with a certified one logs `core: diverged at height <h>` and refuses reads (`DataLoss`). `ycsbbench --read-mode=certified` accepts a value only with a valid proof and a quorum of attestations on its `(height, root)`.
+
+**Phase-2 environment variables** (`experiments/run_one.sh`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RATE` / `MAX_INFLIGHT` | 0 / 4096 | Open-loop rate (req/s, 0 = closed loop) and in-flight cap; tag suffix `_rate<R>` |
+| `KAFKA_CPUS` / `KAFKA_MEM` | 2 / 1536m | Kafka broker caps; tag suffix `_kc<cpus>-<mem>` when changed |
+| `TM_TIMEOUT_COMMIT` | (tendermint default, 1s) | tendermint `timeout-commit`; tag suffix `_tc<value>` |
+| `VERIFY_SIGS` / `SIGN` / `KEY_SEED` | none / 1 if signatures are checked / hbdb-phase2 | Signature checks of the nodes, signing clients, shared key seed |
+| `READ_MODE` | plain | `verified` or `certified` (needs `ATTEST_EVERY` > 0) |
+| `ATTEST_EVERY` | 0 | Root attestations; > 0 also writes `<tag>.diverged` |
+
+**Running.** Run E7 first: E6', E8 and E9 run at 80% of each backend's saturation throughput (`E6_RATE_<BACKEND>`, `E8_RATE_<BACKEND>`, `E9_RATE_<BACKEND>`).
+
+```bash
+EXP=e7 experiments/exp/e7_rate.sh
+```
+
+```bash
+EXP=e7f-kafka KAFKA_CPUS=0.5 KAFKA_MEM=768m BACKENDS=kafka experiments/exp/e7_rate.sh
+```
+
+```bash
+python3 experiments/plot/saturation.py results/raw/e7*.csv --ops-dir results/raw --out results/e7
+```
+
+```bash
+EXP=e6p MEM=1g BATCH_FLUSH=100ms BACKENDS="bft2 tendermint" E6_KINDS="F1 F2" F5_KINDS=F5-F2 E6_LEADER=0 E6_RATE_BFT2=<rate> E6_RATE_TENDERMINT=<rate> experiments/exp/e6_faults.sh
+```
+
+```bash
+E8_RATE_RAFT=<rate> E8_RATE_BFT2=<rate> experiments/exp/e8_verify.sh
+```
+
+```bash
+E9_RATE_RAFT=<rate> E9_RATE_BFT2=<rate> experiments/exp/e9_attest.sh
+```
+
+```bash
+python3 experiments/plot/rq5.py results/raw/e9-*.csv --raw-dir results/raw --out results/e9
+```
+
+`experiments/plot/plot.py` draws `e8_verify.png` (and writes `e8_verify.csv`) when the `e8-*` CSVs are among its inputs. After a proto change, `scripts/genproto_docker.sh` regenerates `proto/veritas/veritas.pb.go` with the generator the committed file was made with (protoc-gen-go v1.3.2).
+
+No phase-2 results yet: the E7–E9 runs need the Docker cluster (see `experiments/NOTES.md`, "Giai đoạn 2").
 
 ## Reproduce the paper (original artifact)
 
