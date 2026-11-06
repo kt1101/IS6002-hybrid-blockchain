@@ -34,6 +34,11 @@
 # experiments/plot/rq3.py reads the .timeline/.faults/.audit files in
 # results/raw/e6/.
 #
+# Open-loop load (phase 2, E6'): E6_RATE_<BACKEND> (E6_RATE_KAFKA, _RAFT,
+# _TENDERMINT, _BFT2; e.g. 80% of the backend's E7 saturation throughput)
+# or E6_RATE for every backend runs that backend's E6 runs with run_one.sh
+# RATE=<rate> (the rate is part of the configuration, CSV column
+# offered_rps); unset = closed loop as in phase 1.
 # Rows in results/raw/e6.csv. The fault string is in the fault column
 # (F1:node4@60, F1:node7+node6@60, F5-F4:node3+node4@60 ...). Note on the
 # noise rule: the tps of a fault run averages the healthy and the faulty part,
@@ -83,26 +88,40 @@ for b in $E6_LEADER_BACKENDS; do
   hbdb_in_list "$b" "$EXP_BACKENDS_ALL" || die "E6_LEADER_BACKENDS: '$b' is not an E1-E6 backend (one of: $EXP_BACKENDS_ALL)"
 done
 
+# e6_rate BACKEND: the backend's open-loop rate (see the header), "" = closed loop.
+e6_rate() {
+  local v
+  v="E6_RATE_$(echo "$1" | tr '[:lower:]' '[:upper:]')"
+  eval "echo \"\${$v:-\${E6_RATE:-}}\""
+}
+for b in $EXP_BACKEND_LIST; do
+  r="$(e6_rate "$b")"
+  if [ -n "$r" ]; then
+    exp_rate_ok "$r" && exp_rate_on "$r" || die "E6_RATE / E6_RATE_<BACKEND> for $b must be a positive number, got '$r'"
+  fi
+done
+
 exp_plan() {
   for b in $EXP_BACKEND_LIST; do
     exp_resolve_clients "$b" || continue
     c="$EXP_RESOLVED_CLIENTS"
+    rate="$(e6_rate "$b")"
     for p in $E6_NF; do
       n="${p%%:*}"
       f="${p##*:}"
       nodes="$(fault_default_nodes "$n" "$f")"
       for kind in $E6_KINDS; do
-        exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:$nodes@$E6_AT"
+        exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:$nodes@$E6_AT" $rate
       done
       if hbdb_in_list "$b" "tendermint bft2"; then
         nodes5="$(fault_default_nodes "$n" $((f + 1)))"
         for kind in $F5_KINDS; do
-          exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:$nodes5@$E6_AT"
+          exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:$nodes5@$E6_AT" $rate
         done
       fi
       if [ "$E6_LEADER" = 1 ] && hbdb_in_list "$b" "$E6_LEADER_BACKENDS"; then
         for kind in $E6_LEADER_KINDS; do
-          exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:node1@$E6_AT"
+          exp_cfg "$b" "$n" "$f" "$c" 100 a 0 "$kind:node1@$E6_AT" $rate
         done
       fi
     done

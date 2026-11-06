@@ -556,5 +556,15 @@ BACKENDS=raft REPS=1 EXTRA_REPS=0 RATES="100 200" drv e7_rate.sh
 eq "e7 resume: nothing to run" "$(calls)" 2
 eq "e7 params record MEM=1g and BATCH_FLUSH=100ms" "$(grep -E '^(MEM|BATCH_FLUSH)=' "$ROOT/results/raw/e7.params" | tr '\n' ' ')" "MEM=1g BATCH_FLUSH=100ms "
 
+# ------------------------------------------------------- E6' open-loop rate ----
+newtree e6rate
+OUT="$(E6_RATE_BFT2=1300 BACKENDS=bft2 E6_KINDS="F1 F2" F5_KINDS=F5-F2 E6_LEADER=0 "$ROOT/experiments/exp/e6_faults.sh" --dry-run 2>/dev/null)"
+eq "e6 E6_RATE_BFT2: 18 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 18
+eq "e6 E6_RATE_BFT2: every run has RATE=1300" "$(printf '%s\n' "$OUT" | grep -vc ' RATE=1300 ')" 0
+OUT="$(E6_RATE_BFT2=1300 BACKENDS="raft bft2" E6_KINDS="F1" F5_KINDS=F5-F2 E6_LEADER=0 "$ROOT/experiments/exp/e6_faults.sh" --dry-run 2>/dev/null)"
+eq "e6: raft without its rate stays closed loop" "$(printf '%s\n' "$OUT" | grep 'BACKEND=raft' | grep -c 'RATE=')" 0
+E6_RATE_BFT2=abc BACKENDS=bft2 drv e6_faults.sh --dry-run
+eq "e6 bad E6_RATE_BFT2 refused" "$RC" 1
+
 echo "test_exp.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
