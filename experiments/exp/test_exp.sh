@@ -106,7 +106,7 @@ newtree() {
 #!/usr/bin/env bash
 # Stub of run_one.sh: log the environment, append one row (23 columns).
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-echo "EXP=$EXP BACKEND=$BACKEND N=$N F=$F CLIENTS=$CLIENTS BLOCK_SIZE=$BLOCK_SIZE WORKLOAD=$WORKLOAD RTT_MS=$RTT_MS FAULT=$FAULT REP=$REP COMMIT_MODE=$COMMIT_MODE DURATION=${DURATION:-} HOOK=${PRE_DOWN_HOOK:-}" >>"$root/stub.log"
+echo "EXP=$EXP BACKEND=$BACKEND N=$N F=$F CLIENTS=$CLIENTS BLOCK_SIZE=$BLOCK_SIZE WORKLOAD=$WORKLOAD RTT_MS=$RTT_MS FAULT=$FAULT REP=$REP COMMIT_MODE=$COMMIT_MODE DURATION=${DURATION:-} RATE=${RATE:-0} HOOK=${PRE_DOWN_HOOK:-}" >>"$root/stub.log"
 if [ -n "${STUB_RC:-}" ] && { [ -z "${STUB_BACKEND:-}" ] || [ "$STUB_BACKEND" = "$BACKEND" ]; }; then
   exit "$STUB_RC"
 fi
@@ -534,6 +534,27 @@ contains "missing PRE_DOWN_HOOK message" "$OUT" "is not an executable file"
 eq "run_one checks never reached docker" "$(grep -c . "$TMP_ROOT_DOCKER_LOG")" 0
 eq "refused runs create nothing" "$(ls "$SRC_ROOT/results/raw/zzcheck" 2>/dev/null | wc -l | tr -d ' ')" 0
 contains "tag suffix for a non-default BATCH_FLUSH" "$(grep -F 'tag="${tag}_bf${BATCH_FLUSH}"' "$SRC_ROOT/experiments/run_one.sh")" '_bf'
+
+# ----------------------------------------------------------- E7 rate sweep ----
+newtree e7
+OUT="$("$ROOT/experiments/exp/e7_rate.sh" --dry-run 2>/dev/null)"
+eq "e7 --dry-run: 3 backends x 7 rates + tendermint x 6, x 3 reps" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 81
+eq "e7: tendermint has its own rates" "$(printf '%s\n' "$OUT" | grep 'BACKEND=tendermint' | grep -c 'RATE=600 ')" 3
+eq "e7: CLIENTS=256 N=4 block 100 workload a" "$(printf '%s\n' "$OUT" | grep -vc 'N=4 F=0 CLIENTS=256 BLOCK_SIZE=100 WORKLOAD=a ')" 0
+OUT="$(KAFKA_CPUS=0.5 KAFKA_MEM=768m BACKENDS=kafka "$ROOT/experiments/exp/e7_rate.sh" --dry-run 2>/dev/null)"
+eq "e7 kafka only: 7 rates x 3 reps" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 21
+OUT="$(RATES="100 200" TM_RATES="10" "$ROOT/experiments/exp/e7_rate.sh" --dry-run 2>/dev/null)"
+eq "e7 RATES/TM_RATES override" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 21
+RATES="100 x" drv e7_rate.sh --dry-run
+eq "e7 bad rate refused" "$RC" 1
+BACKENDS=raft REPS=1 EXTRA_REPS=0 RATES="100 200" drv e7_rate.sh
+eq "e7 real run ok" "$RC" 0
+eq "e7: two runs" "$(calls)" 2
+contains "e7: run_one gets RATE" "$(cat "$ROOT/stub.log")" "RATE=200"
+eq "e7: offered_rps recorded" "$(tail -n 1 "$ROOT/results/raw/e7.csv" | cut -d, -f23)" 200
+BACKENDS=raft REPS=1 EXTRA_REPS=0 RATES="100 200" drv e7_rate.sh
+eq "e7 resume: nothing to run" "$(calls)" 2
+eq "e7 params record MEM=1g and BATCH_FLUSH=100ms" "$(grep -E '^(MEM|BATCH_FLUSH)=' "$ROOT/results/raw/e7.params" | tr '\n' ' ')" "MEM=1g BATCH_FLUSH=100ms "
 
 echo "test_exp.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
