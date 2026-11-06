@@ -105,8 +105,10 @@ type ServerConfig struct {
 	N            int
 	AttestQuorum int
 	AttestIdle   time.Duration
-	NodeKey      ed25519.PrivateKey
-	NodeKeys     func(nodeID int32) (ed25519.PublicKey, bool)
+	// CertifiedWait bounds a certified read's wait (0 = DefaultCertifiedWait).
+	CertifiedWait time.Duration
+	NodeKey       ed25519.PrivateKey
+	NodeKeys      func(nodeID int32) (ed25519.PublicKey, bool)
 }
 
 // SetVerifier is the executor check of --verify-sigs=all: the Set carries a
@@ -361,21 +363,88 @@ func (s *Server) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest) (
 	if err := s.divergedErr(); err != nil {
 		return nil, err
 	}
-	val, ver, h, root, proof, err := s.ex.ProveValue([]byte(req.GetKey()))
+	if req.GetCertified() {
+		return s.getCertified(ctx, []byte(req.GetKey()))
+	}
+	p := s.proveResp([]byte(req.GetKey()))
+	return p.resp, p.err
+}
+
+// DefaultCertifiedWait bounds how long a certified read waits.
+const DefaultCertifiedWait = 5 * time.Second
+
+// proveResp is GetVerified's proof (Executor.ProveValue) as a response.
+func (s *Server) proveResp(key []byte) certProof {
+	val, ver, h, root, proof, err := s.ex.ProveValue(key)
 	if errors.Is(err, ErrKeyNotFound) {
-		return nil, status.Errorf(codes.NotFound, "key %q not found", req.GetKey())
+		return certProof{err: status.Errorf(codes.NotFound, "key %q not found", key)}
 	}
 	if err != nil {
-		return nil, err
+		return certProof{err: err}
 	}
-	return &pbv.GetVerifiedResponse{
+	return certProof{resp: &pbv.GetVerifiedResponse{
 		Value:                 val,
 		Version:               ver,
 		Height:                h,
 		RootDigest:            root,
 		SideNodes:             proof.SideNodes,
 		NonMembershipLeafData: proof.NonMembershipLeafData,
-	}, nil
+	}}
+}
+
+// getCertified is GetVerified(certified): a proof whose root is this node's
+// root at an attested height h, returned with the quorum of attestations
+// that certify (h, root). If the current root is one of an attested height
+// (no block with txs since), the proof is taken now; otherwise the apply
+// loop takes it right after the next attested height. Then it waits for
+// the certification. The whole wait is bounded by CertifiedWait
+// (codes.DeadlineExceeded); a certified root other than the proof's is
+// codes.DataLoss (this node diverged).
+func (s *Server) getCertified(ctx context.Context, key []byte) (*pbv.GetVerifiedResponse, error) {
+	if s.att == nil {
+		return nil, status.Error(codes.FailedPrecondition, "certified read: attestations are off (--attest-every=0)")
+	}
+	wait := s.cfg.CertifiedWait
+	if wait <= 0 {
+		wait = DefaultCertifiedWait
+	}
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+
+	p := s.proveResp(key)
+	if p.err != nil {
+		return nil, p.err
+	}
+	h, ok := s.att.attestedHeight(p.resp.GetRootDigest())
+	if ok {
+		p.resp.Height = h
+	} else {
+		r := s.att.waitNext(key)
+		select {
+		case p = <-r.out:
+		case <-ctx.Done():
+			s.att.forget(r)
+			return nil, status.Errorf(codes.DeadlineExceeded, "certified read of %q: no attested height within %v", key, wait)
+		case <-s.stopCh:
+			s.att.forget(r)
+			return nil, s.stoppedErr()
+		}
+		if p.err != nil {
+			return nil, p.err
+		}
+	}
+	root, atts, err := s.att.cert.Wait(ctx, p.resp.GetHeight())
+	if err != nil {
+		return nil, status.Errorf(codes.DeadlineExceeded, "certified read of %q: height %d not certified within %v", key, p.resp.GetHeight(), wait)
+	}
+	if string(root) != string(p.resp.GetRootDigest()) {
+		return nil, status.Errorf(codes.DataLoss, "certified read of %q: height %d certified with another root than this node's", key, p.resp.GetHeight())
+	}
+	if err := s.divergedErr(); err != nil {
+		return nil, err
+	}
+	p.resp.Attestations = atts
+	return p.resp, nil
 }
 
 // checkSig is the ingress check of --verify-sigs (SigIngress, SigAll).
@@ -504,11 +573,8 @@ func (s *Server) submitBlock(blk *pbv.Block) error {
 	start := time.Now()
 	blk.Signature = s.cfg.Signature
 	blk.Type = pbv.MessageType_Approve
-	if s.att != nil {
+	if s.att != nil && blk.Attestations == nil {
 		blk.Attestations = s.att.take()
-	}
-	if len(blk.Txs) == 0 && len(blk.Attestations) == 0 {
-		return nil // an idle block whose attestations went out meanwhile
 	}
 	raw, err := proto.Marshal(blk)
 	if err != nil {
@@ -622,7 +688,7 @@ func (s *Server) applyLoop() {
 		}
 		s.metrics.applied(time.Since(start)-ledgerTime, ledgerTime)
 		if s.att != nil {
-			s.att.afterApply(height, s.ex.RootDigest(), &blk, s.cfg.NodeID)
+			s.att.afterApply(height, s.ex.RootDigest(), &blk, s.cfg.NodeID, s.proveResp)
 		}
 		if own && s.cfg.Commit == CommitSync {
 			s.resolveBlock(&blk, aborted)

@@ -127,3 +127,104 @@ func TestAttestOffByDefault(t *testing.T) {
 		t.Fatal("attestation-only blocks changed the state root")
 	}
 }
+
+func certifiedRead(s *Server, key string) (*pbv.GetVerifiedResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), srvTestTimeout)
+	defer cancel()
+	return s.GetVerified(ctx, &pbv.GetVerifiedRequest{Key: key, Certified: true})
+}
+
+// checkCertified: the proof verifies and Q=3 distinct valid attestations
+// sign the response's (height, root).
+func checkCertified(t *testing.T, r *pbv.GetVerifiedResponse, key string) {
+	t.Helper()
+	if !verifyResp(r, key) {
+		t.Fatal("certified response: proof does not verify")
+	}
+	keys := sigs.NodeKeys(testSeed, 4)
+	seen := map[int32]bool{}
+	for _, a := range r.GetAttestations() {
+		pub, ok := keys(a.GetNodeId())
+		if ok && a.GetHeight() == r.GetHeight() && string(a.GetRoot()) == string(r.GetRootDigest()) &&
+			sigs.VerifyAttest(pub, a.GetHeight(), a.GetRoot(), a.GetSig()) {
+			seen[a.GetNodeId()] = true
+		}
+	}
+	if len(seen) < 3 {
+		t.Fatalf("certified response with %d valid attestations, want >= 3", len(seen))
+	}
+}
+
+// TestCertifiedReadHonest: every node serves a certified read, also with
+// every=3 on an idle cluster (the last data block is not at a multiple of
+// 3: the idle tick gets its root attested).
+func TestCertifiedReadHonest(t *testing.T) {
+	for _, every := range []int{1, 3} {
+		nodes := attestCluster(t, 4, every, nil, nil)
+		setN(t, nodes[0].srv, 7)
+		for i, n := range nodes {
+			r, err := certifiedRead(n.srv, "k0")
+			if err != nil {
+				t.Fatalf("every=%d node %d: %v", every, i+1, err)
+			}
+			if r.GetValue() != "v0" || r.GetHeight() < 1 {
+				t.Fatalf("every=%d node %d: value %q height %d", every, i+1, r.GetValue(), r.GetHeight())
+			}
+			checkCertified(t, r, "k0")
+		}
+	}
+}
+
+func TestCertifiedReadFromCorruptNodeRejected(t *testing.T) {
+	nodes := attestCluster(t, 4, 1, map[int]FaultPolicy{4: suffixFault{}}, func(i int, c *ServerConfig) {
+		c.CertifiedWait = 300 * time.Millisecond
+	})
+	setN(t, nodes[0].srv, 5)
+	for k := 0; k < 5; k++ {
+		r, err := certifiedRead(nodes[3].srv, fmt.Sprintf("k%d", k))
+		if err == nil {
+			t.Fatalf("certified read %d from the corrupt node returned %q", k, r.GetValue())
+		}
+		if c := status.Code(err); c != codes.DataLoss && c != codes.DeadlineExceeded {
+			t.Fatalf("certified read from the corrupt node: %v, want DataLoss or DeadlineExceeded", err)
+		}
+	}
+	r, err := certifiedRead(nodes[0].srv, "k1")
+	if err != nil || r.GetValue() != "v1" {
+		t.Fatalf("certified read from an honest node: %v %v", r, err)
+	}
+}
+
+func TestCertifiedReadWaitsForCertification(t *testing.T) {
+	// Nodes 3 and 4 sign with keys nobody knows: only 2 valid attestations
+	// per height, never a quorum of 3.
+	nodes := attestCluster(t, 4, 1, nil, func(i int, c *ServerConfig) {
+		c.CertifiedWait = 500 * time.Millisecond
+		if i >= 2 {
+			c.NodeKey = sigs.KeyFor("wrong-seed", sigs.NodeID(i+1))
+		}
+	})
+	setN(t, nodes[0].srv, 3)
+	t0 := time.Now()
+	_, err := certifiedRead(nodes[0].srv, "k0")
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("certified read without a quorum: %v, want DeadlineExceeded", err)
+	}
+	if d := time.Since(t0); d < 400*time.Millisecond || d > 3*time.Second {
+		t.Fatalf("waited %v, want about the 500ms CertifiedWait", d)
+	}
+	if nodes[0].srv.Breakdown().AttestInvalid == 0 {
+		t.Fatal("no invalid attestations counted")
+	}
+	if _, err := nodes[0].srv.GetVerified(context.Background(), &pbv.GetVerifiedRequest{Key: "k0"}); err != nil {
+		t.Fatalf("a verified (not certified) read still works: %v", err)
+	}
+}
+
+func TestCertifiedReadNeedsAttestations(t *testing.T) {
+	nodes := attestCluster(t, 1, 0, nil, nil)
+	setN(t, nodes[0].srv, 1)
+	if _, err := certifiedRead(nodes[0].srv, "k0"); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("certified read with attestations off: %v, want FailedPrecondition", err)
+	}
+}

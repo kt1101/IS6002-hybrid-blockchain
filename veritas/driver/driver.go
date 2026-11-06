@@ -23,6 +23,10 @@ import (
 // returned root (the value is not used).
 var ErrProofInvalid = errors.New("driver: proof invalid")
 
+// ErrCertInvalid: a certified read without Quorum valid attestations from
+// distinct nodes on the proof's (height, root).
+var ErrCertInvalid = errors.New("driver: certification invalid")
+
 // ReadMode selects how Get reads (ycsbbench --read-mode).
 type ReadMode int
 
@@ -60,6 +64,11 @@ type Options struct {
 	// of the response message and the CPU-side time of the proof check in
 	// microseconds (ycsbbench's read_bytes_mean, verify_cpu_us_mean).
 	OnVerify func(respBytes int, verifyMicros int64)
+	// NodeKeys and Quorum check certified reads: at least Quorum
+	// attestations, from distinct nodes known to NodeKeys, with valid
+	// signatures on the response's (height, root).
+	NodeKeys func(nodeID int32) (ed25519.PublicKey, bool)
+	Quorum   int
 	// Dialer replaces the TCP dialer (tests: bufconn).
 	Dialer func(ctx context.Context, addr string) (net.Conn, error)
 }
@@ -152,10 +161,43 @@ func (d *Driver) GetVerified(ctx context.Context, key string) (string, error) {
 	return res.GetValue(), nil
 }
 
-// GetCertified is filled in by the certified-read phase (B2); until then it
-// is GetVerified.
+// GetCertified is GetVerified(certified): the proof must verify and the
+// response must carry at least Options.Quorum valid attestations from
+// distinct nodes on its (height, root); otherwise ErrCertInvalid (or
+// ErrProofInvalid) and no value.
 func (d *Driver) GetCertified(ctx context.Context, key string) (string, error) {
-	return d.GetVerified(ctx, key)
+	res, err := d.dbCli.GetVerified(ctx, &pbv.GetVerifiedRequest{Key: key, Certified: true})
+	if err != nil {
+		return "", err
+	}
+	if err := d.checkProof(key, res); err != nil {
+		return "", err
+	}
+	if err := d.checkCert(res); err != nil {
+		return "", err
+	}
+	return res.GetValue(), nil
+}
+
+func (d *Driver) checkCert(res *pbv.GetVerifiedResponse) error {
+	if d.opts.NodeKeys == nil || d.opts.Quorum < 1 {
+		return fmt.Errorf("%w: no node keys / quorum configured", ErrCertInvalid)
+	}
+	seen := make(map[int32]bool)
+	for _, a := range res.GetAttestations() {
+		if seen[a.GetNodeId()] || a.GetHeight() != res.GetHeight() || string(a.GetRoot()) != string(res.GetRootDigest()) {
+			continue
+		}
+		pub, ok := d.opts.NodeKeys(a.GetNodeId())
+		if !ok || !sigs.VerifyAttest(pub, a.GetHeight(), a.GetRoot(), a.GetSig()) {
+			continue
+		}
+		seen[a.GetNodeId()] = true
+	}
+	if len(seen) < d.opts.Quorum {
+		return fmt.Errorf("%w: %d of %d needed signatures on height %d", ErrCertInvalid, len(seen), d.opts.Quorum, res.GetHeight())
+	}
+	return nil
 }
 
 func (d *Driver) checkProof(key string, res *pbv.GetVerifiedResponse) error {

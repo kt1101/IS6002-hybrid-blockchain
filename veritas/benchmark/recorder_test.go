@@ -207,18 +207,18 @@ func TestWriteOpsCSV(t *testing.T) {
 		{Op: "read", Count: 30, TPS: 3, LatMeanMs: 1, LatP50Ms: 1, LatP99Ms: 1.25, Errors: 1},
 		{Op: "write", Count: 0, Aborted: 7},
 	}
-	if err := WriteOpsCSV(path, ops, OpsExtra{Dropped: 5, ReadBytesMean: 812.25, VerifyMicrosMean: 31}); err != nil {
+	if err := WriteOpsCSV(path, ops, OpsExtra{Dropped: 5, ReadBytesMean: 812.25, VerifyMicrosMean: 31, ProofErrors: 1, CertErrors: 2, DataLossErrors: 3}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := OpsCSVHeader + "\nread,30,3.00,1.000,1.000,1.250,1,0,5,812.2,31.0\nwrite,0,0.00,0.000,0.000,0.000,0,7,5,812.2,31.0\n"
+	want := OpsCSVHeader + "\nread,30,3.00,1.000,1.000,1.250,1,0,5,812.2,31.0,1,2,3\nwrite,0,0.00,0.000,0.000,0.000,0,7,5,812.2,31.0,1,2,3\n"
 	if string(data) != want {
 		t.Fatalf("ops csv=%q want %q", data, want)
 	}
-	if OpsCSVHeader != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped,read_bytes_mean,verify_cpu_us_mean" {
+	if OpsCSVHeader != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped,read_bytes_mean,verify_cpu_us_mean,proof_errors,cert_errors,dataloss_errors" {
 		t.Fatalf("OpsCSVHeader changed: %q (experiments/run_one.sh parses it)", OpsCSVHeader)
 	}
 }
@@ -312,8 +312,14 @@ func TestErrorKindsGroupProofAndCert(t *testing.T) {
 	r.ObserveGet(at, time.Millisecond, "", errors.New(`driver: proof invalid: key "a" at height 3`))
 	r.ObserveGet(at, time.Millisecond, "", errors.New(`driver: proof invalid: key "b" at height 9`))
 	r.ObserveGet(at, time.Millisecond, "", errors.New(`driver: certification invalid: 1 of 3 signatures`))
+	r.ObserveGet(at, time.Millisecond, "", errors.New(`rpc error: code = DataLoss desc = node 4 diverged at height 7`))
+	r.ObserveGet(at, time.Millisecond, "", errors.New(`rpc error: code = DataLoss desc = node 4 diverged at height 9`))
+	r.ObserveGet(at, time.Millisecond, "", errors.New(`rpc error: code = DataLoss desc = node 4 diverged at height 9`))
 	got := r.ErrorKinds()
-	if len(got) != 2 || got[0] != (ErrorKind{Msg: ErrKindProof, Count: 2}) || got[1] != (ErrorKind{Msg: ErrKindCert, Count: 1}) {
+	if len(got) != 3 || got[0] != (ErrorKind{Msg: ErrKindDataLoss, Count: 3}) || got[1] != (ErrorKind{Msg: ErrKindProof, Count: 2}) || got[2] != (ErrorKind{Msg: ErrKindCert, Count: 1}) {
 		t.Fatalf("ErrorKinds = %+v", got)
+	}
+	if r.ErrorKindCount(ErrKindProof) != 2 || r.ErrorKindCount("nope") != 0 {
+		t.Fatal("ErrorKindCount wrong")
 	}
 }

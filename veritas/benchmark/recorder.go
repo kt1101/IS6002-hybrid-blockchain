@@ -173,9 +173,11 @@ var seqRE = regexp.MustCompile(`\bseq [0-9]+`)
 // ErrKindProof and ErrKindCert are the ErrorKinds of a verified read whose
 // Merkle proof failed (driver.ErrProofInvalid) and of a certified read
 // without a valid attestation quorum (driver.ErrCertInvalid).
+// ErrKindDataLoss is a read refused by a diverged node (gRPC DataLoss).
 const (
-	ErrKindProof = "proof"
-	ErrKindCert  = "cert"
+	ErrKindProof    = "proof"
+	ErrKindCert     = "cert"
+	ErrKindDataLoss = "dataloss"
 )
 
 // countErrorKind must be called with r.mu held.
@@ -185,6 +187,8 @@ func (r *Recorder) countErrorKind(msg string) {
 		msg = ErrKindProof
 	case strings.Contains(msg, "driver: certification invalid"):
 		msg = ErrKindCert
+	case strings.Contains(msg, "code = DataLoss"):
+		msg = ErrKindDataLoss
 	}
 	msg = seqRE.ReplaceAllString(msg, "seq N")
 	if len(msg) > maxErrorMsgLen {
@@ -313,14 +317,27 @@ func (r *Recorder) OpSummaries() []OpSummary {
 // The trailing columns are per run (OpsExtra, the same on every line):
 // dropped = open-loop drops (Summary.Dropped, 0 for a closed loop),
 // read_bytes_mean / verify_cpu_us_mean = mean response size and client
-// proof-check time of the verified reads (0 without them).
-const OpsCSVHeader = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped,read_bytes_mean,verify_cpu_us_mean"
+// proof-check time of the verified reads (0 without them);
+// proof_errors / cert_errors / dataloss_errors = in-window errors of the
+// kinds ErrKindProof / ErrKindCert / ErrKindDataLoss (reads the client
+// rejected, or a diverged node refused).
+const OpsCSVHeader = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped,read_bytes_mean,verify_cpu_us_mean,proof_errors,cert_errors,dataloss_errors"
 
 // OpsExtra are the per-run columns of the ops sidecar.
 type OpsExtra struct {
 	Dropped          int64
 	ReadBytesMean    float64
 	VerifyMicrosMean float64
+	ProofErrors      int64
+	CertErrors       int64
+	DataLossErrors   int64
+}
+
+// ErrorKindCount is the number of in-window errors of kind msg.
+func (r *Recorder) ErrorKindCount(msg string) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.errKinds[msg]
 }
 
 // WriteOpsCSV writes ops (OpSummaries) to path as a small CSV: the
@@ -331,14 +348,15 @@ func WriteOpsCSV(path string, ops []OpSummary, x OpsExtra) error {
 	sb.WriteString(OpsCSVHeader)
 	sb.WriteByte('\n')
 	for _, o := range ops {
-		fmt.Fprintf(&sb, "%s,%d,%s,%s,%s,%s,%d,%d,%d,%s,%s\n", o.Op, o.Count,
+		fmt.Fprintf(&sb, "%s,%d,%s,%s,%s,%s,%d,%d,%d,%s,%s,%d,%d,%d\n", o.Op, o.Count,
 			strconv.FormatFloat(o.TPS, 'f', 2, 64),
 			strconv.FormatFloat(o.LatMeanMs, 'f', 3, 64),
 			strconv.FormatFloat(o.LatP50Ms, 'f', 3, 64),
 			strconv.FormatFloat(o.LatP99Ms, 'f', 3, 64),
 			o.Errors, o.Aborted, x.Dropped,
 			strconv.FormatFloat(x.ReadBytesMean, 'f', 1, 64),
-			strconv.FormatFloat(x.VerifyMicrosMean, 'f', 1, 64))
+			strconv.FormatFloat(x.VerifyMicrosMean, 'f', 1, 64),
+			x.ProofErrors, x.CertErrors, x.DataLossErrors)
 	}
 	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }

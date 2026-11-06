@@ -67,6 +67,7 @@ var (
 	maxInflight       = kingpin.Flag("max-inflight", "Open-loop load: at most this many outstanding requests; an operation due while the cap is reached is dropped and counted, not queued").Default("4096").Int()
 	signSets          = kingpin.Flag("sign", "Sign every Set with the Ed25519 key of client<k> (driver k) derived from --key-seed (nodes with --verify-sigs)").Bool()
 	readModeFlag      = kingpin.Flag("read-mode", "Reads: plain (Get), verified (GetVerified, Merkle proof checked) or certified (also a quorum of root attestations)").Default("plain").Enum("plain", "verified", "certified")
+	attestQuorum      = kingpin.Flag("attest-quorum", "Certified reads: attestations needed (0: 2f+1 of the nodes in --veritas-addrs)").Default("0").Int()
 	keySeedFlag       = kingpin.Flag("key-seed", "Seed of the client keys (the nodes' --key-seed)").Default(sigs.DefaultSeed).String()
 	settleTimeout     = kingpin.Flag("settle-timeout", "Deadline for every node to serve Get for a sample of loaded keys before the run phase").Default("10m").Duration()
 )
@@ -151,6 +152,15 @@ func main() {
 	}
 	for i := 0; i < *driverNum; i++ {
 		opts := driver.Options{ReadMode: readMode, OnVerify: verifyStats.observe}
+		if readMode == driver.ReadCertified {
+			// Node k of --veritas-addrs (in order, duplicates removed) is node k+1.
+			n := len(uniqueStrings(addrs))
+			opts.NodeKeys = sigs.NodeKeys(*keySeedFlag, n)
+			opts.Quorum = *attestQuorum
+			if opts.Quorum <= 0 {
+				opts.Quorum = 2*((n-1)/3) + 1
+			}
+		}
 		if *signSets {
 			opts.ClientID = sigs.ClientID(i)
 			opts.Key = sigs.KeyFor(*keySeedFlag, opts.ClientID)
@@ -355,7 +365,11 @@ func main() {
 	}
 	if *opsPath != "" {
 		rb, vu := verifyStats.means()
-		if err := benchmark.WriteOpsCSV(*opsPath, rec.OpSummaries(), benchmark.OpsExtra{Dropped: s.Dropped, ReadBytesMean: rb, VerifyMicrosMean: vu}); err != nil {
+		x := benchmark.OpsExtra{Dropped: s.Dropped, ReadBytesMean: rb, VerifyMicrosMean: vu,
+			ProofErrors:    rec.ErrorKindCount(benchmark.ErrKindProof),
+			CertErrors:     rec.ErrorKindCount(benchmark.ErrKindCert),
+			DataLossErrors: rec.ErrorKindCount(benchmark.ErrKindDataLoss)}
+		if err := benchmark.WriteOpsCSV(*opsPath, rec.OpSummaries(), x); err != nil {
 			panic(err)
 		}
 	}

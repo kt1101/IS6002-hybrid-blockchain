@@ -22,6 +22,9 @@ type fakeNode struct {
 	value  string // what the ledger holds
 	answer string // what GetVerified returns as value
 	sets   []*pbv.SetRequest
+	// signers: the attestations of a certified read: node id and the node
+	// whose key signs it.
+	signers []struct{ id, key int }
 }
 
 func (f *fakeNode) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest) (*pbv.GetVerifiedResponse, error) {
@@ -29,8 +32,16 @@ func (f *fakeNode) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest)
 	if err != nil {
 		return nil, err
 	}
-	return &pbv.GetVerifiedResponse{Value: f.answer, Version: 7, Height: 1, RootDigest: f.l.GetRootDigest(),
-		SideNodes: p.SideNodes, NonMembershipLeafData: p.NonMembershipLeafData}, nil
+	root := f.l.GetRootDigest()
+	r := &pbv.GetVerifiedResponse{Value: f.answer, Version: 7, Height: 1, RootDigest: root,
+		SideNodes: p.SideNodes, NonMembershipLeafData: p.NonMembershipLeafData}
+	if req.GetCertified() {
+		for _, n := range f.signers {
+			r.Attestations = append(r.Attestations, &pbv.RootAttestation{Height: 1, Root: root, NodeId: int32(n.id),
+				Sig: sigs.SignAttest(sigs.KeyFor("s", sigs.NodeID(n.key)), 1, root)})
+		}
+	}
+	return r, nil
 }
 
 func (f *fakeNode) Set(ctx context.Context, req *pbv.SetRequest) (*pbv.SetResponse, error) {
@@ -118,5 +129,34 @@ func TestParseReadMode(t *testing.T) {
 	}
 	if _, err := ParseReadMode("x"); err == nil {
 		t.Fatal("ParseReadMode accepted x")
+	}
+}
+
+func certOpts() Options {
+	return Options{ReadMode: ReadCertified, NodeKeys: sigs.NodeKeys("s", 4), Quorum: 3}
+}
+
+func TestDriverCertifiedReadAcceptsQuorum(t *testing.T) {
+	f := newFake(t, "v", "v")
+	f.signers = []struct{ id, key int }{{1, 1}, {2, 2}, {4, 4}}
+	d := startFake(t, f, certOpts())
+	if got, err := d.Get(context.Background(), "k"); err != nil || got != "v" {
+		t.Fatalf("certified Get = %q, %v", got, err)
+	}
+}
+
+func TestDriverRejectsForgedAttestations(t *testing.T) {
+	for name, signers := range map[string][]struct{ id, key int }{
+		"one key, three ids": {{1, 1}, {2, 1}, {3, 1}},
+		"one node thrice":    {{2, 2}, {2, 2}, {2, 2}},
+		"two of three":       {{1, 1}, {2, 2}},
+		"unknown node":       {{1, 1}, {2, 2}, {9, 9}},
+	} {
+		f := newFake(t, "v", "v")
+		f.signers = signers
+		d := startFake(t, f, certOpts())
+		if got, err := d.Get(context.Background(), "k"); !errors.Is(err, ErrCertInvalid) || got != "" {
+			t.Errorf("%s: Get = %q, %v; want ErrCertInvalid", name, got, err)
+		}
 	}
 }
