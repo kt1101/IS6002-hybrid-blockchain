@@ -282,6 +282,9 @@ func (s *Server) Get(ctx context.Context, req *pbv.GetRequest) (*pbv.GetResponse
 	if err := s.stoppedErr(); err != nil {
 		return nil, err
 	}
+	if err := s.evictedErr(); err != nil {
+		return nil, err
+	}
 	if err := s.divergedErr(); err != nil {
 		return nil, err
 	}
@@ -369,6 +372,9 @@ func (s *Server) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest) (
 	if err := s.stoppedErr(); err != nil {
 		return nil, err
 	}
+	if err := s.evictedErr(); err != nil {
+		return nil, err
+	}
 	if err := s.divergedErr(); err != nil {
 		return nil, err
 	}
@@ -384,8 +390,63 @@ func (s *Server) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest) (
 		return nil, err
 	}
 	// After the proof: proof, root and version are those of the real value.
-	resp.Value = s.onRead(req.GetKey(), resp.GetValue(), false)
+	resp.Value = s.onRead(req.GetKey(), resp.GetValue(), req.GetSigned())
+	if s.att != nil {
+		resp.EvictedEpoch = s.att.acct.Epoch()
+	}
+	if req.GetSigned() {
+		if s.cfg.NodeKey == nil {
+			return nil, status.Error(codes.FailedPrecondition, "signed read: this node has no node key (--attest-every=0)")
+		}
+		// Signed over the value actually returned, so a wrong one is evidence.
+		resp.NodeId = int32(s.cfg.NodeID)
+		resp.NodeSig = sigs.SignRead(s.cfg.NodeKey, sigs.SignedReadOf(req.GetKey(), resp))
+	}
 	return resp, nil
+}
+
+// Evicted returns this node's evicted nodes and its eviction epoch (phase
+// 3); none without attestations.
+func (s *Server) Evicted(ctx context.Context, req *pbv.EvictedRequest) (*pbv.EvictedResponse, error) {
+	if s.att == nil {
+		return &pbv.EvictedResponse{}, nil
+	}
+	return &pbv.EvictedResponse{Epoch: s.att.acct.Epoch(), Nodes: s.att.acct.Nodes()}, nil
+}
+
+// ReportEvidence takes a client's evidence of a bad signed read (phase 3):
+// a read signed by node ev.Culprit for ev.Height. A signature that does not
+// verify is codes.InvalidArgument; otherwise the evidence goes on this
+// node's next block and every node judges it in the apply loop
+// (Accountant.CheckRead), so all of them evict the culprit at the same
+// height or none does. Evidence on a node this node already evicted is
+// acknowledged and not sent again.
+func (s *Server) ReportEvidence(ctx context.Context, ev *pbv.Evidence) (*pbv.EvidenceAck, error) {
+	if s.att == nil {
+		return nil, status.Error(codes.FailedPrecondition, "ReportEvidence: attestations are off (--attest-every=0)")
+	}
+	r := ev.GetRead()
+	if r == nil || r.GetNodeId() != ev.GetCulprit() || r.GetHeight() != ev.GetHeight() {
+		return nil, status.Error(codes.InvalidArgument, "ReportEvidence: the read must be node culprit's, at height")
+	}
+	pub, ok := s.cfg.NodeKeys(ev.GetCulprit())
+	if !ok || !sigs.VerifyRead(pub, r) {
+		return nil, status.Errorf(codes.InvalidArgument, "ReportEvidence: no valid signature of node %d on the read", ev.GetCulprit())
+	}
+	if _, gone := s.att.acct.Height(ev.GetCulprit()); !gone {
+		s.att.addEvidence(ev)
+	}
+	return &pbv.EvidenceAck{}, nil
+}
+
+// evictedErr is codes.PermissionDenied once this node evicted itself (phase
+// 3): the ordered log proved its state or reads wrong.
+func (s *Server) evictedErr() error {
+	if s.att != nil && s.att.acct.SelfEvicted() {
+		h, _ := s.att.acct.Height(int32(s.cfg.NodeID))
+		return status.Errorf(codes.PermissionDenied, "node %d was evicted at height %d", s.cfg.NodeID, h)
+	}
+	return nil
 }
 
 // DefaultCertifiedWait bounds how long a certified read waits.
@@ -594,6 +655,9 @@ func (s *Server) submitBlock(blk *pbv.Block) error {
 	if s.att != nil && blk.Attestations == nil {
 		blk.Attestations = s.att.take()
 	}
+	if s.att != nil && blk.Evidence == nil {
+		blk.Evidence = s.att.takeEvidence()
+	}
 	raw, err := proto.Marshal(blk)
 	if err != nil {
 		s.failBlock(blk, err)
@@ -621,7 +685,7 @@ func (s *Server) submitBlock(blk *pbv.Block) error {
 
 func (s *Server) putBackAttestations(blk *pbv.Block) {
 	if s.att != nil {
-		s.att.putBack(blk.Attestations)
+		s.att.putBack(blk.Attestations, blk.Evidence)
 	}
 }
 

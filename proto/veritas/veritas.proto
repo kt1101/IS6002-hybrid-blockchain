@@ -10,6 +10,11 @@ service Node {
     rpc BatchSet (BatchSetRequest) returns (BatchSetResponse);
     // Phase 2: a read with a Merkle proof the client checks (RQ4).
     rpc GetVerified (GetVerifiedRequest) returns (GetVerifiedResponse);
+    // Phase 3: the nodes this node evicted (in-protocol accountability).
+    rpc Evicted (EvictedRequest) returns (EvictedResponse);
+    // Phase 3: a client's evidence of a bad signed read; the node puts it
+    // on its next block, every node checks it in the apply loop.
+    rpc ReportEvidence (Evidence) returns (EvidenceAck);
 }
 
 message VerifyRequest {
@@ -39,6 +44,8 @@ message Block {
     // Phase 2 (--attest-every): root attestations of the proposing node,
     // carried by its next block (or by a block with no txs).
     repeated RootAttestation attestations = 4;
+    // Phase 3: evidence (bad signed reads) reported to the proposing node.
+    repeated Evidence evidence = 5;
 }
 
 // Phase 2: node node_id's Ed25519 signature on
@@ -90,6 +97,8 @@ message GetVerifiedRequest {
     // Phase 2 (B2): wait until the proof's height is certified (a quorum
     // of root attestations) and return the attestations.
     bool certified = 2;
+    // Phase 3: sign the response (node_sig) so a wrong one is evidence.
+    bool signed = 3;
 }
 
 message GetVerifiedResponse {
@@ -100,4 +109,45 @@ message GetVerifiedResponse {
     repeated bytes side_nodes = 5;
     bytes non_membership_leaf_data = 6;
     repeated RootAttestation attestations = 7;
+    // Phase 3: this node's eviction epoch (bumped by every eviction); a
+    // client that sees it change asks Evicted.
+    int64 evicted_epoch = 8;
+    // Phase 3 (signed = true): node node_id's Ed25519 signature on
+    // "veritas-read" 0x00 key 0x00 value 0x00 version(8B BE) height(8B BE)
+    // root sha256(side_nodes concatenated || non_membership_leaf_data).
+    bytes node_sig = 9;
+    int32 node_id = 10;
+}
+
+// Phase 3: a signed read response, as evidence.
+message SignedRead {
+    string key = 1;
+    string value = 2;
+    int64 version = 3;
+    int64 height = 4;
+    bytes root = 5;
+    repeated bytes side_nodes = 6;
+    bytes non_membership_leaf_data = 7;
+    int32 node_id = 8;
+    bytes sig = 9;
+}
+
+// Phase 3: evidence that node culprit served a wrong read at height.
+message Evidence {
+    int32 culprit = 1;
+    int64 height = 2;
+    SignedRead read = 3;
+}
+
+message EvidenceAck {
+    // Empty.
+}
+
+message EvictedRequest {
+    // Empty.
+}
+
+message EvictedResponse {
+    int64 epoch = 1;
+    repeated int32 nodes = 2;
 }

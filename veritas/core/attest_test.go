@@ -83,13 +83,15 @@ func TestCorruptNodeDiverges(t *testing.T) {
 		_, ok := nodes[3].srv.Diverged()
 		return ok
 	})
-	if _, err := getValue(nodes[3].srv, "k0"); status.Code(err) != codes.DataLoss {
-		t.Fatalf("Get on the diverged node: %v, want DataLoss", err)
+	// Phase 3: the diverged node also evicted itself (its own attestation
+	// conflicts with the certified root), and PermissionDenied comes first.
+	if c := status.Code(getValueErr(nodes[3].srv, "k0")); c != codes.DataLoss && c != codes.PermissionDenied {
+		t.Fatalf("Get on the diverged node: %v, want DataLoss or PermissionDenied", c)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), srvTestTimeout)
 	defer cancel()
-	if _, err := nodes[3].srv.GetVerified(ctx, &pbv.GetVerifiedRequest{Key: "k0"}); status.Code(err) != codes.DataLoss {
-		t.Fatalf("GetVerified on the diverged node: %v, want DataLoss", err)
+	if _, err := nodes[3].srv.GetVerified(ctx, &pbv.GetVerifiedRequest{Key: "k0"}); status.Code(err) != codes.DataLoss && status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("GetVerified on the diverged node: %v, want DataLoss or PermissionDenied", err)
 	}
 	if _, err := nodes[3].srv.Verify(ctx, &pbv.VerifyRequest{Key: "k0"}); err != nil {
 		t.Fatalf("Verify on the diverged node (the auditor still asks): %v", err)
@@ -185,8 +187,8 @@ func TestCertifiedReadFromCorruptNodeRejected(t *testing.T) {
 		if err == nil {
 			t.Fatalf("certified read %d from the corrupt node returned %q", k, r.GetValue())
 		}
-		if c := status.Code(err); c != codes.DataLoss && c != codes.DeadlineExceeded {
-			t.Fatalf("certified read from the corrupt node: %v, want DataLoss or DeadlineExceeded", err)
+		if c := status.Code(err); c != codes.DataLoss && c != codes.DeadlineExceeded && c != codes.PermissionDenied {
+			t.Fatalf("certified read from the corrupt node: %v, want DataLoss, DeadlineExceeded or PermissionDenied (evicted, phase 3)", err)
 		}
 	}
 	r, err := certifiedRead(nodes[0].srv, "k1")
@@ -227,4 +229,10 @@ func TestCertifiedReadNeedsAttestations(t *testing.T) {
 	if _, err := certifiedRead(nodes[0].srv, "k0"); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("certified read with attestations off: %v, want FailedPrecondition", err)
 	}
+}
+
+// getValueErr is the error of a Get (nil on success).
+func getValueErr(s *Server, key string) error {
+	_, err := getValue(s, key)
+	return err
 }

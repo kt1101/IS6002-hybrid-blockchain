@@ -33,6 +33,8 @@ type attestor struct {
 	key    ed25519.PrivateKey
 	idle   time.Duration
 	cert   *Certifier
+	acct   *Accountant
+	keys   func(nodeID int32) (ed25519.PublicKey, bool)
 
 	roots        map[int64][]byte    // own root at attested heights (apply loop only)
 	appliedAt    map[int64]time.Time // when this node applied them (apply loop only)
@@ -46,7 +48,8 @@ type attestor struct {
 
 	mu           sync.Mutex
 	pending      []*pbv.RootAttestation
-	pendingSince time.Time
+	pendingEv    []*pbv.Evidence // read evidence to carry on the next block (phase 3)
+	pendingSince time.Time       // oldest of pending and pendingEv
 
 	// rootMu guards byRoot and readers, shared between the apply loop and
 	// the GetVerified(certified) handlers.
@@ -65,12 +68,15 @@ func newAttestor(cfg ServerConfig) *attestor {
 	if idle <= 0 {
 		idle = DefaultAttestIdle
 	}
+	acct := NewAccountant(int32(cfg.NodeID))
 	return &attestor{
+		acct:      acct,
+		keys:      cfg.NodeKeys,
 		every:     int64(cfg.AttestEvery),
 		nodeID:    int32(cfg.NodeID),
 		key:       cfg.NodeKey,
 		idle:      idle,
-		cert:      NewCertifier(cfg.N, cfg.AttestQuorum, cfg.NodeKeys, DefaultAttestKeep, nil),
+		cert:      NewCertifier(cfg.N, cfg.AttestQuorum, cfg.NodeKeys, DefaultAttestKeep, acct.Skip),
 		roots:     make(map[int64][]byte),
 		appliedAt: make(map[int64]time.Time),
 		byRoot:    make(map[string]int64),
@@ -124,14 +130,28 @@ func (a *attestor) forget(r *certReader) {
 // applied with state root root: it certifies the block's attestations and,
 // at an attested height, signs this node's own.
 func (a *attestor) afterApply(h int64, root []byte, blk *pbv.Block, nodeID int, prove func(key []byte) certProof) {
+	certified := false
 	for _, at := range blk.GetAttestations() {
 		res := a.cert.Add(at)
 		if res.Certified {
+			certified = true
 			a.onCertified(at.GetHeight(), res.Root, nodeID)
 		}
 		if len(res.Divergent) > 0 {
-			a.onDivergent(at.GetHeight(), res)
+			a.onDivergent(at.GetHeight(), h, res)
 		}
+	}
+	// Phase 3: read evidence, judged against the certified roots in block
+	// order (held evidence first, once this block certified a height).
+	certRoot := func(ht int64) ([]byte, bool) {
+		r, _, ok := a.cert.Certified(ht)
+		return r, ok
+	}
+	if certified && a.acct.Held() > 0 {
+		a.acct.RecheckHeld(certRoot, a.keys, a.cert.MinHeight(), h)
+	}
+	for _, ev := range blk.GetEvidence() {
+		a.acct.CheckRead(ev, certRoot, a.keys, a.cert.MinHeight(), h)
 	}
 	a.lastApply.Store(time.Now().UnixNano())
 	// Attested: a block with txs at a height divisible by every, or a block
@@ -192,11 +212,16 @@ func (a *attestor) onCertified(h int64, root []byte, nodeID int) {
 	}
 }
 
-// onDivergent (apply loop): a height has attestations for another root than
-// its certified one. The first time for a height it logs the certified root
-// ("core: certified height <h> root <hex>", read by run_one.sh into
-// <tag>.certs), so an analysis can tell which root won.
-func (a *attestor) onDivergent(h int64, res AddResult) {
+// onDivergent (apply loop): height h has attestations for another root than
+// its certified one, found while applying the block at blockHeight. Every
+// divergent node is evicted at blockHeight (the same block on every node).
+// The first time for a height it also logs the certified root ("core:
+// certified height <h> root <hex>", read by run_one.sh into <tag>.certs),
+// so an analysis can tell which root won.
+func (a *attestor) onDivergent(h, blockHeight int64, res AddResult) {
+	for _, n := range res.Divergent {
+		a.acct.Evict(n, blockHeight, EvictDivergentRoot)
+	}
 	if a.conflicts[h] {
 		return
 	}
@@ -223,28 +248,51 @@ func (a *attestor) take() []*pbv.RootAttestation {
 	return p
 }
 
-// putBack re-queues attestations whose block failed to submit.
-func (a *attestor) putBack(atts []*pbv.RootAttestation) {
-	if len(atts) == 0 {
+// takeEvidence returns and clears the pending read evidence (batcher
+// goroutine).
+func (a *attestor) takeEvidence() []*pbv.Evidence {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p := a.pendingEv
+	a.pendingEv = nil
+	return p
+}
+
+// addEvidence queues read evidence for this node's next block (phase 3,
+// ReportEvidence).
+func (a *attestor) addEvidence(ev *pbv.Evidence) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.pending) == 0 && len(a.pendingEv) == 0 {
+		a.pendingSince = time.Now()
+	}
+	a.pendingEv = append(a.pendingEv, ev)
+}
+
+// putBack re-queues attestations and evidence whose block failed to submit.
+func (a *attestor) putBack(atts []*pbv.RootAttestation, evs []*pbv.Evidence) {
+	if len(atts) == 0 && len(evs) == 0 {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sent.Add(-int64(len(atts)))
-	if len(a.pending) == 0 {
+	if len(a.pending) == 0 && len(a.pendingEv) == 0 {
 		a.pendingSince = time.Now()
 	}
 	a.pending = append(atts, a.pending...)
+	a.pendingEv = append(evs, a.pendingEv...)
 }
 
 // idleBlock returns a block without txs (batcher goroutine) when this
-// node's attestations have waited at least idle for a data block (they go
-// on it), or when no block was applied for idle while the current root is
-// not attested (an idle tick: applying it makes every node attest that
-// root, so certified reads on an idle cluster are served); else nil.
+// node's attestations or read evidence have waited at least idle for a
+// data block (they go on it), or when no block was applied for idle while
+// the current root is not attested (an idle tick: applying it makes every
+// node attest that root, so certified reads on an idle cluster are served);
+// else nil.
 func (a *attestor) idleBlock() *pbv.Block {
 	a.mu.Lock()
-	due := len(a.pending) > 0 && time.Since(a.pendingSince) >= a.idle
+	due := (len(a.pending) > 0 || len(a.pendingEv) > 0) && time.Since(a.pendingSince) >= a.idle
 	a.mu.Unlock()
 	tick := a.unattested.Load() && time.Since(time.Unix(0, a.lastApply.Load())) >= a.idle
 	if !due && !tick {
@@ -254,5 +302,5 @@ func (a *attestor) idleBlock() *pbv.Block {
 	if atts == nil {
 		atts = []*pbv.RootAttestation{} // non-nil: submitBlock sends it as a tick
 	}
-	return &pbv.Block{Type: pbv.MessageType_Approve, Attestations: atts}
+	return &pbv.Block{Type: pbv.MessageType_Approve, Attestations: atts, Evidence: a.takeEvidence()}
 }

@@ -105,7 +105,7 @@ Nguyên tắc: **mọi quyết định loại node đều tất định**, đư�
 
 ### 3.3 Hệ quả của việc bị loại
 
-- Attestation của node bị loại không còn được đếm (ở các height sau height loại).
+- Attestation của node bị loại không còn được đếm: mọi attestation của nó được xử lý sau khi bị loại đều bỏ, kể cả attestation đến trễ của các height trước đó (cắt theo thứ tự block, không theo height được ký; nếu cắt theo height, với quorum f+1 phía còn lại vẫn có thể được xác nhận ở một height khác và cả hai phía bị loại).
 - Node bị loại (nếu trung thực về mã, tức F4) trả `codes.PermissionDenied` cho mọi đọc. Node độc hại có thể vẫn trả lời; client không tin nó nữa (dưới).
 - Mỗi lần loại tăng `epoch`. `GetVerifiedResponse.evicted_epoch` cho client biết có thay đổi; client gọi `Evicted` trên node đang dùng và bỏ các node trong danh sách.
 

@@ -119,14 +119,14 @@
   - `type Accountant struct` với:
     - `func NewAccountant(self int32) *Accountant`
     - `func (a *Accountant) Evict(node int32, height int64, reason string) bool`: lần đầu với node đó → ghi log `core: evicted node <c> at height <h> (<reason>)`, `epoch++`, trả true; lần sau → false.
-    - `func (a *Accountant) Skip(node int32, height int64) bool`: true khi node đã bị loại ở height < `height` (dùng làm `skip` của `Certifier`).
+    - `func (a *Accountant) Skip(node int32, height int64) bool`: true khi node đã bị loại (bất kể `height`: cắt theo thứ tự block; dùng làm `skip` của `Certifier`).
     - `func (a *Accountant) Epoch() int64`, `func (a *Accountant) Nodes() []int32` (tăng dần), `func (a *Accountant) SelfEvicted() bool`.
   - Vòng apply: với mỗi `Divergent` → `Evict(node, h_block, "divergent_root")`, `h_block` = height của block đang apply.
   - `Get`/`GetVerified` trên node có `SelfEvicted()` → `codes.PermissionDenied`. `GetVerifiedResponse.EvictedEpoch` = `Epoch()`. `Server.Evicted` trả `Epoch()`, `Nodes()`.
   - `Breakdown` thêm `Evictions int64`.
 
 - [ ] **Step 1: Viết test hỏng.**
-  - `TestAccountantEvictOnce`: `Evict(4,10,"divergent_root")` → true, epoch 1; lần hai → false, epoch 1; `Skip(4,10) == false`, `Skip(4,11) == true`.
+  - `TestAccountantEvictOnce`: `Evict(4,10,"divergent_root")` → true, epoch 1; lần hai → false, epoch 1; `Skip(4,h) == true` với mọi h (5, 10, 11).
   - `TestCorruptNodeEvictedEverywhereSameHeight` (memnet, 4 node, `AttestEvery=1`, node 4 `suffixFault{}`): sau 20 Set, mọi node có `Evicted` = `{4}` và cùng height loại (đọc qua log hook hoặc `Breakdown`); `getValue(node4,…)` trả `PermissionDenied`; `Evicted` RPC trên node 1 trả epoch 1, nodes `[4]`.
   - `TestHonestClusterEvictsNobody`: như `TestHonestClusterCertifies` của giai đoạn 2, thêm `Breakdown().Evictions == 0` trên mọi node.
   - `TestF5F4QuorumF1OneSideEvicted` (memnet, node 3 và 4 `suffixFault{}`, `AttestQuorum=2`): sau 20 Set, mọi node có cùng tập `Evicted`, và tập đó là `{3,4}` hoặc `{1,2}` (tùy root nào được xác nhận trước).

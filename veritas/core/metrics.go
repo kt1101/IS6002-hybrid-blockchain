@@ -74,6 +74,13 @@ type Breakdown struct {
 	CertifyLag       time.Duration `json:"certify_lag_ns"`
 	CertifiedHeights int64         `json:"certified_heights"`
 	DivergedHeight   int64         `json:"diverged_height"`
+
+	// Evictions (phase 3) = nodes this node evicted; EvidenceRejected /
+	// EvidenceDropped = read evidence judged forged, malformed or correct /
+	// out of the certifier window (Accountant.CheckRead).
+	Evictions        int64 `json:"evictions"`
+	EvidenceRejected int64 `json:"evidence_rejected"`
+	EvidenceDropped  int64 `json:"evidence_dropped"`
 }
 
 const (
@@ -176,6 +183,9 @@ func (s *Server) Breakdown() Breakdown {
 		b.CertifyLag = time.Duration(s.att.lag.Load())
 		b.CertifiedHeights = s.att.certs.Load()
 		b.DivergedHeight = s.att.diverged.Load()
+		b.Evictions = s.att.acct.Epoch()
+		b.EvidenceRejected = s.att.acct.EvidenceRejected()
+		b.EvidenceDropped = s.att.acct.EvidenceDropped()
 	}
 	return b
 }

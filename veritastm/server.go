@@ -126,3 +126,15 @@ func (s *server) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest) (
 }
 
 var errUnimplementedGetVerified = errors.New("GetVerified is not implemented by the original server")
+
+// Evicted and ReportEvidence are phase-3 RPCs of the shared core
+// (veritas/core); the original server does not implement them.
+func (s *server) Evicted(ctx context.Context, req *pbv.EvictedRequest) (*pbv.EvictedResponse, error) {
+	return nil, errUnimplementedPhase3
+}
+
+func (s *server) ReportEvidence(ctx context.Context, req *pbv.Evidence) (*pbv.EvidenceAck, error) {
+	return nil, errUnimplementedPhase3
+}
+
+var errUnimplementedPhase3 = errors.New("phase 3 RPCs are not implemented by the original server")

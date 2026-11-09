@@ -217,6 +217,17 @@ func (c *Certifier) Duplicates() int64 {
 	return c.duplicates
 }
 
+// MinHeight is the lowest height the Certifier still keeps (older ones were
+// evicted from its window).
+func (c *Certifier) MinHeight() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if m := c.maxHeight - int64(c.keep) + 1; m > 1 {
+		return m
+	}
+	return 1
+}
+
 // Skipped is the number of attestations dropped by skip (evicted nodes).
 func (c *Certifier) Skipped() int64 {
 	c.mu.Lock()

@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	pbv "hybrid/proto/veritas"
 )
 
 // DefaultSeed is the key seed of the experiments (run_one.sh KEY_SEED).
@@ -165,5 +167,59 @@ func NodeKeys(seed string, n int) func(nodeID int32) (ed25519.PublicKey, bool) {
 			return nil, false
 		}
 		return pubs[id], true
+	}
+}
+
+// ReadBytes is what a node signs on a read response (phase 3, signed
+// reads): "veritas-read" 0x00 key 0x00 value 0x00 version (8 bytes BE)
+// height (8 bytes BE) root sha256(side nodes concatenated ||
+// non-membership leaf data). The proof is hashed so the signed bytes stay
+// short.
+func ReadBytes(key, value string, version, height int64, root []byte, sideNodes [][]byte, nonMember []byte) []byte {
+	h := sha256.New()
+	for _, n := range sideNodes {
+		h.Write(n)
+	}
+	h.Write(nonMember)
+	b := make([]byte, 0, 13+len(key)+1+len(value)+1+16+len(root)+sha256.Size)
+	b = append(b, "veritas-read\x00"...)
+	b = append(b, key...)
+	b = append(b, 0)
+	b = append(b, value...)
+	b = append(b, 0)
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], uint64(version))
+	b = append(b, n[:]...)
+	binary.BigEndian.PutUint64(n[:], uint64(height))
+	b = append(b, n[:]...)
+	b = append(b, root...)
+	return h.Sum(b)
+}
+
+func readBytesOf(r *pbv.SignedRead) []byte {
+	return ReadBytes(r.GetKey(), r.GetValue(), r.GetVersion(), r.GetHeight(), r.GetRoot(),
+		r.GetSideNodes(), r.GetNonMembershipLeafData())
+}
+
+// SignRead signs ReadBytes of r with k (r.Sig is ignored).
+func SignRead(k ed25519.PrivateKey, r *pbv.SignedRead) []byte {
+	return ed25519.Sign(k, readBytesOf(r))
+}
+
+// VerifyRead reports whether r.Sig is pub's signature on r.
+func VerifyRead(pub ed25519.PublicKey, r *pbv.SignedRead) bool {
+	if r == nil || len(pub) != ed25519.PublicKeySize || len(r.GetSig()) != ed25519.SignatureSize {
+		return false
+	}
+	return ed25519.Verify(pub, readBytesOf(r), r.GetSig())
+}
+
+// SignedReadOf is the SignedRead of a signed GetVerified response for key
+// (the evidence a client sends when the response does not verify).
+func SignedReadOf(key string, resp *pbv.GetVerifiedResponse) *pbv.SignedRead {
+	return &pbv.SignedRead{
+		Key: key, Value: resp.GetValue(), Version: resp.GetVersion(), Height: resp.GetHeight(),
+		Root: resp.GetRootDigest(), SideNodes: resp.GetSideNodes(),
+		NonMembershipLeafData: resp.GetNonMembershipLeafData(), NodeId: resp.GetNodeId(), Sig: resp.GetNodeSig(),
 	}
 }
