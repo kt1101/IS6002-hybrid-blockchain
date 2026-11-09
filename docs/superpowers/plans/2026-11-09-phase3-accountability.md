@@ -42,7 +42,7 @@
 
 - [ ] **Step 1: Kiểm tra RAM Docker VM.** Chạy `docker info --format '{{.MemTotal}}'`. Ghi giá trị vào NOTES; < 10 GiB thì ghi "N=7 bỏ" và mọi task sau dùng N=4.
 - [ ] **Step 2: Build ảnh.** Chạy `experiments/build.sh`. Kỳ vọng: exit 0, các ảnh `hbdb-*` có thời điểm build mới.
-- [ ] **Step 3: Chạy toàn bộ test Go trong container.** `docker run --rm -v $PWD:/src -w /src hbdb-build go test -race ./...` và `docker run --rm -v $PWD/bft2node:/src -w /src hbdb-bft2-build go test -race ./...`. Kỳ vọng: PASS, kể cả `TestForwardedBlockCommitsFromAnyLeader`, `TestForwardSurvivesOneCrash`. Lỗi thì sửa theo superpowers:systematic-debugging, mỗi sửa một commit `fix(phase2): ...`.
+- [ ] **Step 3: Chạy toàn bộ test Go trong container.** `docker run --rm -v $PWD:/src -w /src hbdb-build go test -race ./consensus/... ./veritas/... ./cmd/auditor ./cmd/veritas` (không dùng `./...`: các gói cũ `BlockchainDB/`, `tso_zookeeper/` thiếu mục go.sum, như README) và `docker run --rm -v $PWD/bft2node:/src -w /src hbdb-bft2-build go test -race ./...`. Kỳ vọng: PASS, kể cả `TestForwardedBlockCommitsFromAnyLeader`, `TestForwardSurvivesOneCrash`. Lỗi thì sửa theo superpowers:systematic-debugging, mỗi sửa một commit `fix(phase2): ...`.
 - [ ] **Step 4: Kiểm tra nhất quán.** Với `b` ∈ {kafka, raft, tendermint, bft2}: `ATTEST_EVERY=1 MEM=1g BATCH_FLUSH=100ms experiments/check_consistency.sh $b`. Kỳ vọng: `CONSISTENT` cả 4, không dòng `core: diverged`.
 - [ ] **Step 5: Commit NOTES.** `git commit -m "docs: phase 2 build, tests and consistency on M3"`.
 
