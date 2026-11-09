@@ -374,3 +374,10 @@ Theo spec `docs/superpowers/specs/2026-11-03-phase2-fair-comparison-and-verifiab
 - Attestation: chỉ ký các block có tx ở height chia hết cho K, cộng với block không có tx khi root đã đổi từ lần ký trước; node rảnh có root chưa được ký gửi một block rỗng ("tick"). Nếu ký cả block chỉ chứa attestation thì cụm rảnh sinh block vô hạn; nếu không có tick thì đọc có xác nhận với K > 1 trên cụm rảnh không bao giờ xong.
 - Đọc có xác nhận: proof luôn được lấy tại một height đã ký (ngay nếu root hiện tại là root đã ký, nếu không thì vòng apply lấy proof ngay sau height được ký kế tiếp), rồi chờ xác nhận, tổng tối đa 5 s.
 - E8 và E9 tự gọi lại chính mình cho mỗi cặp cấu hình, mỗi cặp một EXP (`e8-<sigs>-<read>`, `e9-a<K>-<read>`), vì CSV không có cột cho chúng.
+
+## Giai đoạn 2: chạy trên M3 (giai đoạn 3, Task 1–2)
+
+### Môi trường
+
+- Docker VM (2026-11-09, `docker info`): `MemTotal` = 8.217.890.816 byte (7,65 GiB), 11 CPU. Nhỏ hơn 10 GiB nên **N=7 bỏ**: với `MEM=1g`, N=7 cần ~7 GiB cho node cộng TSO/client, không vừa VM. Mọi thí nghiệm giai đoạn 3 (E10–E12) và các lượt giai đoạn 2 chạy lại trên M3 chỉ dùng N=4.
+- Session Claude Code không truy cập được Docker (sandbox chặn `/Users/yuji/.docker/run/docker.sock`), nên các lệnh Docker (build, test Go trong `hbdb-build`, `check_consistency.sh`, driver thí nghiệm) do người dùng chạy trên terminal của họ; kết quả được ghi lại ở đây.
