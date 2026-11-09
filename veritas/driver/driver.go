@@ -37,9 +37,12 @@ const (
 	ReadVerified
 	// ReadCertified also requires a quorum of root attestations (phase 2, B2).
 	ReadCertified
+	// ReadQuorum (phase 3) reads plain Gets from f+1 nodes and compares
+	// them; the comparison is ycsbbench's reader, the driver's Get is plain.
+	ReadQuorum
 )
 
-// ParseReadMode parses plain|verified|certified ("" is plain).
+// ParseReadMode parses plain|verified|certified|quorum ("" is plain).
 func ParseReadMode(s string) (ReadMode, error) {
 	switch s {
 	case "", "plain":
@@ -48,8 +51,10 @@ func ParseReadMode(s string) (ReadMode, error) {
 		return ReadVerified, nil
 	case "certified":
 		return ReadCertified, nil
+	case "quorum":
+		return ReadQuorum, nil
 	}
-	return ReadPlain, fmt.Errorf("driver: unknown read mode %q (want plain, verified or certified)", s)
+	return ReadPlain, fmt.Errorf("driver: unknown read mode %q (want plain, verified, certified or quorum)", s)
 }
 
 // Options are the phase-2 additions of a Driver (zero value: phase 1).
@@ -177,6 +182,40 @@ func (d *Driver) GetCertified(ctx context.Context, key string) (string, error) {
 		return "", err
 	}
 	return res.GetValue(), nil
+}
+
+// GetCertifiedResp is GetCertified that returns the response (phase 3):
+// signed asks the node to sign it (GetVerifiedRequest.signed). A response
+// whose proof or certificate does not verify comes back WITH its
+// ErrProofInvalid / ErrCertInvalid error, so a client can report a signed
+// one as evidence; an RPC error returns no response.
+func (d *Driver) GetCertifiedResp(ctx context.Context, key string, signed bool) (*pbv.GetVerifiedResponse, error) {
+	res, err := d.dbCli.GetVerified(ctx, &pbv.GetVerifiedRequest{Key: key, Certified: true, Signed: signed})
+	if err != nil {
+		return nil, err
+	}
+	if err := d.checkProof(key, res); err != nil {
+		return res, err
+	}
+	if err := d.checkCert(res); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+// Evicted returns the node's eviction epoch and evicted nodes (phase 3).
+func (d *Driver) Evicted(ctx context.Context) (int64, []int32, error) {
+	res, err := d.dbCli.Evicted(ctx, &pbv.EvictedRequest{})
+	if err != nil {
+		return 0, nil, err
+	}
+	return res.GetEpoch(), res.GetNodes(), nil
+}
+
+// ReportEvidence sends evidence of a bad signed read to the node (phase 3).
+func (d *Driver) ReportEvidence(ctx context.Context, ev *pbv.Evidence) error {
+	_, err := d.dbCli.ReportEvidence(ctx, ev)
+	return err
 }
 
 func (d *Driver) checkCert(res *pbv.GetVerifiedResponse) error {

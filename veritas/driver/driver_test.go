@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -22,12 +23,16 @@ type fakeNode struct {
 	value  string // what the ledger holds
 	answer string // what GetVerified returns as value
 	sets   []*pbv.SetRequest
+	// phase 3
+	evidence []*pbv.Evidence
+	signed   []bool // GetVerifiedRequest.signed of every call
 	// signers: the attestations of a certified read: node id and the node
 	// whose key signs it.
 	signers []struct{ id, key int }
 }
 
 func (f *fakeNode) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest) (*pbv.GetVerifiedResponse, error) {
+	f.signed = append(f.signed, req.GetSigned())
 	p, err := f.l.ProveKey([]byte(req.GetKey()))
 	if err != nil {
 		return nil, err
@@ -42,6 +47,15 @@ func (f *fakeNode) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest)
 		}
 	}
 	return r, nil
+}
+
+func (f *fakeNode) Evicted(ctx context.Context, req *pbv.EvictedRequest) (*pbv.EvictedResponse, error) {
+	return &pbv.EvictedResponse{Epoch: 2, Nodes: []int32{3, 4}}, nil
+}
+
+func (f *fakeNode) ReportEvidence(ctx context.Context, ev *pbv.Evidence) (*pbv.EvidenceAck, error) {
+	f.evidence = append(f.evidence, ev)
+	return &pbv.EvidenceAck{}, nil
 }
 
 func (f *fakeNode) Set(ctx context.Context, req *pbv.SetRequest) (*pbv.SetResponse, error) {
@@ -122,7 +136,7 @@ func TestDriverSignsSets(t *testing.T) {
 }
 
 func TestParseReadMode(t *testing.T) {
-	for s, want := range map[string]ReadMode{"": ReadPlain, "plain": ReadPlain, "verified": ReadVerified, "certified": ReadCertified} {
+	for s, want := range map[string]ReadMode{"": ReadPlain, "plain": ReadPlain, "verified": ReadVerified, "certified": ReadCertified, "quorum": ReadQuorum} {
 		if got, err := ParseReadMode(s); err != nil || got != want {
 			t.Fatalf("ParseReadMode(%q) = %v, %v", s, got, err)
 		}
@@ -158,5 +172,55 @@ func TestDriverRejectsForgedAttestations(t *testing.T) {
 		if got, err := d.Get(context.Background(), "k"); !errors.Is(err, ErrCertInvalid) || got != "" {
 			t.Errorf("%s: Get = %q, %v; want ErrCertInvalid", name, got, err)
 		}
+	}
+}
+
+// ---- phase 3 ----
+
+func TestDriverGetCertifiedRespReturnsResponseOnBadProof(t *testing.T) {
+	f := newFake(t, "v", "evil")
+	f.signers = []struct{ id, key int }{{1, 1}, {2, 2}, {3, 3}}
+	d := startFake(t, f, certOpts())
+	r, err := d.GetCertifiedResp(context.Background(), "k", true)
+	if !errors.Is(err, ErrProofInvalid) || r == nil || r.GetValue() != "evil" {
+		t.Fatalf("GetCertifiedResp on a lying node = %v, %v; want the response and ErrProofInvalid", r, err)
+	}
+	if len(f.signed) != 1 || !f.signed[0] {
+		t.Fatalf("signed flag not sent: %v", f.signed)
+	}
+	f2 := newFake(t, "v", "v")
+	f2.signers = f.signers
+	d2 := startFake(t, f2, certOpts())
+	if r, err := d2.GetCertifiedResp(context.Background(), "k", false); err != nil || r.GetValue() != "v" {
+		t.Fatalf("GetCertifiedResp on an honest node = %v, %v", r, err)
+	}
+}
+
+func TestDriverEvictedAndReportEvidence(t *testing.T) {
+	f := newFake(t, "v", "v")
+	d := startFake(t, f, Options{})
+	epoch, nodes, err := d.Evicted(context.Background())
+	if err != nil || epoch != 2 || len(nodes) != 2 || nodes[0] != 3 || nodes[1] != 4 {
+		t.Fatalf("Evicted = %d %v %v", epoch, nodes, err)
+	}
+	ev := &pbv.Evidence{Culprit: 4, Height: 9, Read: &pbv.SignedRead{Key: "k", NodeId: 4, Height: 9}}
+	if err := d.ReportEvidence(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.evidence) != 1 || f.evidence[0].GetCulprit() != 4 {
+		t.Fatalf("evidence not delivered: %v", f.evidence)
+	}
+}
+
+func TestDriverQuorumModeGetIsPlain(t *testing.T) {
+	// The quorum comparison lives in ycsbbench's reader; the driver's Get in
+	// quorum mode is the plain Get.
+	f := newFake(t, "v", "v")
+	d := startFake(t, f, Options{ReadMode: ReadQuorum})
+	if _, err := d.Get(context.Background(), "k"); err == nil || !strings.Contains(err.Error(), "Unimplemented") {
+		t.Fatalf("quorum-mode Get should call the plain Get (unimplemented by the fake): %v", err)
+	}
+	if len(f.signed) != 0 {
+		t.Fatal("quorum-mode Get called GetVerified")
 	}
 }

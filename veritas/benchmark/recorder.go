@@ -320,8 +320,15 @@ func (r *Recorder) OpSummaries() []OpSummary {
 // proof-check time of the verified reads (0 without them);
 // proof_errors / cert_errors / dataloss_errors = in-window errors of the
 // kinds ErrKindProof / ErrKindCert / ErrKindDataLoss (reads the client
-// rejected, or a diverged node refused).
-const OpsCSVHeader = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped,read_bytes_mean,verify_cpu_us_mean,proof_errors,cert_errors,dataloss_errors"
+// rejected, or a diverged node refused); phase 3 (ycsbbench reader, whole
+// run phase): rejected_reads = certified reads the client refused (proof or
+// certificate), quorum_errors = quorum reads whose values differed,
+// failovers = moves of a reader to another node, wrong_before_failover =
+// corrupt values accepted from a node the reader left afterwards,
+// evidence_sent = bad-read evidence reported, cert_timeouts = certified
+// reads that timed out (DeadlineExceeded).
+const OpsCSVHeader = "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped,read_bytes_mean,verify_cpu_us_mean,proof_errors,cert_errors,dataloss_errors," +
+	"rejected_reads,quorum_errors,failovers,wrong_before_failover,evidence_sent,cert_timeouts"
 
 // OpsExtra are the per-run columns of the ops sidecar.
 type OpsExtra struct {
@@ -331,6 +338,13 @@ type OpsExtra struct {
 	ProofErrors      int64
 	CertErrors       int64
 	DataLossErrors   int64
+
+	RejectedReads       int64
+	QuorumErrors        int64
+	Failovers           int64
+	WrongBeforeFailover int64
+	EvidenceSent        int64
+	CertTimeouts        int64
 }
 
 // ErrorKindCount is the number of in-window errors of kind msg.
@@ -348,7 +362,7 @@ func WriteOpsCSV(path string, ops []OpSummary, x OpsExtra) error {
 	sb.WriteString(OpsCSVHeader)
 	sb.WriteByte('\n')
 	for _, o := range ops {
-		fmt.Fprintf(&sb, "%s,%d,%s,%s,%s,%s,%d,%d,%d,%s,%s,%d,%d,%d\n", o.Op, o.Count,
+		fmt.Fprintf(&sb, "%s,%d,%s,%s,%s,%s,%d,%d,%d,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d\n", o.Op, o.Count,
 			strconv.FormatFloat(o.TPS, 'f', 2, 64),
 			strconv.FormatFloat(o.LatMeanMs, 'f', 3, 64),
 			strconv.FormatFloat(o.LatP50Ms, 'f', 3, 64),
@@ -356,7 +370,8 @@ func WriteOpsCSV(path string, ops []OpSummary, x OpsExtra) error {
 			o.Errors, o.Aborted, x.Dropped,
 			strconv.FormatFloat(x.ReadBytesMean, 'f', 1, 64),
 			strconv.FormatFloat(x.VerifyMicrosMean, 'f', 1, 64),
-			x.ProofErrors, x.CertErrors, x.DataLossErrors)
+			x.ProofErrors, x.CertErrors, x.DataLossErrors,
+			x.RejectedReads, x.QuorumErrors, x.Failovers, x.WrongBeforeFailover, x.EvidenceSent, x.CertTimeouts)
 	}
 	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }
