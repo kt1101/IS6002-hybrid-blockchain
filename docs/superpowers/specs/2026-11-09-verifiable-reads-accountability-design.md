@@ -2,7 +2,7 @@
 
 - **Ngày:** 2026-11-09
 - **Bối cảnh:** Giai đoạn tiếp theo của luận văn, xây trên baseline `docs/superpowers/specs/2026-10-29-pluggable-consensus-experiments-design.md` (E1–E6, dữ liệu cuối ở `results/final/`, commit đo `e7baa60`).
-- **Trạng thái:** Đã duyệt thiết kế qua 3 phần; chờ duyệt bản spec.
+- **Trạng thái:** Được thay bằng `2026-11-09-phase3-accountability-design.md` (bản này viết khi chưa biết giai đoạn 2 trên nhánh `claude/charming-hopper-hy6x4e` đã có attestation, certifier và đọc có xác nhận).
 
 ## 1. Mục tiêu
 
