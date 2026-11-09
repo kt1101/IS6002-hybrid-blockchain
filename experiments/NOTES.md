@@ -381,3 +381,12 @@ Theo spec `docs/superpowers/specs/2026-11-03-phase2-fair-comparison-and-verifiab
 
 - Docker VM (2026-11-09, `docker info`): `MemTotal` = 8.217.890.816 byte (7,65 GiB), 11 CPU. Nhỏ hơn 10 GiB nên **N=7 bỏ**: với `MEM=1g`, N=7 cần ~7 GiB cho node cộng TSO/client, không vừa VM. Mọi thí nghiệm giai đoạn 3 (E10–E12) và các lượt giai đoạn 2 chạy lại trên M3 chỉ dùng N=4.
 - Session Claude Code không truy cập được Docker (sandbox chặn `/Users/yuji/.docker/run/docker.sock`), nên các lệnh Docker (build, test Go trong `hbdb-build`, `check_consistency.sh`, driver thí nghiệm) do người dùng chạy trên terminal của họ; kết quả được ghi lại ở đây.
+
+### Build, test và kiểm tra nhất quán (Task 1, 2026-11-09)
+
+- `experiments/build.sh`: đạt (ảnh `hbdb-build`, `hbdb-bft2-build`, `hbdb-node` build lại từ nhánh này).
+- Test Go (trong `hbdb-build`, `-race`): `./consensus/... ./veritas/... ./cmd/auditor ./cmd/veritas` đều `ok` (17 gói có test). Không dùng `./...`: các gói cũ `BlockchainDB/`, `tso_zookeeper/` thiếu mục go.sum (như README). `bft2node` (`hbdb-bft2-build`): 4/4 gói `ok`, gồm `TestForwardedBlockCommitsFromAnyLeader`, `TestForwardSurvivesOneCrash` (lần đầu chạy được, phiên hiện thực giai đoạn 2 không có Docker).
+- Dữ liệu YCSB: `results/ycsb/*.dat` của checkout chính (10k bản ghi, giai đoạn 1) chép sang worktree (SHA-256 `a.load.dat` trùng).
+- `ATTEST_EVERY=1 MEM=1g BATCH_FLUSH=100ms experiments/check_consistency.sh <b>`: kafka, raft, tendermint, bft2 đều **CONSISTENT**, không có dòng `core: diverged` trong log.
+- `gofmt -l veritas cmd` chỉ liệt kê 5 file gốc không sửa (`veritas/benchmark/util.go`, `veritas/server.go`, `cmd/kafkabench`, `cmd/mongodb`, `cmd/veritastm-mongodb`).
+
