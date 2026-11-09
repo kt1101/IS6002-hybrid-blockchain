@@ -25,7 +25,9 @@
 #                        (N=4: 1, N=7: 2): f+1 corrupt nodes is F5-F4
 #   F5-F2:node3,node4@60 beyond the threshold (BFT backends only: tendermint,
 #   F5-F4:node3,node4@60 bft2): F2 (network) resp. F4 (corrupt) on exactly
-#                        f+1 nodes, f = floor((N-1)/3) (N=4: 2 nodes, N=7: 3)
+#                        f+1 nodes, f = floor((N-1)/3) (N=4: 2 nodes, N=7: 3);
+#                        F5-F4 also on kafka/raft when ATTEST_EVERY > 0 (phase
+#                        3: it tests the attestation quorum)
 #   F6:node4@60          read-path lie (phase 3; kafka, raft, tendermint,
 #                        bft2): veritas --fault=readlie (ReadFault.OnRead
 #                        appends -CORRUPT to every value the node returns to a
@@ -205,8 +207,14 @@ fault_parse() {
       if [ "$FAULT_KIND" = F6 ]; then FAULT_POLICY=readlie; else FAULT_POLICY=readlie-evasive; fi
       ;;
     F5)
+      # Phase 3 (E12): with attestations on (ATTEST_EVERY > 0), F5-F4 also
+      # runs on the CFT core backends: it tests the attestation quorum, not
+      # the consensus protocol.
       case "$backend" in
         tendermint | bft2) ;;
+        kafka | raft)
+          [ "$FAULT_SUB" = F4 ] && [ "${ATTEST_EVERY:-0}" != 0 ] ||
+            die "FAULT='$spec': F5 (f+1 faulty nodes) is for the BFT backends only (tendermint, bft2), got BACKEND=$backend (F5-F4 on kafka/raft needs ATTEST_EVERY > 0)" ;;
         *) die "FAULT='$spec': F5 (f+1 faulty nodes) is for the BFT backends only (tendermint, bft2), got BACKEND=$backend" ;;
       esac
       [ "$n" -ge 4 ] || die "FAULT='$spec': F5 needs N >= 4 (f = floor((N-1)/3) >= 1), got N=$n"

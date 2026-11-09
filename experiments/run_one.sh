@@ -80,7 +80,17 @@
 #                 node signs its root after every K-th block and certifies
 #                 the others' (fail-stop "diverged" on a certified root that
 #                 is not its own); > 0 also copies every "core: diverged at
-#                 height" line of the node logs to <tag>.diverged.
+#                 height" line of the node logs to <tag>.diverged, every
+#                 "core: evicted node" line to <tag>.evict and every "core:
+#                 certified height" line to <tag>.certs (phase 3).
+# ATTEST_QUORUM=auto (phase 3; needs ATTEST_EVERY > 0 unless auto): veritas
+#                 --attest-quorum = f+1 or 2f+1 at this N (lib.sh
+#                 hbdb_attest_quorum; auto = veritas' default 2f+1).
+# FAILOVER=0, SIGN_READS=off (phase 3, core backends): ycsbbench --failover
+#                 (reads move to the next node after a refused or wrong read)
+#                 and --sign-reads=on-failure|always. READ_MODE=quorum reads
+#                 a plain Get from f+1 nodes and compares the values. Not CSV
+#                 columns: one EXP per combination, like READ_MODE.
 # PRE_DOWN_HOOK (default empty): path of an executable run once, after a
 #                 successful run's CSV row was appended and BEFORE the cluster
 #                 is torn down (down.sh), with EXP, BACKEND, N, F, CLIENTS,
@@ -244,6 +254,9 @@ VERIFY_SIGS="${VERIFY_SIGS:-none}"
 READ_MODE="${READ_MODE:-plain}"
 KEY_SEED="${KEY_SEED:-hbdb-phase2}"
 ATTEST_EVERY="${ATTEST_EVERY:-0}"
+ATTEST_QUORUM="${ATTEST_QUORUM:-auto}"
+FAILOVER="${FAILOVER:-0}"
+SIGN_READS="${SIGN_READS:-off}"
 if [ "$VERIFY_SIGS" = none ]; then SIGN="${SIGN:-0}"; else SIGN="${SIGN:-1}"; fi
 KAFKA_CPUS="${KAFKA_CPUS:-2}"
 KAFKA_MEM="${KAFKA_MEM:-1536m}"
@@ -282,7 +295,9 @@ if [ -n "$TM_TIMEOUT_COMMIT" ]; then
   [ "$BACKEND" = tendermint ] || die "TM_TIMEOUT_COMMIT applies to BACKEND=tendermint only, got $BACKEND"
 fi
 case "$VERIFY_SIGS" in none | ingress | all) ;; *) die "VERIFY_SIGS must be none, ingress or all, got '$VERIFY_SIGS'" ;; esac
-case "$READ_MODE" in plain | verified | certified) ;; *) die "READ_MODE must be plain, verified or certified, got '$READ_MODE'" ;; esac
+case "$READ_MODE" in plain | verified | certified | quorum) ;; *) die "READ_MODE must be plain, verified, certified or quorum, got '$READ_MODE'" ;; esac
+case "$FAILOVER" in 0 | 1) ;; *) die "FAILOVER must be 0 or 1, got '$FAILOVER'" ;; esac
+case "$SIGN_READS" in off | on-failure | always) ;; *) die "SIGN_READS must be off, on-failure or always, got '$SIGN_READS'" ;; esac
 case "$SIGN" in 0 | 1) ;; *) die "SIGN must be 0 or 1, got '$SIGN'" ;; esac
 hbdb_require_uint ATTEST_EVERY "$ATTEST_EVERY"
 if [ "$ATTEST_EVERY" != 0 ]; then
@@ -291,9 +306,13 @@ fi
 if [ "$READ_MODE" = certified ] && [ "$ATTEST_EVERY" = 0 ]; then
   die "READ_MODE=certified needs ATTEST_EVERY > 0 (no attestations to certify the reads)"
 fi
+ATTEST_QUORUM_N="$(hbdb_attest_quorum "$N" "$ATTEST_QUORUM")" || exit 1
+if [ "$ATTEST_QUORUM" != auto ] && [ "$ATTEST_EVERY" = 0 ]; then
+  die "ATTEST_QUORUM=$ATTEST_QUORUM needs ATTEST_EVERY > 0 (no attestations to count)"
+fi
 echo "$KEY_SEED" | grep -Eq '^[A-Za-z0-9._-]+$' || die "KEY_SEED must match [A-Za-z0-9._-]+, got '$KEY_SEED'"
-if [ "$VERIFY_SIGS" != none ] || [ "$READ_MODE" != plain ]; then
-  hbdb_backend_has_fault_policy "$BACKEND" || die "VERIFY_SIGS/READ_MODE need a core backend (kafka, raft, tendermint, bft2), got $BACKEND"
+if [ "$VERIFY_SIGS" != none ] || [ "$READ_MODE" != plain ] || [ "$FAILOVER" != 0 ] || [ "$SIGN_READS" != off ]; then
+  hbdb_backend_has_fault_policy "$BACKEND" || die "VERIFY_SIGS/READ_MODE/FAILOVER/SIGN_READS need a core backend (kafka, raft, tendermint, bft2), got $BACKEND"
 fi
 if [ "$VERIFY_SIGS" != none ] && [ "$SIGN" != 1 ]; then
   log "warning: VERIFY_SIGS=$VERIFY_SIGS with SIGN=0: every Set will be refused"
@@ -341,7 +360,7 @@ watchdog_secs=$(($(dur_seconds "$LOAD_TIMEOUT") + $(dur_seconds "$SETTLE_TIMEOUT
   die "CPUS must be a positive number, got '$CPUS'"
 { echo "$MEM" | grep -Eq '^[0-9]+(\.[0-9]+)?[mMgG]$' && awk -v m="${MEM%?}" 'BEGIN { exit !(m > 0) }'; } ||
   die "MEM must be a positive number with suffix m, g, M or G (e.g. 768m, 2g), got '$MEM'"
-fault_parse "$FAULT" "$BACKEND" "$N" "$(dur_seconds "$DURATION")"
+ATTEST_EVERY="$ATTEST_EVERY" fault_parse "$FAULT" "$BACKEND" "$N" "$(dur_seconds "$DURATION")"
 # Nodes whose veritas runs with --fault armed (FaultPolicy faults; up.sh ->
 # gen_compose.py --node-fault); the injector activates it at AT.
 NODE_FAULTS="$(fault_node_faults)"
@@ -375,7 +394,7 @@ run_file="$HBDB_YCSB_DIR/$WORKLOAD.run.dat"
 [ -s "$load_file" ] || die "missing $load_file (run experiments/ycsb/gen.sh)"
 [ -s "$run_file" ] || die "missing $run_file (run experiments/ycsb/gen.sh)"
 
-export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT VERIFY_SIGS KEY_SEED ATTEST_EVERY YCSB_DIR="$HBDB_YCSB_DIR"
+export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT VERIFY_SIGS KEY_SEED ATTEST_EVERY ATTEST_QUORUM_N YCSB_DIR="$HBDB_YCSB_DIR"
 
 tag="${BACKEND}_n${N}_f${F}_c${CLIENTS}_b${BLOCK_SIZE}_w${WORKLOAD}_rtt${RTT_MS}_${FAULT}_${COMMIT_MODE}_r${REP}"
 # A non-default BATCH_FLUSH is told apart in the file names (not in the CSV).
@@ -417,6 +436,8 @@ snap_stop="$exp_dir/.$tag.snap.stop"     # aborts a pending window-start snapsho
 final_audit_file="$exp_dir/$tag.final_audit" # auditor --once output, FAULT=none (kept)
 leaders_file="$exp_dir/$tag.leaders"     # raft leader changes, FAULT != none (kept)
 diverged_file="$exp_dir/$tag.diverged"   # "core: diverged" log lines, ATTEST_EVERY > 0 (kept)
+evict_file="$exp_dir/$tag.evict"         # "core: evicted node" log lines, ATTEST_EVERY > 0 (kept)
+certs_file="$exp_dir/$tag.certs"         # "core: certified height" log lines, ATTEST_EVERY > 0 (kept)
 lock_dir="$HBDB_RESULTS_RAW/.hbdb.lock"
 mkdir -p "$exp_dir"
 
@@ -855,6 +876,13 @@ rate_args="$rate_args --read-mode=$READ_MODE --key-seed=$KEY_SEED"
 if [ "$SIGN" = 1 ]; then
   rate_args="$rate_args --sign"
 fi
+# Phase 3 client flags only when set, so a phase 2 ycsbbench still runs.
+if [ "$FAILOVER" = 1 ]; then
+  rate_args="$rate_args --failover"
+fi
+if [ "$SIGN_READS" != off ]; then
+  rate_args="$rate_args --sign-reads=$SIGN_READS"
+fi
 log "starting ycsbbench: $CLIENTS clients over $N nodes, mode $(hbdb_bench_mode "$BACKEND")"
 hbdb_compose exec -T client ycsbbench \
   --load-path="/ycsb/$WORKLOAD.load.dat" --run-path="/ycsb/$WORKLOAD.run.dat" \
@@ -974,7 +1002,7 @@ final_audit() {
 # check_validity: the FAULT=none sanity gate of the header. Logs every
 # reason and returns 1 if the run must not get a row.
 check_validity() {
-  local line wok werr wab w d zero i hits bad=0 arc
+  local line wok werr wab w d zero i hits bad=0 arc rej
   if [ ! -s "$ops_file" ] || ! head -n 1 "$ops_file" | grep -q '^op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted\(,\|$\)'; then
     log "invalid run: ycsbbench wrote no usable $ops_file (image older than this harness? rebuild with experiments/build.sh)"
     return 1
@@ -1016,6 +1044,18 @@ check_validity() {
     fi
     i=$((i + 1))
   done
+  # Phase 3: without a fault no node may be evicted and the client may reject
+  # no read (rejected_reads of .ops.csv, when the column is there).
+  if [ "$ATTEST_EVERY" != 0 ] && [ -s "$evict_file" ]; then
+    log "invalid run: $(grep -c . "$evict_file") eviction(s) without a fault (see $evict_file)"
+    bad=1
+  fi
+  rej="$(awk -F, 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "rejected_reads") c = i; next }
+    c && $1 == "read" { print $c + 0; exit }' "$ops_file" 2>/dev/null || true)"
+  if [ -n "$rej" ] && [ "$rej" -gt 0 ]; then
+    log "invalid run: $rej read(s) rejected by the client without a fault (rejected_reads of $ops_file)"
+    bad=1
+  fi
   [ "$bad" = 0 ] || return 1
   if hbdb_backend_has_fault_policy "$BACKEND"; then
     log "auditor --once on $addrs (after ${AUDIT_WAIT_SECS}s), output $final_audit_file"
@@ -1045,6 +1085,30 @@ collect_leaders() {
     i=$((i + 1))
   done
   [ -s "$leaders_file" ] || log "warning: no 'entering leader state' line in the node logs; $leaders_file is empty"
+}
+
+# collect_lines FILE PATTERN: every log line of every node matching PATTERN
+# (grep -E; docker timestamps, `nodeK <compose line>`) to FILE.
+collect_lines() {
+  local i=1
+  : >"$1"
+  while [ "$i" -le "$N" ]; do
+    hbdb_compose logs --no-color --timestamps "node$i" 2>/dev/null | grep -E "$2" |
+      sed "s/^/node$i /" >>"$1" || true
+    i=$((i + 1))
+  done
+}
+
+# collect_accountability (phase 3, ATTEST_EVERY > 0): the "core: evicted
+# node <c> at height <h> (<reason>)" lines to $evict_file and the "core:
+# certified height <h> root <hex>" lines to $certs_file
+# (experiments/plot/rq6.py); empty files when there are none.
+collect_accountability() {
+  collect_lines "$evict_file" 'core: evicted node [0-9]+ at height'
+  collect_lines "$certs_file" 'core: certified height [0-9]+ root'
+  if [ -s "$evict_file" ]; then
+    log "evictions: $(grep -c . "$evict_file") line(s) (see $evict_file)"
+  fi
 }
 
 # collect_diverged: ATTEST_EVERY > 0: every "core: diverged at height" line
@@ -1110,6 +1174,7 @@ if [ "$BACKEND" = raft ] && [ "$FAULT" != none ]; then
 fi
 if [ "$ATTEST_EVERY" != 0 ]; then
   collect_diverged
+  collect_accountability
 fi
 if [ "$FAULT" = none ]; then
   if ! check_validity; then

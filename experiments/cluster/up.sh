@@ -15,7 +15,8 @@
 #      --kafka-cpus/--kafka-mem), TM_TIMEOUT_COMMIT="" (tendermint: tm_config.py
 #      --timeout-commit; empty = Tendermint's default), VERIFY_SIGS=none and
 #      KEY_SEED, ATTEST_EVERY=0 (phase 2: veritas --verify-sigs, --key-seed,
-#      --attest-every of every core node).
+#      --attest-every of every core node), ATTEST_QUORUM_N=0 (phase 3:
+#      --attest-quorum, 0 = veritas' default).
 # Writes experiments/cluster/generated/{compose.json,tm/}.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
@@ -34,6 +35,8 @@ VERIFY_SIGS="${VERIFY_SIGS:-none}"
 KEY_SEED="${KEY_SEED:-}"
 ATTEST_EVERY="${ATTEST_EVERY:-0}"
 hbdb_require_uint ATTEST_EVERY "$ATTEST_EVERY"
+ATTEST_QUORUM_N="${ATTEST_QUORUM_N:-0}"
+hbdb_require_uint ATTEST_QUORUM_N "$ATTEST_QUORUM_N"
 core_args=""
 if [ "$VERIFY_SIGS" != none ]; then
   core_args="--verify-sigs $VERIFY_SIGS"
@@ -43,6 +46,9 @@ if [ "$VERIFY_SIGS" != none ] || [ "$ATTEST_EVERY" != 0 ]; then
 fi
 if [ "$ATTEST_EVERY" != 0 ]; then
   core_args="$core_args --attest-every $ATTEST_EVERY"
+fi
+if [ "$ATTEST_QUORUM_N" != 0 ]; then
+  core_args="$core_args --attest-quorum $ATTEST_QUORUM_N"
 fi
 
 hbdb_check_backend

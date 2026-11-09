@@ -227,6 +227,19 @@ fault_parse F6E:node4@20 raft 4 40
 eq "F6E is --fault=readlie-evasive" "$FAULT_KIND/$FAULT_POLICY/$(fault_node_faults)" "F6E/readlie-evasive/node4=readlie-evasive"
 fault_parse F6:node6,node7@20 bft2 7 40
 eq "F6 two nodes at N=7 (f=2)" "$(fault_node_faults)" "node6=readlie node7=readlie"
+# F5-F4 on the CFT core backends once attestations are on (phase 3, E12).
+for b in kafka raft; do
+  ATTEST_EVERY=1 fault_parse F5-F4:node3,node4@20 "$b" 4 40
+  eq "F5-F4 $b with ATTEST_EVERY=1" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "F5/F4/corrupt/node3=corrupt node4=corrupt"
+done
+# ---- lib.sh: hbdb_attest_quorum (phase 3) ----
+eq "attest quorum N=4 f+1" "$(hbdb_attest_quorum 4 f+1)" 2
+eq "attest quorum N=4 2f+1" "$(hbdb_attest_quorum 4 2f+1)" 3
+eq "attest quorum N=7 f+1" "$(hbdb_attest_quorum 7 f+1)" 3
+eq "attest quorum N=7 2f+1" "$(hbdb_attest_quorum 7 2f+1)" 5
+eq "attest quorum auto" "$(hbdb_attest_quorum 4 auto)" 0
+( hbdb_attest_quorum 4 3f+1 ) >/dev/null 2>&1 && bad "attest quorum 3f+1 accepted" || ok
+( hbdb_attest_quorum x f+1 ) >/dev/null 2>&1 && bad "attest quorum N=x accepted" || ok
 fault_parse none kafka 4 40
 eq "none resets the policy" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "none///"
 
@@ -276,6 +289,12 @@ for b in kafka raft kafka-orig tm-orig; do
   r="$(parse_rc F5-F4:node3,node4@20 "$b" 4 40)"
   contains "F5 $b (not BFT)" "$r" "BFT backends only"
 done
+for b in kafka raft; do
+  r="$(ATTEST_EVERY=1 parse_rc F5-F2:node3,node4@20 "$b" 4 40)"
+  contains "F5-F2 $b stays BFT-only with attestations" "$r" "BFT backends only"
+done
+r="$(ATTEST_EVERY=1 parse_rc F5-F4:node3,node4@20 kafka-orig 4 40)"
+contains "F5-F4 kafka-orig with attestations" "$r" "BFT backends only"
 r="$(parse_rc F5-F4:node4@20 tendermint 4 40)"
 contains "F5 one node at N=4" "$r" "exactly f+1 = 2 nodes (N=4, f=1), got 1; e.g. FAULT=F5-F4:node4,node3@20"
 r="$(parse_rc F5-F4:node5,node6@20 tendermint 7 40)"
@@ -727,6 +746,22 @@ r="$(run_validate BACKEND=kafka-orig FAULT=F4:node4@20)"
 contains "run_one F4 kafka-orig rejected" "$r" "needs a veritas-core backend"
 r="$(run_validate BACKEND=raft FAULT=F5-F4:node3,node4@20)"
 contains "run_one F5 raft rejected" "$r" "BFT backends only"
+r="$(run_validate BACKEND=raft ATTEST_EVERY=1 FAULT=F5-F4:node3,node4@20)"
+contains "run_one F5-F4 raft with attestations parses" "$r" "missing $empty_ycsb/a.load.dat"
+r="$(run_validate BACKEND=raft ATTEST_EVERY=1 ATTEST_QUORUM=f+1 READ_MODE=certified FAILOVER=1 SIGN_READS=on-failure FAULT=F6:node4@20)"
+contains "run_one phase 3 knobs parse" "$r" "missing $empty_ycsb/a.load.dat"
+r="$(run_validate BACKEND=raft READ_MODE=quorum)"
+contains "run_one READ_MODE=quorum parses" "$r" "missing $empty_ycsb/a.load.dat"
+r="$(run_validate BACKEND=raft ATTEST_QUORUM=2f+1)"
+contains "run_one ATTEST_QUORUM needs attestations" "$r" "ATTEST_QUORUM=2f+1 needs ATTEST_EVERY > 0"
+r="$(run_validate BACKEND=raft ATTEST_EVERY=1 ATTEST_QUORUM=3)"
+contains "run_one ATTEST_QUORUM bad value" "$r" "ATTEST_QUORUM must be auto, f+1 or 2f+1"
+r="$(run_validate BACKEND=raft FAILOVER=2)"
+contains "run_one FAILOVER bad value" "$r" "FAILOVER must be 0 or 1"
+r="$(run_validate BACKEND=raft SIGN_READS=sometimes)"
+contains "run_one SIGN_READS bad value" "$r" "SIGN_READS must be off, on-failure or always"
+r="$(run_validate BACKEND=kafka-orig SIGN_READS=always)"
+contains "run_one SIGN_READS needs a core backend" "$r" "need a core backend"
 r="$(run_validate BACKEND=raft FAULT=F1:node5@20)"
 contains "run_one node5 N=4" "$r" "node5 does not exist"
 r="$(run_validate BACKEND=raft FAULT=F1:node4@40)"
@@ -750,7 +785,7 @@ for s in down up health; do
   chmod +x "$SB/experiments/cluster/$s.sh"
 done
 # up.sh also records the NODE_FAULTS it was given (the armed --fault nodes).
-printf '#!/bin/sh\necho up >>"$STUB_STATE/cluster.log"\necho "${NODE_FAULTS-unset}" >"$STUB_STATE/node_faults"\nexit 0\n' >"$SB/experiments/cluster/up.sh"
+printf '#!/bin/sh\necho up >>"$STUB_STATE/cluster.log"\necho "${NODE_FAULTS-unset}" >"$STUB_STATE/node_faults"\necho "${ATTEST_QUORUM_N-unset}" >"$STUB_STATE/attest_quorum"\nexit 0\n' >"$SB/experiments/cluster/up.sh"
 echo "READ k1" >"$SB/ycsb/a.load.dat"
 echo "READ k1" >"$SB/ycsb/a.run.dat"
 cat >"$SB/bin/docker" <<'EOF'
@@ -870,9 +905,16 @@ case "$1" in
         printf '2\n2\n2\n' >"$wtl"
         # STUB_WERR / STUB_WABORT: failed / aborted writes in the ops sidecar
         # (of 200 ok); STUB_NO_OPS=1: no sidecar (an old ycsbbench).
-        [ -n "${STUB_NO_OPS:-}" ] ||
+        # STUB_REJECTED: a rejected_reads column (phase 3) with that count on
+        # the read line.
+        if [ -n "${STUB_NO_OPS:-}" ]; then :
+        elif [ -n "${STUB_REJECTED:-}" ]; then
+          printf 'op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,rejected_reads\nread,300,150.00,1.000,1.000,2.000,0,0,%s\nwrite,200,100.00,500.000,450.000,900.000,%s,%s,0\n' \
+            "$STUB_REJECTED" "${STUB_WERR:-0}" "${STUB_WABORT:-0}" >"$ops"
+        else
           printf 'op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted\nread,300,150.00,1.000,1.000,2.000,0,0\nwrite,200,100.00,500.000,450.000,900.000,%s,%s\n' \
             "${STUB_WERR:-0}" "${STUB_WABORT:-0}" >"$ops"
+        fi
         vals="$(echo "$tags" | tr ',' '\n' | sed 's/^[^=]*=//' | tr '\n' ',' | sed 's/,$//')"
         printf '%s\n%s,100.0,1.0,1.0,2.0,0,0,,,\n' "$STUB_HEADER" "$vals" >"$out"
         exit "${STUB_BENCH_RC:-0}" ;;
@@ -1183,6 +1225,33 @@ grep -q '^node4 node4 | 2026-11-07T10:00:01.450000000Z core: diverged at height 
 eq "itest diverged: only node4" "$(wc -l <"$(it_tag it_div .diverged)" | tr -d ' ')" 1
 itest nodiverged EXP=it_nodiv FAULT=none DURATION=2s STUB_BENCH_SECS=1
 eq "itest attest off: no .diverged" "$(it_tag it_nodiv .diverged)" ""
+
+# W (phase 3): the accountability sidecars and the validity gate.
+itest evict EXP=it_evict FAULT=F6:node4@0 ATTEST_EVERY=1 DURATION=2s STUB_BENCH_SECS=1 STUB_CONFIRM=readlie STUB_LOG_NODE=node2 \
+  STUB_LOG_LINE="2026-11-09T10:00:01.250000000Z core: evicted node 4 at height 812 (bad_read)"
+eq "itest evict rc" "$it_rc" 0
+grep -q '^node2 node2 | 2026-11-09T10:00:01.250000000Z core: evicted node 4 at height 812 (bad_read)$' "$(it_tag it_evict .evict)" 2>/dev/null && ok ||
+  bad "itest evict file: $(cat "$(it_tag it_evict .evict)" 2>/dev/null) $it_err"
+eq "itest evict: .certs exists and is empty" "$(wc -c <"$(it_tag it_evict .certs)" 2>/dev/null | tr -d ' ')" 0
+itest certs EXP=it_certs FAULT=F4:node4@0 ATTEST_EVERY=1 DURATION=2s STUB_BENCH_SECS=1 STUB_LOG_NODE=node1 \
+  STUB_LOG_LINE="2026-11-09T10:00:02.000000000Z core: certified height 812 root 0a1b"
+grep -q '^node1 node1 | .*core: certified height 812 root 0a1b$' "$(it_tag it_certs .certs)" 2>/dev/null && ok || bad "itest certs file: $(cat "$(it_tag it_certs .certs)" 2>/dev/null)"
+itest evictgate EXP=it_evgate FAULT=none ATTEST_EVERY=1 DURATION=2s STUB_BENCH_SECS=1 STUB_LOG_NODE=node3 \
+  STUB_LOG_LINE="2026-11-09T10:00:01.000000000Z core: evicted node 2 at height 9 (divergent_root)"
+eq "itest fault-free run with an eviction is invalid" "$it_rc" 3
+contains "itest eviction gate message" "$it_err" "invalid run: 1 eviction(s) without a fault"
+itest rejgate EXP=it_rejgate FAULT=none ATTEST_EVERY=1 READ_MODE=certified DURATION=2s STUB_BENCH_SECS=1 STUB_REJECTED=3
+eq "itest fault-free run with rejected reads is invalid" "$it_rc" 3
+contains "itest rejected-reads gate message" "$it_err" "invalid run: 3 read(s) rejected by the client without a fault"
+itest rejok EXP=it_rejok FAULT=none ATTEST_EVERY=1 READ_MODE=certified DURATION=2s STUB_BENCH_SECS=1 STUB_REJECTED=0
+eq "itest rejected_reads=0 passes" "$it_rc" 0
+itest p3flags EXP=it_p3 ATTEST_EVERY=1 ATTEST_QUORUM=f+1 READ_MODE=certified FAILOVER=1 SIGN_READS=always DURATION=2s STUB_BENCH_SECS=1
+eq "itest phase 3 knobs rc" "$it_rc" 0
+grep -q -- 'ycsbbench .* --read-mode=certified .*--failover --sign-reads=always' "$SB/state/calls" && ok || bad "itest: ycsbbench --failover/--sign-reads: $(grep ycsbbench "$SB/state/calls" | head -n 1)"
+eq "itest ATTEST_QUORUM=f+1 reaches up.sh as 2" "$(cat "$SB/state/attest_quorum" 2>/dev/null)" 2
+itest p3default EXP=it_p3d DURATION=2s STUB_BENCH_SECS=1
+grep -q -- '--failover\|--sign-reads' "$SB/state/calls" && bad "itest: phase 3 bench flags without FAILOVER/SIGN_READS" || ok
+eq "itest default ATTEST_QUORUM reaches up.sh as 0" "$(cat "$SB/state/attest_quorum" 2>/dev/null)" 0
 
 # up.sh turns NODE_FAULTS into gen_compose.py --node-fault flags.
 grep -q 'node_fault_args="$node_fault_args --node-fault $nf"' "$HERE/cluster/up.sh" && ok || bad "up.sh --node-fault"

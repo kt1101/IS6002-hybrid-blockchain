@@ -634,3 +634,28 @@ def test_attest_every_flags():
     assert " --key-seed=s --attest-every=10 --n=4 &" in doc["services"]["node2"]["command"][2]
     with pytest.raises(ValueError):
         gen("raft", 4, 100, "sync", 0.5, "1g", attest_every=-1)
+
+
+def test_core_flags_attest_quorum():
+    from gen_compose import core_flags
+    assert core_flags(attest_every=1, n=4, attest_quorum=2) == " --attest-every=1 --n=4 --attest-quorum=2"
+    assert core_flags(attest_every=1, n=4) == " --attest-every=1 --n=4"
+    assert core_flags(attest_every=1, n=4, attest_quorum=0) == " --attest-every=1 --n=4"
+    with pytest.raises(ValueError):
+        core_flags(attest_every=1, n=4, attest_quorum=5)  # > n
+    with pytest.raises(ValueError):
+        core_flags(attest_every=0, n=4, attest_quorum=2)  # quorum without attestations
+    with pytest.raises(ValueError):
+        core_flags(attest_every=1, n=4, attest_quorum=-1)
+
+
+def test_attest_quorum_reaches_every_core_node():
+    doc = gen("raft", 4, 100, "sync", 0.5, "1g", attest_every=1, attest_quorum=2)
+    for k in ("node1", "node2", "node3", "node4"):
+        assert " --attest-every=1 --n=4 --attest-quorum=2" in _veritas_line(doc, k)
+
+
+def test_cli_attest_quorum(tmp_path):
+    out = tmp_path / "c.yml"
+    assert main(["--backend", "raft", "--n", "4", "--attest-every", "1", "--attest-quorum", "2", "--out", str(out)]) == 0
+    assert "--attest-quorum=2" in out.read_text()

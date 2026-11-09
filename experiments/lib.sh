@@ -147,6 +147,21 @@ hbdb_backend_has_fault_policy() {
   esac
 }
 
+# hbdb_attest_quorum N SPEC (phase 3, ATTEST_QUORUM): the veritas
+# --attest-quorum for SPEC at N nodes, f = floor((N-1)/3): auto -> 0 (veritas
+# picks 2f+1, as in phase 2), f+1, 2f+1. Dies on any other SPEC.
+hbdb_attest_quorum() {
+  local f
+  hbdb_require_uint N "$1"
+  f=$((($1 - 1) / 3))
+  case "$2" in
+    auto) echo 0 ;;
+    f+1) echo $((f + 1)) ;;
+    2f+1) echo $((2 * f + 1)) ;;
+    *) die "ATTEST_QUORUM must be auto, f+1 or 2f+1, got '$2'" ;;
+  esac
+}
+
 # Milliseconds since the epoch (bash 3.2 has no EPOCHREALTIME and macOS date
 # no %N: perl, then python3, then whole seconds from date).
 hbdb_epoch_ms() {
