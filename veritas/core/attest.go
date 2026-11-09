@@ -37,6 +37,7 @@ type attestor struct {
 	roots        map[int64][]byte    // own root at attested heights (apply loop only)
 	appliedAt    map[int64]time.Time // when this node applied them (apply loop only)
 	lastAttested []byte              // own root at the last attested height (apply loop only)
+	conflicts    map[int64]bool      // heights whose certified root was logged (apply loop only)
 
 	// unattested: the current root is not attested yet; lastApply: when the
 	// apply loop last applied a block (unix ns). Read by idleBlock.
@@ -69,10 +70,11 @@ func newAttestor(cfg ServerConfig) *attestor {
 		nodeID:    int32(cfg.NodeID),
 		key:       cfg.NodeKey,
 		idle:      idle,
-		cert:      NewCertifier(cfg.N, cfg.AttestQuorum, cfg.NodeKeys, DefaultAttestKeep),
+		cert:      NewCertifier(cfg.N, cfg.AttestQuorum, cfg.NodeKeys, DefaultAttestKeep, nil),
 		roots:     make(map[int64][]byte),
 		appliedAt: make(map[int64]time.Time),
 		byRoot:    make(map[string]int64),
+		conflicts: make(map[int64]bool),
 	}
 }
 
@@ -123,8 +125,12 @@ func (a *attestor) forget(r *certReader) {
 // at an attested height, signs this node's own.
 func (a *attestor) afterApply(h int64, root []byte, blk *pbv.Block, nodeID int, prove func(key []byte) certProof) {
 	for _, at := range blk.GetAttestations() {
-		if ok, croot := a.cert.Add(at); ok {
-			a.onCertified(at.GetHeight(), croot, nodeID)
+		res := a.cert.Add(at)
+		if res.Certified {
+			a.onCertified(at.GetHeight(), res.Root, nodeID)
+		}
+		if len(res.Divergent) > 0 {
+			a.onDivergent(at.GetHeight(), res)
 		}
 	}
 	a.lastApply.Store(time.Now().UnixNano())
@@ -183,6 +189,25 @@ func (a *attestor) onCertified(h int64, root []byte, nodeID int) {
 	}
 	if a.diverged.CompareAndSwap(0, h) {
 		log.Printf("core: diverged at height %d (node %d: own root %x, certified %x)", h, nodeID, own, root)
+	}
+}
+
+// onDivergent (apply loop): a height has attestations for another root than
+// its certified one. The first time for a height it logs the certified root
+// ("core: certified height <h> root <hex>", read by run_one.sh into
+// <tag>.certs), so an analysis can tell which root won.
+func (a *attestor) onDivergent(h int64, res AddResult) {
+	if a.conflicts[h] {
+		return
+	}
+	a.conflicts[h] = true
+	log.Printf("core: certified height %d root %x", h, res.Root)
+	if len(a.conflicts) > DefaultAttestKeep {
+		for old := range a.conflicts {
+			if old <= h-int64(DefaultAttestKeep) {
+				delete(a.conflicts, old)
+			}
+		}
 	}
 }
 
