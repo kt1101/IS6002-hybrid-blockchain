@@ -6,7 +6,7 @@
 #
 # Env: BACKEND (required), N=4, BLOCK_SIZE=100, COMMIT_MODE=sync,
 #      CPUS=0.5, MEM=768m (per node), YCSB_DIR=results/ycsb,
-#      NODE_FAULTS="" (space-separated node<i>=silent|corrupt, from
+#      NODE_FAULTS="" (space-separated node<i>=silent|corrupt|readlie|readlie-evasive, from
 #      run_one.sh / faults.sh fault_node_faults: those nodes' veritas runs
 #      with --fault armed, see gen_compose.py --node-fault).
 #      BATCH_FLUSH="" (empty: veritas default 1s; else a duration like 250ms:
@@ -52,7 +52,7 @@ hbdb_require_uint BLOCK_SIZE "$BLOCK_SIZE"
 # so the unquoted expansion below is safe.
 node_fault_args=""
 for nf in $NODE_FAULTS; do
-  echo "$nf" | grep -Eq '^node[1-9][0-9]*=[a-z]+$' || die "NODE_FAULTS item '$nf': want node<i>=<fault>, e.g. node4=corrupt"
+  echo "$nf" | grep -Eq '^node[1-9][0-9]*=[a-z]+(-[a-z]+)*$' || die "NODE_FAULTS item '$nf': want node<i>=<fault>, e.g. node4=corrupt"
   node_fault_args="$node_fault_args --node-fault $nf"
 done
 

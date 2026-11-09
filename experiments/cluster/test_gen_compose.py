@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from gen_compose import gen, gomemlimit, main, parse_node_faults
+from gen_compose import _fault_args, gen, gomemlimit, main, parse_node_faults
 
 
 def _nodes(c):
@@ -505,6 +505,19 @@ def test_cli_node_fault(tmp_path):
     c = json.loads(out.read_text())
     assert "--fault=corrupt" in _veritas_line(c, "node3") and "--fault=corrupt" in _veritas_line(c, "node4")
     assert "--fault" not in _veritas_line(c, "node1")
+
+
+@pytest.mark.parametrize("fault", ["readlie", "readlie-evasive"])
+def test_fault_args_readlie(fault):
+    assert _fault_args(fault) == " --fault=%s --fault-after=87600h" % fault
+
+
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint", "bft2"])
+def test_readlie_node_fault_on_every_core_backend(backend):
+    c = gen(backend=backend, n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="1g",
+            node_faults={4: "readlie"})
+    assert _veritas_line(c, "node4").endswith(" --fault=readlie --fault-after=87600h &")
+    assert "--fault" not in _veritas_line(c, "node3")
 
 
 def test_bft2_fault_goes_to_veritas_not_the_sidecar():

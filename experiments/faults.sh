@@ -26,8 +26,16 @@
 #   F5-F2:node3,node4@60 beyond the threshold (BFT backends only: tendermint,
 #   F5-F4:node3,node4@60 bft2): F2 (network) resp. F4 (corrupt) on exactly
 #                        f+1 nodes, f = floor((N-1)/3) (N=4: 2 nodes, N=7: 3)
+#   F6:node4@60          read-path lie (phase 3; kafka, raft, tendermint,
+#                        bft2): veritas --fault=readlie (ReadFault.OnRead
+#                        appends -CORRUPT to every value the node returns to a
+#                        Get/GetVerified; its state, votes, root and proofs stay
+#                        honest, so the auditor and the certifier see nothing),
+#                        activated at AT by fault_signal; at most f nodes
+#   F6E:node4@60         as F6 with --fault=readlie-evasive: honest on reads
+#                        the client asked to be signed
 #
-# FaultPolicy faults (F2 on kafka, F4, F5-F4) are baked into the node's
+# FaultPolicy faults (F2 on kafka, F4, F5-F4, F6, F6E) are baked into the node's
 # command line when the cluster is created: run_one.sh passes
 # fault_node_faults (NODE_FAULTS, e.g. "node4=corrupt") to up.sh, and
 # gen_compose.py starts those nodes' veritas with --fault=<kind> and a
@@ -72,9 +80,9 @@
 #   FAULT_T0_MS      epoch ms of t=0 (set by fault_wait_marker; when empty a
 #                    fault_* call counts AT from the moment it is called)
 #   FAULT_SLOW_MS    F3 delay in ms (default 200)
-# fault_parse sets FAULT_SPEC, FAULT_KIND (none|F1|F2|F3|F4|F5), FAULT_SUB
+# fault_parse sets FAULT_SPEC, FAULT_KIND (none|F1|F2|F3|F4|F5|F6|F6E), FAULT_SUB
 # (F5: F2 or F4, else empty), FAULT_NODES (space-separated), FAULT_AT,
-# FAULT_BACKEND and FAULT_POLICY (silent|corrupt when the fault is a veritas
+# FAULT_BACKEND and FAULT_POLICY (silent|corrupt|readlie|readlie-evasive when the fault is a veritas
 # --fault activated by SIGUSR1, else empty).
 
 if ! command -v net_delay >/dev/null 2>&1; then
@@ -130,7 +138,7 @@ fault_parse() {
   [ "$spec" = none ] && return 0
   hbdb_require_uint N "$n"
   hbdb_require_uint DURATION_S "$dur"
-  echo "$spec" | grep -Eq '^F[0-9]+(-F[0-9]+)?:node[1-9][0-9]*([,+]node[1-9][0-9]*)*@[0-9]+$' ||
+  echo "$spec" | grep -Eq '^(F[0-9]+(-F[0-9]+)?|F6E):node[1-9][0-9]*([,+]node[1-9][0-9]*)*@[0-9]+$' ||
     die "FAULT='$spec': want none or F<k>:node<i>[,node<j>...]@<seconds>, e.g. F1:node4@60, F1:node3,node4@60, F3:node1@60, F5-F4:node3,node4@60"
   FAULT_KIND="${spec%%:*}"
   rest="${spec#*:}"
@@ -149,12 +157,12 @@ fault_parse() {
       ;;
   esac
   case "$FAULT_KIND" in
-    F1 | F2 | F3 | F4) ;;
+    F1 | F2 | F3 | F4 | F6 | F6E) ;;
     F5)
       [ -n "$FAULT_SUB" ] ||
         die "FAULT='$spec': F5 needs its kind: F5-F2 (f+1 silent nodes) or F5-F4 (f+1 corrupt nodes), e.g. F5-F4:node3,node4@60"
       ;;
-    *) die "FAULT='$spec': unknown fault kind $FAULT_KIND (F1 crash, F2 silent, F3 slow, F4 wrong state, F5-F2/F5-F4 f+1 faulty)" ;;
+    *) die "FAULT='$spec': unknown fault kind $FAULT_KIND (F1 crash, F2 silent, F3 slow, F4 wrong state, F5-F2/F5-F4 f+1 faulty, F6/F6E read-path lie)" ;;
   esac
   for node in $(echo "$nodes_part" | tr ',+' '  '); do
     num="${node#node}"
@@ -187,6 +195,14 @@ fault_parse() {
       [ "$count" -le "$f" ] ||
         die "FAULT='$spec': F4 corrupts at most f = floor((N-1)/3) = $f nodes (N=$n), got $count; f+1 corrupt nodes is F5-F4 (tendermint, bft2)"
       FAULT_POLICY=corrupt
+      ;;
+    F6 | F6E)
+      hbdb_backend_has_fault_policy "$backend" ||
+        die "FAULT='$spec': F6 (read-path lie) needs a veritas-core backend (kafka, raft, tendermint, bft2; veritas --fault=readlie); BACKEND=$backend is an original server without FaultPolicy"
+      f=$(((n - 1) / 3))
+      [ "$count" -le "$f" ] ||
+        die "FAULT='$spec': $FAULT_KIND lies on reads on at most f = floor((N-1)/3) = $f nodes (N=$n), got $count"
+      if [ "$FAULT_KIND" = F6 ]; then FAULT_POLICY=readlie; else FAULT_POLICY=readlie-evasive; fi
       ;;
     F5)
       case "$backend" in
@@ -403,7 +419,7 @@ fault_confirm() {
   done
 }
 
-# fault_signal NODE AT POLICY (F2 on kafka, F4, F5-F4): at second AT send
+# fault_signal NODE AT POLICY (F2 on kafka, F4, F5-F4, F6, F6E): at second AT send
 # SIGUSR1 to NODE's veritas server, which runs with --fault=POLICY (armed by
 # gen_compose.py, see the header) and activates the fault on it, then
 # confirm the activation (fault_confirm). Logged as POLICY_on (the injection
@@ -412,7 +428,7 @@ fault_confirm() {
 fault_signal() {
   local node="$1" policy="$3"
   case "$policy" in
-    silent | corrupt) ;;
+    silent | corrupt | readlie | readlie-evasive) ;;
     *) die "fault_signal: unknown policy '$policy'" ;;
   esac
   fault_wait_until "$2" || return 2

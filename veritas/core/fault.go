@@ -45,11 +45,22 @@ func (NoFault) OnVote() bool { return true }
 // OnApply implements FaultPolicy.
 func (NoFault) OnApply(key, val string) string { return val }
 
+// ReadFault is an optional extension of FaultPolicy (phase 3, F6): the
+// server passes every value it returns to a Get or GetVerified through
+// OnRead, after the proof was taken, so the proof, root and version stay
+// those of the real value. signed reports a read the client asked to be
+// signed (GetVerifiedRequest.signed). Policies without it read honestly.
+type ReadFault interface {
+	OnRead(key, val string, signed bool) string
+}
+
 // Fault specs accepted by ParseFault.
 const (
-	FaultNone    = "none"
-	FaultSilent  = "silent"
-	FaultCorrupt = "corrupt"
+	FaultNone           = "none"
+	FaultSilent         = "silent"
+	FaultCorrupt        = "corrupt"
+	FaultReadLie        = "readlie"
+	FaultReadLieEvasive = "readlie-evasive"
 )
 
 // ParseFault builds the policy of --fault=spec:
@@ -57,8 +68,12 @@ const (
 //	none     NoFault{}
 //	silent   OnVote returns false (no vote is sent); OnApply is honest
 //	corrupt  OnApply returns val + benchmark.CorruptMarker; votes normally
+//	readlie  OnRead returns val + benchmark.CorruptMarker (F6); the state,
+//	         the votes and the proofs stay honest
+//	readlie-evasive
+//	         as readlie, but OnRead is honest on a signed read
 //
-// A silent or corrupt policy is honest until start+after (cmd/veritas: start
+// A silent, corrupt or readlie policy is honest until start+after (cmd/veritas: start
 // = the process start, after = --fault-after), or until Activate is called,
 // whichever comes first; from then on it stays faulty. after must be >= 0.
 func ParseFault(spec string, start time.Time, after time.Duration) (FaultPolicy, error) {
@@ -68,14 +83,15 @@ func ParseFault(spec string, start time.Time, after time.Duration) (FaultPolicy,
 	switch spec {
 	case FaultNone:
 		return NoFault{}, nil
-	case FaultSilent, FaultCorrupt:
+	case FaultSilent, FaultCorrupt, FaultReadLie, FaultReadLieEvasive:
 		return &delayedFault{kind: spec, at: start.Add(after)}, nil
 	default:
-		return nil, fmt.Errorf("fault: unknown spec %q (want %s, %s or %s)", spec, FaultNone, FaultSilent, FaultCorrupt)
+		return nil, fmt.Errorf("fault: unknown spec %q (want %s, %s, %s, %s or %s)", spec,
+			FaultNone, FaultSilent, FaultCorrupt, FaultReadLie, FaultReadLieEvasive)
 	}
 }
 
-// delayedFault is a silent or corrupt policy that is active from `at` on, or
+// delayedFault is a silent, corrupt or readlie policy that is active from `at` on, or
 // from Activate on.
 type delayedFault struct {
 	kind   string
@@ -114,6 +130,17 @@ func (d *delayedFault) OnVote() bool {
 // OnApply implements FaultPolicy.
 func (d *delayedFault) OnApply(key, val string) string {
 	if d.kind == FaultCorrupt && d.Active() {
+		return val + benchmark.CorruptMarker
+	}
+	return val
+}
+
+// OnRead implements ReadFault.
+func (d *delayedFault) OnRead(key, val string, signed bool) string {
+	switch {
+	case d.kind == FaultReadLie && d.Active():
+		return val + benchmark.CorruptMarker
+	case d.kind == FaultReadLieEvasive && !signed && d.Active():
 		return val + benchmark.CorruptMarker
 	}
 	return val

@@ -115,7 +115,8 @@ FAULTS_COLUMNS = ["utc", "epoch_ms", "t_s", "timeline_s", "fault", "action", "no
 # faults.sh actions logged right before a fault is applied, per fault kind (the
 # *_failed and the "applied"/"stopped" completion rows are not injections).
 # silent_on / corrupt_on: the SIGUSR1 that activates veritas --fault=silent
-# (F2 on kafka) or --fault=corrupt (F4, F5-F4) at AT (faults.sh fault_signal).
+# (F2 on kafka), --fault=corrupt (F4, F5-F4) or --fault=readlie /
+# readlie-evasive (F6, F6E) at AT (faults.sh fault_signal).
 # The key is the kind as written in the fault column (F5-F2, F5-F4).  A fault
 # kind that is not listed is reported as an InputError, not a crash.
 INJECT_ACTIONS = {
@@ -125,6 +126,8 @@ INJECT_ACTIONS = {
     "F4": ("corrupt_on",),
     "F5-F2": ("iptables_drop",),
     "F5-F4": ("corrupt_on",),
+    "F6": ("readlie_on",),
+    "F6E": ("readlie-evasive_on",),
 }
 AUDIT_END_SLACK_S = 3  # the auditor may stop this long before the timeline ends
 FIRST_TICK_WINDOW_S = (-0.1, 5.0)  # expected first audit tick vs run_phase_start

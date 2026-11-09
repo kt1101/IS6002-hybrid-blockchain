@@ -218,6 +218,15 @@ fault_parse F5-F2:node3,node4@20 bft2 4 40
 eq "F5-F2 bft2 is network-level" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "F5/F2//"
 fault_parse F5-F4:node5,node6,node7@60 bft2 7 180
 eq "F5-F4 bft2 N=7" "$(fault_node_faults)" "node5=corrupt node6=corrupt node7=corrupt"
+# F6 read-path faults (phase 3): veritas --fault=readlie / readlie-evasive.
+for b in kafka raft tendermint bft2; do
+  fault_parse F6:node4@20 "$b" 4 40
+  eq "F6 $b is --fault=readlie" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "F6//readlie/node4=readlie"
+done
+fault_parse F6E:node4@20 raft 4 40
+eq "F6E is --fault=readlie-evasive" "$FAULT_KIND/$FAULT_POLICY/$(fault_node_faults)" "F6E/readlie-evasive/node4=readlie-evasive"
+fault_parse F6:node6,node7@20 bft2 7 40
+eq "F6 two nodes at N=7 (f=2)" "$(fault_node_faults)" "node6=readlie node7=readlie"
 fault_parse none kafka 4 40
 eq "none resets the policy" "$FAULT_KIND/$FAULT_SUB/$FAULT_POLICY/$(fault_node_faults)" "none///"
 
@@ -251,6 +260,16 @@ r="$(parse_rc F4:node5,node6,node7@20 raft 7 40)"
 contains "F4 3 nodes at N=7" "$r" "at most f = floor((N-1)/3) = 2 nodes (N=7), got 3"
 r="$(parse_rc F4:node3@20 kafka 3 40)"
 contains "F4 N=3 (f=0)" "$r" "at most f = floor((N-1)/3) = 0 nodes"
+r="$(parse_rc F6:node3,node4@20 raft 4 40)"
+contains "F6 f+1 nodes" "$r" "F6 lies on reads on at most f = floor((N-1)/3) = 1 nodes (N=4), got 2"
+for b in kafka-orig tm-orig; do
+  r="$(parse_rc F6:node4@20 "$b" 4 40)"
+  contains "F6 $b" "$r" "F6 (read-path lie) needs a veritas-core backend"
+done
+r="$(parse_rc F6E:node3,node4@20 bft2 4 40)"
+contains "F6E f+1 nodes" "$r" "at most f = floor((N-1)/3) = 1 nodes (N=4), got 2"
+r="$(parse_rc F7:node4@20 raft 4 40)"
+contains "unknown kind F7" "$r" "unknown fault kind F7"
 r="$(parse_rc F5:node3,node4@20 tendermint 4 40)"
 contains "F5 without kind" "$r" "F5 needs its kind: F5-F2"
 for b in kafka raft kafka-orig tm-orig; do

@@ -80,7 +80,7 @@ var (
 	batchFlush    = kingpin.Flag("batch-flush", "core: flush interval of the batcher (a partial block is sent after this long; E1-E6 keep the original 1s)").Default("1s").Duration()
 	nodeID        = kingpin.Flag("node-id", "core: node id in [0, 2^23), unique per deployment (high bits of every SharedLog seq)").Default("-1").Int()
 	breakdownOut  = kingpin.Flag("breakdown-out", "core: breakdown JSON written on SIGTERM/SIGINT (default /results/breakdown-node<node-id>.json)").Default("").String()
-	faultSpec     = kingpin.Flag("fault", "core: injected replica fault: none, silent (--consensus=kafka only: send no votes) or corrupt (append "+benchmark.CorruptMarker+" to every applied value)").Default(core.FaultNone).String()
+	faultSpec     = kingpin.Flag("fault", "core: injected replica fault: none, silent (--consensus=kafka only: send no votes), corrupt (append "+benchmark.CorruptMarker+" to every applied value), readlie (append it to every value returned to a read, state honest) or readlie-evasive (as readlie, honest on signed reads)").Default(core.FaultNone).String()
 	faultAfter    = kingpin.Flag("fault-after", "core: the fault turns on this long after the process start (e.g. 60s); SIGUSR1 turns it on at once").Default("0s").Duration()
 	verifySigs    = kingpin.Flag("verify-sigs", "core (phase 2): client Set signatures checked: none, ingress (at the receiving node: Unauthenticated) or all (also by every replica before applying: aborted)").Default("none").String()
 	keySeed       = kingpin.Flag("key-seed", "core (phase 2): seed every Ed25519 key is derived from (clients client<k>, nodes node<i>); the same on every node and client").Default(sigs.DefaultSeed).String()

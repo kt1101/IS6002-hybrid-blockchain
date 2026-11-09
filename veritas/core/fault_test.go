@@ -179,3 +179,128 @@ func TestCorruptNodeDivergesRoot(t *testing.T) {
 		t.Fatalf("node1 k1 = %q, want v1b", got)
 	}
 }
+
+// ---- F6: read-path faults (phase 3) ----
+
+func readFaultOf(t *testing.T, fp FaultPolicy) ReadFault {
+	t.Helper()
+	rf, ok := fp.(ReadFault)
+	if !ok {
+		t.Fatalf("%T does not implement ReadFault", fp)
+	}
+	return rf
+}
+
+func TestParseFaultReadLie(t *testing.T) {
+	fp := mustParseFault(t, FaultReadLie, time.Now(), time.Hour)
+	rf := readFaultOf(t, fp)
+	if got := rf.OnRead("k", "v", false); got != "v" {
+		t.Fatalf("before activation: OnRead = %q, want %q", got, "v")
+	}
+	fp.(Activator).Activate()
+	if got := rf.OnRead("k", "v", false); got != "v"+benchmark.CorruptMarker {
+		t.Fatalf("after activation: OnRead = %q, want %q", got, "v"+benchmark.CorruptMarker)
+	}
+	if got := rf.OnRead("k", "v", true); got != "v"+benchmark.CorruptMarker {
+		t.Fatalf("after activation, signed: OnRead = %q, want %q", got, "v"+benchmark.CorruptMarker)
+	}
+	if got := fp.OnApply("k", "v"); got != "v" {
+		t.Fatalf("readlie must keep the state honest: OnApply = %q", got)
+	}
+	if !fp.OnVote() {
+		t.Fatal("readlie must keep voting")
+	}
+}
+
+func TestReadLieEvasiveHonestWhenSigned(t *testing.T) {
+	fp := mustParseFault(t, FaultReadLieEvasive, time.Now(), time.Hour)
+	fp.(Activator).Activate()
+	rf := readFaultOf(t, fp)
+	if got := rf.OnRead("k", "v", true); got != "v" {
+		t.Fatalf("signed read: OnRead = %q, want %q", got, "v")
+	}
+	if got := rf.OnRead("k", "v", false); got != "v"+benchmark.CorruptMarker {
+		t.Fatalf("unsigned read: OnRead = %q, want %q", got, "v"+benchmark.CorruptMarker)
+	}
+	if got := fp.OnApply("k", "v"); got != "v" {
+		t.Fatalf("OnApply = %q, want %q", got, "v")
+	}
+}
+
+func TestReadFaultsOnlyForReadKinds(t *testing.T) {
+	for _, spec := range []string{FaultSilent, FaultCorrupt} {
+		fp := mustParseFault(t, spec, time.Now(), 0)
+		if rf, ok := fp.(ReadFault); ok {
+			if got := rf.OnRead("k", "v", false); got != "v" {
+				t.Fatalf("%s: OnRead = %q, want it unchanged", spec, got)
+			}
+		}
+	}
+	if _, ok := FaultPolicy(NoFault{}).(ReadFault); ok {
+		if got := FaultPolicy(NoFault{}).(ReadFault).OnRead("k", "v", false); got != "v" {
+			t.Fatalf("NoFault: OnRead = %q", got)
+		}
+	}
+}
+
+// readLieCluster: 4 nodes with attestations, node 4 lying on reads from the start.
+func readLieCluster(t *testing.T) []*clusterNode {
+	t.Helper()
+	return attestCluster(t, 4, 1, map[int]FaultPolicy{4: mustParseFault(t, FaultReadLie, time.Now(), 0)}, func(i int, c *ServerConfig) {
+		c.CertifiedWait = 2 * time.Second
+	})
+}
+
+func TestReadLieKeepsRootsEqual(t *testing.T) {
+	nodes := readLieCluster(t)
+	setN(t, nodes[0].srv, 20)
+	eventually(t, srvTestTimeout, "every node applied the 20 Sets with equal roots", func() bool {
+		r0 := nodes[0].ex.RootDigest()
+		for _, n := range nodes {
+			if v, err := getValue(n.srv, "k19"); err != nil || !strings.HasPrefix(v, "v19") {
+				return false
+			}
+			if string(n.ex.RootDigest()) != string(r0) {
+				return false
+			}
+		}
+		return true
+	})
+	for i, n := range nodes {
+		if _, ok := n.srv.Diverged(); ok {
+			t.Fatalf("node %d diverged: readlie must not change the state", i+1)
+		}
+	}
+	got, err := getValue(nodes[3].srv, "k0")
+	if err != nil || got != "v0"+benchmark.CorruptMarker {
+		t.Fatalf("Get on the lying node = %q, %v; want %q", got, err, "v0"+benchmark.CorruptMarker)
+	}
+	if got, err := getValue(nodes[0].srv, "k0"); err != nil || got != "v0" {
+		t.Fatalf("Get on an honest node = %q, %v; want v0", got, err)
+	}
+}
+
+func TestCertifiedReadFromReadLieRejectedByClient(t *testing.T) {
+	nodes := readLieCluster(t)
+	setN(t, nodes[0].srv, 5)
+	r, err := certifiedRead(nodes[3].srv, "k1")
+	if err != nil {
+		t.Fatalf("certified read from the lying node: %v (its state is honest, the read must be served)", err)
+	}
+	if r.GetValue() != "v1"+benchmark.CorruptMarker {
+		t.Fatalf("lying node returned %q, want the corrupt value", r.GetValue())
+	}
+	if verifyResp(r, "k1") {
+		t.Fatal("the proof verifies for the lied value: the client could not detect F6")
+	}
+	// The proof, root and version are those of the real value.
+	honest := *r
+	honest.Value = "v1"
+	if !verifyResp(&honest, "k1") {
+		t.Fatal("proof of the lying node does not verify for the real value")
+	}
+	ok, err := certifiedRead(nodes[0].srv, "k1")
+	if err != nil || ok.GetValue() != "v1" || !verifyResp(ok, "k1") {
+		t.Fatalf("certified read from an honest node: %v %v", ok, err)
+	}
+}

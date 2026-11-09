@@ -296,7 +296,16 @@ func (s *Server) Get(ctx context.Context, req *pbv.GetRequest) (*pbv.GetResponse
 	if err != nil {
 		return nil, err
 	}
-	return &pbv.GetResponse{Value: v.Val}, nil
+	return &pbv.GetResponse{Value: s.onRead(req.GetKey(), v.Val, false)}, nil
+}
+
+// onRead passes a value this node returns through the node's ReadFault, if
+// its FaultPolicy has one (F6); otherwise it returns val.
+func (s *Server) onRead(key, val string, signed bool) string {
+	if rf, ok := s.ex.fault.(ReadFault); ok {
+		return rf.OnRead(key, val, signed)
+	}
+	return val
 }
 
 // Set submits one write as a SharedLog{Seq, Sets: [req]} and, in CommitSync
@@ -363,11 +372,20 @@ func (s *Server) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest) (
 	if err := s.divergedErr(); err != nil {
 		return nil, err
 	}
+	var resp *pbv.GetVerifiedResponse
+	var err error
 	if req.GetCertified() {
-		return s.getCertified(ctx, []byte(req.GetKey()))
+		resp, err = s.getCertified(ctx, []byte(req.GetKey()))
+	} else {
+		p := s.proveResp([]byte(req.GetKey()))
+		resp, err = p.resp, p.err
 	}
-	p := s.proveResp([]byte(req.GetKey()))
-	return p.resp, p.err
+	if err != nil {
+		return nil, err
+	}
+	// After the proof: proof, root and version are those of the real value.
+	resp.Value = s.onRead(req.GetKey(), resp.GetValue(), false)
+	return resp, nil
 }
 
 // DefaultCertifiedWait bounds how long a certified read waits.
