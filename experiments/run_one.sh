@@ -883,6 +883,11 @@ fi
 if [ "$SIGN_READS" != off ]; then
   rate_args="$rate_args --sign-reads=$SIGN_READS"
 fi
+# The client checks certified reads against the same quorum as the nodes
+# (ycsbbench --attest-quorum, phase 2; 0 = its default 2f+1).
+if [ "$ATTEST_QUORUM_N" != 0 ]; then
+  rate_args="$rate_args --attest-quorum=$ATTEST_QUORUM_N"
+fi
 log "starting ycsbbench: $CLIENTS clients over $N nodes, mode $(hbdb_bench_mode "$BACKEND")"
 hbdb_compose exec -T client ycsbbench \
   --load-path="/ycsb/$WORKLOAD.load.dat" --run-path="/ycsb/$WORKLOAD.run.dat" \

@@ -1247,10 +1247,10 @@ itest rejok EXP=it_rejok FAULT=none ATTEST_EVERY=1 READ_MODE=certified DURATION=
 eq "itest rejected_reads=0 passes" "$it_rc" 0
 itest p3flags EXP=it_p3 ATTEST_EVERY=1 ATTEST_QUORUM=f+1 READ_MODE=certified FAILOVER=1 SIGN_READS=always DURATION=2s STUB_BENCH_SECS=1
 eq "itest phase 3 knobs rc" "$it_rc" 0
-grep -q -- 'ycsbbench .* --read-mode=certified .*--failover --sign-reads=always' "$SB/state/calls" && ok || bad "itest: ycsbbench --failover/--sign-reads: $(grep ycsbbench "$SB/state/calls" | head -n 1)"
+grep -q -- 'ycsbbench .* --read-mode=certified .*--failover --sign-reads=always --attest-quorum=2' "$SB/state/calls" && ok || bad "itest: ycsbbench --failover/--sign-reads/--attest-quorum: $(grep ycsbbench "$SB/state/calls" | head -n 1)"
 eq "itest ATTEST_QUORUM=f+1 reaches up.sh as 2" "$(cat "$SB/state/attest_quorum" 2>/dev/null)" 2
 itest p3default EXP=it_p3d DURATION=2s STUB_BENCH_SECS=1
-grep -q -- '--failover\|--sign-reads' "$SB/state/calls" && bad "itest: phase 3 bench flags without FAILOVER/SIGN_READS" || ok
+grep -q -- '--failover\|--sign-reads\|--attest-quorum' "$SB/state/calls" && bad "itest: phase 3 bench flags without FAILOVER/SIGN_READS/ATTEST_QUORUM" || ok
 eq "itest default ATTEST_QUORUM reaches up.sh as 0" "$(cat "$SB/state/attest_quorum" 2>/dev/null)" 0
 
 # up.sh turns NODE_FAULTS into gen_compose.py --node-fault flags.
