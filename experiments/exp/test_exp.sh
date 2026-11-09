@@ -106,7 +106,7 @@ newtree() {
 #!/usr/bin/env bash
 # Stub of run_one.sh: log the environment, append one row (23 columns).
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-echo "EXP=$EXP BACKEND=$BACKEND N=$N F=$F CLIENTS=$CLIENTS BLOCK_SIZE=$BLOCK_SIZE WORKLOAD=$WORKLOAD RTT_MS=$RTT_MS FAULT=$FAULT REP=$REP COMMIT_MODE=$COMMIT_MODE DURATION=${DURATION:-} RATE=${RATE:-0} VERIFY_SIGS=${VERIFY_SIGS:-none} READ_MODE=${READ_MODE:-plain} ATTEST_EVERY=${ATTEST_EVERY:-0} HOOK=${PRE_DOWN_HOOK:-}" >>"$root/stub.log"
+echo "EXP=$EXP BACKEND=$BACKEND N=$N F=$F CLIENTS=$CLIENTS BLOCK_SIZE=$BLOCK_SIZE WORKLOAD=$WORKLOAD RTT_MS=$RTT_MS FAULT=$FAULT REP=$REP COMMIT_MODE=$COMMIT_MODE DURATION=${DURATION:-} RATE=${RATE:-0} VERIFY_SIGS=${VERIFY_SIGS:-none} READ_MODE=${READ_MODE:-plain} ATTEST_EVERY=${ATTEST_EVERY:-0} ATTEST_QUORUM=${ATTEST_QUORUM:-auto} FAILOVER=${FAILOVER:-0} SIGN_READS=${SIGN_READS:-off} HOOK=${PRE_DOWN_HOOK:-}" >>"$root/stub.log"
 if [ -n "${STUB_RC:-}" ] && { [ -z "${STUB_BACKEND:-}" ] || [ "$STUB_BACKEND" = "$BACKEND" ]; }; then
   exit "$STUB_RC"
 fi
@@ -224,7 +224,7 @@ eq "E1 N=4 block 100 workload a rtt 0 no fault" "$(grep -vc 'N=4 F=0 CLIENTS=[0-
 eq "E1 clients" "$(grep 'BACKEND=raft ' "$ROOT/stub.log" | sed 's/.*CLIENTS=\([0-9]*\) .*REP=\([0-9]\) .*/\1\/\2/' | tr '\n' ' ')" "4/1 16/1 64/1 256/1 4/2 16/2 64/2 256/2 4/3 16/3 64/3 256/3 "
 eq "E1 rep outermost across backends" "$(sed -n '1p;16p;17p' "$ROOT/stub.log" | sed 's/.*BACKEND=\([a-z0-9]*\) .*REP=\([0-9]\) .*/\1\/\2/' | tr '\n' ' ')" "kafka/1 bft2/1 kafka/2 "
 eq "E1 re-executed once under caffeinate -dims" "$(grep -c "^caffeinate -dims $ROOT/experiments/exp/e1_clients.sh$" "$CAFFEINATE_LOG")" 1
-eq "E1 params file" "$(cut -d= -f1 "$ROOT/results/raw/e1.params" | tr '\n' ' ')" "DURATION WARMUP CPUS MEM LOAD_THREADS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT RATE MAX_INFLIGHT VERIFY_SIGS READ_MODE ATTEST_EVERY commit "
+eq "E1 params file" "$(cut -d= -f1 "$ROOT/results/raw/e1.params" | tr '\n' ' ')" "DURATION WARMUP CPUS MEM LOAD_THREADS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT RATE MAX_INFLIGHT VERIFY_SIGS READ_MODE ATTEST_EVERY ATTEST_QUORUM FAILOVER SIGN_READS commit "
 contains "E1 params values" "$(cat "$ROOT/results/raw/e1.params")" "DURATION=60s"
 eq "E1 no hook" "$(grep -vc 'HOOK=$' "$ROOT/stub.log")" 0
 contains "E1 summary" "$OUT" "rows present: 48 / 48 planned"
@@ -606,6 +606,48 @@ eq "e9 real run ok" "$RC" 0
 eq "e9: 2 runs (plain, certified)" "$(calls)" 2
 contains "e9: run_one gets ATTEST_EVERY and READ_MODE" "$(cat "$ROOT/stub.log")" "READ_MODE=certified ATTEST_EVERY=1"
 eq "e9: certified rows in e9-a1-certified" "$(rows e9-a1-certified)" 1
+
+# ---- phase 3 drivers: E10-E12 ----
+newtree e10
+OUT="$("$ROOT/experiments/exp/e10_readcost.sh" --dry-run 2>/dev/null)"
+eq "e10 --dry-run: 48 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 48
+eq "e10: 4 EXPs" "$(printf '%s\n' "$OUT" | grep -o 'EXP=[^ ]*' | sort -u | tr '\n' ' ')" "EXP=e10-certified EXP=e10-certified-signall EXP=e10-plain EXP=e10-quorum "
+eq "e10: workload a runs" "$(printf '%s\n' "$OUT" | grep -c ' WORKLOAD=a ')" 24
+eq "e10: workload c runs" "$(printf '%s\n' "$OUT" | grep -c ' WORKLOAD=c ')" 24
+eq "e10: no fault" "$(printf '%s\n' "$OUT" | grep '^DRY_RUN: ' | grep -vc 'FAULT=none')" 0
+E10_RATE_RAFT=500 BACKENDS=raft REPS=1 EXTRA_REPS=0 E10_READS="certified-signall quorum" E10_WORKLOADS=a drv e10_readcost.sh
+eq "e10 real run ok" "$RC" 0
+eq "e10: 2 runs" "$(calls)" 2
+contains "e10: signall = certified + SIGN_READS=always" "$(cat "$ROOT/stub.log")" "EXP=e10-certified-signall BACKEND=raft"
+contains "e10: signall env" "$(grep e10-certified-signall "$ROOT/stub.log")" "RATE=500 VERIFY_SIGS=none READ_MODE=certified ATTEST_EVERY=1 ATTEST_QUORUM=auto FAILOVER=0 SIGN_READS=always"
+contains "e10: quorum env" "$(grep e10-quorum "$ROOT/stub.log")" "READ_MODE=quorum ATTEST_EVERY=1"
+contains "e10: params record SIGN_READS" "$(cat "$ROOT/results/raw/e10-certified-signall.params")" "SIGN_READS=always"
+
+newtree e11
+OUT="$("$ROOT/experiments/exp/e11_account.sh" --dry-run 2>/dev/null)"
+eq "e11 --dry-run: 42 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 42
+eq "e11: 7 EXPs" "$(printf '%s\n' "$OUT" | grep -o 'EXP=[^ ]*' | sort -u | wc -l | tr -d ' ')" 7
+eq "e11: faults on node4 at 60" "$(printf '%s\n' "$OUT" | grep '^DRY_RUN: ' | grep -o 'FAULT=[^ ]*' | sort -u | tr '\n' ' ')" "FAULT=F4:node4@60 FAULT=F6:node4@60 FAULT=F6E:node4@60 "
+BACKENDS=bft2 REPS=1 EXTRA_REPS=0 E11_PAIRS="F6:cert-fo-sign F4:plain" drv e11_account.sh
+eq "e11 real run ok" "$RC" 0
+eq "e11: 2 runs" "$(calls)" 2
+contains "e11: cert-fo-sign env" "$(grep e11-F6-cert-fo-sign "$ROOT/stub.log")" "FAULT=F6:node4@60 REP=1 COMMIT_MODE=sync DURATION=180s RATE=0 VERIFY_SIGS=none READ_MODE=certified ATTEST_EVERY=1 ATTEST_QUORUM=auto FAILOVER=1 SIGN_READS=on-failure"
+contains "e11: plain env" "$(grep e11-F4-plain "$ROOT/stub.log")" "READ_MODE=plain ATTEST_EVERY=1 ATTEST_QUORUM=auto FAILOVER=0 SIGN_READS=off"
+OUT="$(E11_PAIRS="F5:plain" "$ROOT/experiments/exp/e11_account.sh" --dry-run 2>&1 || true)"
+contains "e11: bad pair" "$OUT" "E11_PAIRS: fault must be F4, F6 or F6E"
+
+newtree e12
+OUT="$("$ROOT/experiments/exp/e12_quorum.sh" --dry-run 2>/dev/null)"
+eq "e12 --dry-run: 24 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 24
+eq "e12: 4 EXPs" "$(printf '%s\n' "$OUT" | grep -o 'EXP=[^ ]*' | sort -u | tr '\n' ' ')" "EXP=e12-q2f1-certified EXP=e12-q2f1-quorum EXP=e12-qf1-certified EXP=e12-qf1-quorum "
+eq "e12: F5-F4 on raft too" "$(printf '%s\n' "$OUT" | grep '^DRY_RUN: ' | grep -c 'BACKEND=raft .*FAULT=F5-F4:node4,node3@60')" 12
+OUT="$(NS="4 7" "$ROOT/experiments/exp/e12_quorum.sh" --dry-run 2>/dev/null)"
+eq "e12 NS=4 7: 48 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 48
+contains "e12 N=7 hits f+1=3 nodes" "$OUT" "N=7 F=2 CLIENTS=256 BLOCK_SIZE=100 WORKLOAD=a RTT_MS=0 FAULT=F5-F4:node7,node6,node5@60"
+BACKENDS=raft REPS=1 EXTRA_REPS=0 E12_QUORUMS="f+1" E12_READS="certified" drv e12_quorum.sh
+eq "e12 real run ok" "$RC" 0
+contains "e12: env" "$(cat "$ROOT/stub.log")" "EXP=e12-qf1-certified BACKEND=raft N=4 F=1"
+contains "e12: quorum env" "$(cat "$ROOT/stub.log")" "READ_MODE=certified ATTEST_EVERY=1 ATTEST_QUORUM=f+1 FAILOVER=1 SIGN_READS=off"
 
 echo "test_exp.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -168,6 +168,8 @@ exp_params_current() {
     "${KAFKA_CPUS:-2}" "${KAFKA_MEM:-1536m}" "${TM_TIMEOUT_COMMIT:-default}" "${RATE:-0}" "${MAX_INFLIGHT:-4096}"
   printf 'VERIFY_SIGS=%s\nREAD_MODE=%s\nATTEST_EVERY=%s\n' \
     "${VERIFY_SIGS:-none}" "${READ_MODE:-plain}" "${ATTEST_EVERY:-0}"
+  printf 'ATTEST_QUORUM=%s\nFAILOVER=%s\nSIGN_READS=%s\n' \
+    "${ATTEST_QUORUM:-auto}" "${FAILOVER:-0}" "${SIGN_READS:-off}"
   printf 'commit=%s\n' "$(exp_commit)"
 }
 
@@ -183,7 +185,23 @@ exp_params_default() {
     VERIFY_SIGS) echo none ;;
     READ_MODE) echo plain ;;
     ATTEST_EVERY) echo 0 ;;
+    ATTEST_QUORUM) echo auto ;;
+    FAILOVER) echo 0 ;;
+    SIGN_READS) echo off ;;
   esac
+}
+
+# exp_rate_for PREFIX BACKEND (phase 3 drivers): the open-loop rate of
+# BACKEND: <PREFIX>_RATE_<BACKEND>, else <PREFIX>_RATE, else E9's
+# E9_RATE_<BACKEND> / E9_RATE (80% of the E7 saturation throughput, Task 2);
+# empty = closed loop.
+exp_rate_for() {
+  local up v
+  up="$(echo "$2" | tr '[:lower:]' '[:upper:]')"
+  for v in "${1}_RATE_$up" "${1}_RATE" "E9_RATE_$up" E9_RATE; do
+    eval "[ -z \"\${$v:-}\" ] || { echo \"\${$v}\"; return 0; }"
+  done
+  echo ""
 }
 
 # exp_params_record: write results/raw/<EXP>.params before the first run of
