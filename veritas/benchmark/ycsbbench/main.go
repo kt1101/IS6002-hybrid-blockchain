@@ -18,6 +18,9 @@ import (
 	"hybrid/veritas/sigs"
 )
 
+// rstats are the phase 3 reader counters (ops sidecar).
+var rstats readStats
+
 // verifyStats accumulates the response size and proof-check time of the
 // verified reads (driver.Options.OnVerify), for the ops sidecar.
 var verifyStats verifyAcc
@@ -66,7 +69,9 @@ var (
 	rate              = kingpin.Flag("rate", "Open-loop load: total requests per second issued at fixed intervals regardless of completions, latency measured from the scheduled time (0: closed loop, every worker waits for its reply)").Default("0").Float64()
 	maxInflight       = kingpin.Flag("max-inflight", "Open-loop load: at most this many outstanding requests; an operation due while the cap is reached is dropped and counted, not queued").Default("4096").Int()
 	signSets          = kingpin.Flag("sign", "Sign every Set with the Ed25519 key of client<k> (driver k) derived from --key-seed (nodes with --verify-sigs)").Bool()
-	readModeFlag      = kingpin.Flag("read-mode", "Reads: plain (Get), verified (GetVerified, Merkle proof checked) or certified (also a quorum of root attestations)").Default("plain").Enum("plain", "verified", "certified")
+	readModeFlag      = kingpin.Flag("read-mode", "Reads: plain (Get), verified (GetVerified, Merkle proof checked), certified (also a quorum of root attestations) or quorum (plain Gets from f+1 nodes that must agree)").Default("plain").Enum("plain", "verified", "certified", "quorum")
+	failoverFlag      = kingpin.Flag("failover", "Move a worker's reads to the next node when its node is evicted, diverged (DataLoss) or served a read that failed its proof (writes stay on the worker's node)").Bool()
+	signReadsFlag     = kingpin.Flag("sign-reads", "Certified reads: ask the node to sign never (off), only again after a read failed its proof (on-failure), or always; a signed bad read is reported as evidence").Default(signOff).Enum(signOff, signOnFailure, signAlways)
 	attestQuorum      = kingpin.Flag("attest-quorum", "Certified reads: attestations needed (0: 2f+1 of the nodes in --veritas-addrs)").Default("0").Int()
 	keySeedFlag       = kingpin.Flag("key-seed", "Seed of the client keys (the nodes' --key-seed)").Default(sigs.DefaultSeed).String()
 	settleTimeout     = kingpin.Flag("settle-timeout", "Deadline for every node to serve Get for a sample of loaded keys before the run phase").Default("10m").Duration()
@@ -138,6 +143,9 @@ func main() {
 	if *mode == "tm" {
 		*tsoAddr = ""
 	}
+	if *signReadsFlag != signOff && *readModeFlag != "certified" {
+		kingpin.Fatalf("--sign-reads=%s needs --read-mode=certified", *signReadsFlag)
+	}
 
 	addrs := strings.Split(*veritasAddrs, ",")
 	clis := make([]*driver.Driver, 0)
@@ -150,17 +158,22 @@ func main() {
 	if err != nil {
 		kingpin.Fatalf("%v", err)
 	}
-	for i := 0; i < *driverNum; i++ {
+	// Node k of --veritas-addrs (in order, duplicates removed) is node k+1.
+	nodeAddrs := uniqueStrings(addrs)
+	nNodes := len(nodeAddrs)
+	readOpts := func() driver.Options {
 		opts := driver.Options{ReadMode: readMode, OnVerify: verifyStats.observe}
 		if readMode == driver.ReadCertified {
-			// Node k of --veritas-addrs (in order, duplicates removed) is node k+1.
-			n := len(uniqueStrings(addrs))
-			opts.NodeKeys = sigs.NodeKeys(*keySeedFlag, n)
+			opts.NodeKeys = sigs.NodeKeys(*keySeedFlag, nNodes)
 			opts.Quorum = *attestQuorum
 			if opts.Quorum <= 0 {
-				opts.Quorum = 2*((n-1)/3) + 1
+				opts.Quorum = 2*((nNodes-1)/3) + 1
 			}
 		}
+		return opts
+	}
+	for i := 0; i < *driverNum; i++ {
+		opts := readOpts()
 		if *signSets {
 			opts.ClientID = sigs.ClientID(i)
 			opts.Key = sigs.KeyFor(*keySeedFlag, opts.ClientID)
@@ -170,6 +183,36 @@ func main() {
 			panic(err)
 		}
 		clis = append(clis, cli)
+	}
+
+	// Phase 3 readers (failover, signed reads, evidence, quorum reads) share
+	// one driver per node; without these options reads keep going through
+	// clis[i].Get as in phase 2.
+	useReader := readMode == driver.ReadQuorum || *failoverFlag || *signReadsFlag != signOff
+	var nodeAPIs []nodeAPI
+	if useReader {
+		for _, addr := range nodeAddrs {
+			nd, err := driver.OpenWith(addr, "", benchmark.GenRandString(16), readOpts())
+			if err != nil {
+				panic(err)
+			}
+			defer nd.Close()
+			nodeAPIs = append(nodeAPIs, nd)
+		}
+	}
+	rcfg := readerConfig{Mode: readMode, Failover: *failoverFlag, SignReads: *signReadsFlag, F: (nNodes - 1) / 3}
+	// newWorkerReader is the reader of a worker of driver i (nil: no reader).
+	newWorkerReader := func(i int) *reader {
+		if !useReader {
+			return nil
+		}
+		primary := 0
+		for k, a := range nodeAddrs {
+			if a == addrs[i%len(addrs)] {
+				primary = k
+			}
+		}
+		return newReader(nodeAPIs, primary, rcfg, &rstats)
 	}
 
 	// Data-load phase.
@@ -280,10 +323,16 @@ func main() {
 	}()
 
 	if *rate > 0 {
+		var readers []*reader
+		if useReader {
+			for i := range clis {
+				readers = append(readers, newWorkerReader(i))
+			}
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runOpenLoop(runCtx, rec, clis, runBuf)
+			runOpenLoop(runCtx, rec, clis, readers, runBuf)
 		}()
 	}
 	for i := 0; *rate == 0 && i < *driverNum; i++ {
@@ -291,6 +340,7 @@ func main() {
 			wg.Add(1)
 			go func(seq int) {
 				defer wg.Done()
+				rd := newWorkerReader(seq)
 				// A worker whose node is stopped or unreachable (F1, F2)
 				// would otherwise fail fast in a loop; it pauses instead.
 				bo := benchmark.Backoff{Min: *errBackoffMin, Max: *errBackoffMax}
@@ -307,7 +357,11 @@ func main() {
 						switch op.ReqType {
 						case benchmark.GetOp:
 							var val string
-							val, err = clis[seq].Get(runCtx, op.Key)
+							if rd != nil {
+								val, err = rd.Read(runCtx, op.Key)
+							} else {
+								val, err = clis[seq].Get(runCtx, op.Key)
+							}
 							rec.ObserveGet(time.Now(), time.Since(t0), val, err)
 						case benchmark.SetOp:
 							err = clis[seq].Set(runCtx, op.Key, op.Val)
@@ -368,7 +422,14 @@ func main() {
 		x := benchmark.OpsExtra{Dropped: s.Dropped, ReadBytesMean: rb, VerifyMicrosMean: vu,
 			ProofErrors:    rec.ErrorKindCount(benchmark.ErrKindProof),
 			CertErrors:     rec.ErrorKindCount(benchmark.ErrKindCert),
-			DataLossErrors: rec.ErrorKindCount(benchmark.ErrKindDataLoss)}
+			DataLossErrors: rec.ErrorKindCount(benchmark.ErrKindDataLoss),
+
+			RejectedReads:       rstats.Rejected.Load(),
+			QuorumErrors:        rstats.QuorumErrors.Load(),
+			Failovers:           rstats.Failovers.Load(),
+			WrongBeforeFailover: rstats.WrongBeforeFailover.Load(),
+			EvidenceSent:        rstats.EvidenceSent.Load(),
+			CertTimeouts:        rstats.CertTimeouts.Load()}
 		if err := benchmark.WriteOpsCSV(*opsPath, rec.OpSummaries(), x); err != nil {
 			panic(err)
 		}
@@ -376,9 +437,10 @@ func main() {
 }
 
 // runOpenLoop issues the operations of runBuf at --rate (benchmark.OpenLoop);
-// operation i goes to driver i mod len(clis). Latency is measured from the
+// operation i goes to driver i mod len(clis) (its reads to readers[i mod
+// len(clis)] when readers is not nil). Latency is measured from the
 // scheduled time; dropped operations are recorded with ObserveDropped.
-func runOpenLoop(ctx context.Context, rec *benchmark.Recorder, clis []*driver.Driver, runBuf <-chan *benchmark.Request) {
+func runOpenLoop(ctx context.Context, rec *benchmark.Recorder, clis []*driver.Driver, readers []*reader, runBuf <-chan *benchmark.Request) {
 	var idx uint64
 	var mu sync.Mutex
 	next := func() *benchmark.Request {
@@ -394,12 +456,19 @@ func runOpenLoop(ctx context.Context, rec *benchmark.Recorder, clis []*driver.Dr
 	}
 	do := func(ctx context.Context, op *benchmark.Request, scheduled time.Time) {
 		mu.Lock()
-		cli := clis[idx%uint64(len(clis))]
+		k := idx % uint64(len(clis))
 		idx++
 		mu.Unlock()
+		cli := clis[k]
 		switch op.ReqType {
 		case benchmark.GetOp:
-			val, err := cli.Get(ctx, op.Key)
+			var val string
+			var err error
+			if readers != nil {
+				val, err = readers[k].Read(ctx, op.Key)
+			} else {
+				val, err = cli.Get(ctx, op.Key)
+			}
 			rec.ObserveGet(time.Now(), time.Since(scheduled), val, err)
 		case benchmark.SetOp:
 			err := cli.Set(ctx, op.Key, op.Val)

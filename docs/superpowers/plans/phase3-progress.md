@@ -2,7 +2,7 @@
 
 Đọc cùng: plan `docs/superpowers/plans/2026-11-09-phase3-accountability.md`, spec `docs/superpowers/specs/2026-11-09-phase3-accountability-design.md`.
 Nhánh `claude/wizardly-robinson-fdaa8d` (worktree `.claude/worktrees/wizardly-robinson-fdaa8d`), dựa trên phase 2 `claude/charming-hopper-hy6x4e`. **Chưa push.**
-Cập nhật: 2026-11-10.
+Cập nhật: 2026-11-10 (Task 7 xong).
 
 ## Task đã xong
 
@@ -15,24 +15,16 @@ Cập nhật: 2026-11-10.
 | 5 + 6 (Accountant, eviction, signed reads, evidence) | `0a3ad5b` | một commit chung (xem "Khác plan") |
 | 8 (harness) | `1f78ebf`, `e5dc2af` | chưa smoke run trên Docker (Step 4) |
 | 9 (driver E10–E12, rq6.py) | `fa5f62d` | |
-| 7 phần 1 (recorder cột ops, driver API) | `0a14006` | `reader.go` chưa viết |
+| 7 phần 1 (recorder cột ops, driver API) | `0a14006` | |
+| 7 phần 2 (`reader.go`, cờ ycsbbench) | xem `git log` | `go vet` + `go test -race ./veritas/...` qua |
 
-Trang Notion tiến độ (memory `notion-progress-page`): id `413fc8af-e746-8111-9bc0-fa78f79150a2`, đã cập nhật tới Task 6.
+Trang Notion tiến độ (memory `notion-progress-page`): id `413fc8af-e746-8111-9bc0-fa78f79150a2`, đã cập nhật tới Task 7.
 
-## Task đang làm: Task 7 (client)
+## Task 7 (client): xong
 
-Đã có (`0a14006`):
-- `veritas/benchmark/recorder.go`: `OpsExtra` + 6 cột cuối `.ops.csv`: `rejected_reads,quorum_errors,failovers,wrong_before_failover,evidence_sent,cert_timeouts` (thêm `cert_timeouts` so với plan, cho RQ7).
-- `veritas/driver/driver.go`: `ReadQuorum` (`--read-mode=quorum`; `Get` của driver là Get thường), `GetCertifiedResp(ctx, key, signed)` (trả cả phản hồi khi proof/cert sai), `Evicted`, `ReportEvidence`.
-
-Còn làm (Step 1, 3–5 của Task 7):
-1. `veritas/benchmark/ycsbbench/reader.go` + `reader_test.go` theo Interfaces của plan (`nodeAPI`, `readerConfig`, `newReader`, `Read`, `ErrNoNode`, `readStats`). Quyết định đã chọn:
-   - Một bộ driver dùng chung **mỗi node một driver** (`ReadMode` plain, `NodeKeys`/`Quorum` cho certified), mỗi worker một `reader` với node chính = node của driver worker (`addrs[i%len(addrs)]` → chỉ số trong `uniqueStrings(addrs)`). Reader có mutex (vòng mở dùng chung), gọi mạng ngoài lock.
-   - Chỉ dùng reader khi `--read-mode=quorum` hoặc `--failover` hoặc `--sign-reads != off`; còn lại giữ đường `clis[i].Get` cũ (không đổi hiệu năng phase 2).
-   - Bằng chứng chỉ gửi khi lỗi là `ErrProofInvalid` (không gửi khi chỉ cert sai). `cert_timeouts` = `DeadlineExceeded` ở đọc certified.
-   - Ghi vẫn gửi node chính của worker.
-2. `main.go`: cờ `--failover`, `--sign-reads=off|on-failure|always`, `--read-mode` thêm `quorum`; vòng kín và `runOpenLoop` gọi `reader.Read`; điền 6 trường mới của `OpsExtra`.
-3. Test: `go vet` + `go test -race ./veritas/...` trong `hbdb-build`; commit `bench: reader with failover, signed reads, evidence reports and quorum reads`; cập nhật Notion.
+- `veritas/benchmark/ycsbbench/reader.go`: `reader` (một cho mỗi worker vòng kín; vòng mở một cho mỗi khe driver, có mutex), driver dùng chung mỗi node một cái. Chỉ dùng khi `--read-mode=quorum`, `--failover` hoặc `--sign-reads != off`.
+- Quyết định: lỗi chứng chỉ (`ErrCertInvalid`) chỉ chuyển node, không đánh dấu nghi ngờ (node có thể chậm); lỗi proof đánh dấu nghi ngờ. Đọc lại có ký trả đúng (F6E) → trả giá trị đó, node vẫn bị nghi ngờ. `cert_timeouts` chỉ đếm khi context của lượt chạy còn sống. Không có `--failover` thì reader luôn ở node chính. `--sign-reads != off` cần `--read-mode=certified`.
+- Quorum: lỗi `DataLoss`/`PermissionDenied` của một node trong bộ → loại node đó, thử bộ kế tiếp; lỗi khác trả ngay. Hai bộ khác nhau → `ErrQuorumMismatch`.
 
 ## Sau Task 7
 
