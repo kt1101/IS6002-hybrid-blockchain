@@ -11,8 +11,9 @@
 // tx too large, tx already in the cache, ...) or a non-zero CheckTx code is
 // returned as an error. The core waits for its block on Deliver.
 //
-// App.DeliverTx pushes a copy of every tx to Deliver in Tendermint's
-// DeliverTx order, which is the same on every node, the proposer included.
+// App.DeliverTx queues a copy of every tx for Deliver (never waiting, see
+// DeliverQueueBytes) in Tendermint's DeliverTx order, which is the same on
+// every node, the proposer included.
 // The core runs with --version-mode=ordered: its height is the count of
 // delivered blocks, so it only needs that common order.
 package tendermint
@@ -118,8 +119,8 @@ func (t *Tendermint) Deliver() <-chan []byte { return t.app.Deliver() }
 func (t *Tendermint) Close() error {
 	t.closeOnce.Do(func() {
 		close(t.closeCh)
-		// Close the app first: a DeliverTx blocked on a full Deliver returns
-		// (closeCh), so nothing holds the server's app lock any more.
+		// Close the app first (DeliverTx never waits, so nothing holds the
+		// server's app lock), then stop the server.
 		t.app.Close()
 		if err := t.srv.Stop(); err != nil && !errors.Is(err, service.ErrAlreadyStopped) {
 			t.closeErr = fmt.Errorf("tendermint consensus: stop abci server: %w", err)

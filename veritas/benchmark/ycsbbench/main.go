@@ -8,13 +8,39 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/alecthomas/kingpin.v2"
 
 	"hybrid/veritas/benchmark"
 	"hybrid/veritas/driver"
+	"hybrid/veritas/sigs"
 )
+
+// verifyStats accumulates the response size and proof-check time of the
+// verified reads (driver.Options.OnVerify), for the ops sidecar.
+var verifyStats verifyAcc
+
+type verifyAcc struct {
+	n, bytes, micros atomic.Int64
+}
+
+func (v *verifyAcc) observe(respBytes int, micros int64) {
+	v.n.Add(1)
+	v.bytes.Add(int64(respBytes))
+	v.micros.Add(micros)
+}
+
+// means returns the mean response bytes and proof-check microseconds (0, 0
+// without verified reads).
+func (v *verifyAcc) means() (float64, float64) {
+	n := v.n.Load()
+	if n == 0 {
+		return 0, 0
+	}
+	return float64(v.bytes.Load()) / float64(n), float64(v.micros.Load()) / float64(n)
+}
 
 var (
 	dataLoad          = kingpin.Flag("load-path", "Path of YCSB initial data").Required().String()
@@ -37,6 +63,12 @@ var (
 	loadTimeout       = kingpin.Flag("load-timeout", "Deadline of the data-load phase; exceeding it or any failed load Set aborts the run").Default("20m").Duration()
 	loadOpTimeout     = kingpin.Flag("load-op-timeout", "Deadline of one load Set attempt (bounded by --load-timeout)").Default("30s").Duration()
 	loadAttempts      = kingpin.Flag("load-attempts", "Attempts per record in the data-load phase; a record failing all of them is a failed load Set").Default("3").Int()
+	rate              = kingpin.Flag("rate", "Open-loop load: total requests per second issued at fixed intervals regardless of completions, latency measured from the scheduled time (0: closed loop, every worker waits for its reply)").Default("0").Float64()
+	maxInflight       = kingpin.Flag("max-inflight", "Open-loop load: at most this many outstanding requests; an operation due while the cap is reached is dropped and counted, not queued").Default("4096").Int()
+	signSets          = kingpin.Flag("sign", "Sign every Set with the Ed25519 key of client<k> (driver k) derived from --key-seed (nodes with --verify-sigs)").Bool()
+	readModeFlag      = kingpin.Flag("read-mode", "Reads: plain (Get), verified (GetVerified, Merkle proof checked) or certified (also a quorum of root attestations)").Default("plain").Enum("plain", "verified", "certified")
+	attestQuorum      = kingpin.Flag("attest-quorum", "Certified reads: attestations needed (0: 2f+1 of the nodes in --veritas-addrs)").Default("0").Int()
+	keySeedFlag       = kingpin.Flag("key-seed", "Seed of the client keys (the nodes' --key-seed)").Default(sigs.DefaultSeed).String()
 	settleTimeout     = kingpin.Flag("settle-timeout", "Deadline for every node to serve Get for a sample of loaded keys before the run phase").Default("10m").Duration()
 )
 
@@ -97,6 +129,12 @@ func main() {
 	if *errBackoffMin < 0 || *errBackoffMax < *errBackoffMin {
 		kingpin.Fatalf("want 0 <= --error-backoff <= --error-backoff-max, got %v and %v", *errBackoffMin, *errBackoffMax)
 	}
+	if *rate < 0 {
+		kingpin.Fatalf("--rate must be >= 0")
+	}
+	if *maxInflight < 1 {
+		kingpin.Fatalf("--max-inflight must be >= 1")
+	}
 	if *mode == "tm" {
 		*tsoAddr = ""
 	}
@@ -108,8 +146,26 @@ func main() {
 			cli.Close()
 		}
 	}()
+	readMode, err := driver.ParseReadMode(*readModeFlag)
+	if err != nil {
+		kingpin.Fatalf("%v", err)
+	}
 	for i := 0; i < *driverNum; i++ {
-		cli, err := driver.Open(addrs[i%len(addrs)], *tsoAddr, benchmark.GenRandString(16))
+		opts := driver.Options{ReadMode: readMode, OnVerify: verifyStats.observe}
+		if readMode == driver.ReadCertified {
+			// Node k of --veritas-addrs (in order, duplicates removed) is node k+1.
+			n := len(uniqueStrings(addrs))
+			opts.NodeKeys = sigs.NodeKeys(*keySeedFlag, n)
+			opts.Quorum = *attestQuorum
+			if opts.Quorum <= 0 {
+				opts.Quorum = 2*((n-1)/3) + 1
+			}
+		}
+		if *signSets {
+			opts.ClientID = sigs.ClientID(i)
+			opts.Key = sigs.KeyFor(*keySeedFlag, opts.ClientID)
+		}
+		cli, err := driver.OpenWith(addrs[i%len(addrs)], *tsoAddr, benchmark.GenRandString(16), opts)
 		if err != nil {
 			panic(err)
 		}
@@ -223,7 +279,14 @@ func main() {
 		}
 	}()
 
-	for i := 0; i < *driverNum; i++ {
+	if *rate > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runOpenLoop(runCtx, rec, clis, runBuf)
+		}()
+	}
+	for i := 0; *rate == 0 && i < *driverNum; i++ {
 		for j := 0; j < *driverConcurrency; j++ {
 			wg.Add(1)
 			go func(seq int) {
@@ -271,6 +334,9 @@ func main() {
 		*driverNum, *driverConcurrency, s.TPS)
 	fmt.Printf("Latency mean/p50/p99: %.3f / %.3f / %.3f ms; errors: %d; wrong gets: %d\n",
 		s.LatMeanMs, s.LatP50Ms, s.LatP99Ms, s.Errors, s.WrongGets)
+	if *rate > 0 {
+		fmt.Printf("Open loop: offered %.2f req/s, max in flight %d, dropped %d\n", *rate, *maxInflight, s.Dropped)
+	}
 	for _, o := range rec.OpSummaries() {
 		fmt.Printf("  %-5s %d ok (%.2f req/s), latency mean/p50/p99: %.3f / %.3f / %.3f ms; errors: %d; aborted: %d\n",
 			o.Op, o.Count, o.TPS, o.LatMeanMs, o.LatP50Ms, o.LatP99Ms, o.Errors, o.Aborted)
@@ -298,9 +364,53 @@ func main() {
 		}
 	}
 	if *opsPath != "" {
-		if err := benchmark.WriteOpsCSV(*opsPath, rec.OpSummaries()); err != nil {
+		rb, vu := verifyStats.means()
+		x := benchmark.OpsExtra{Dropped: s.Dropped, ReadBytesMean: rb, VerifyMicrosMean: vu,
+			ProofErrors:    rec.ErrorKindCount(benchmark.ErrKindProof),
+			CertErrors:     rec.ErrorKindCount(benchmark.ErrKindCert),
+			DataLossErrors: rec.ErrorKindCount(benchmark.ErrKindDataLoss)}
+		if err := benchmark.WriteOpsCSV(*opsPath, rec.OpSummaries(), x); err != nil {
 			panic(err)
 		}
+	}
+}
+
+// runOpenLoop issues the operations of runBuf at --rate (benchmark.OpenLoop);
+// operation i goes to driver i mod len(clis). Latency is measured from the
+// scheduled time; dropped operations are recorded with ObserveDropped.
+func runOpenLoop(ctx context.Context, rec *benchmark.Recorder, clis []*driver.Driver, runBuf <-chan *benchmark.Request) {
+	var idx uint64
+	var mu sync.Mutex
+	next := func() *benchmark.Request {
+		select {
+		case op, ok := <-runBuf:
+			if !ok {
+				return nil
+			}
+			return op
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	do := func(ctx context.Context, op *benchmark.Request, scheduled time.Time) {
+		mu.Lock()
+		cli := clis[idx%uint64(len(clis))]
+		idx++
+		mu.Unlock()
+		switch op.ReqType {
+		case benchmark.GetOp:
+			val, err := cli.Get(ctx, op.Key)
+			rec.ObserveGet(time.Now(), time.Since(scheduled), val, err)
+		case benchmark.SetOp:
+			err := cli.Set(ctx, op.Key, op.Val)
+			rec.ObserveSet(time.Now(), time.Since(scheduled), err)
+		default:
+			panic(fmt.Sprintf("invalid operation: %v", op.ReqType))
+		}
+	}
+	_, dropped := benchmark.OpenLoop{Rate: *rate, MaxInflight: *maxInflight}.Run(ctx, next, do)
+	for i := int64(0); i < dropped; i++ {
+		rec.ObserveDropped()
 	}
 }
 

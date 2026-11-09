@@ -388,7 +388,7 @@ def test_bft2_backend_runs_sidecar_and_core_server_without_kafka_or_tso():
         assert s["volumes"] == ["node%d-data:/data" % i, "/res:/results"]
         cmd = s["command"][-1]
         # Replica i of the static set 1..4, every node gets the same peers.
-        assert ("\nGOMEMLIMIT=153MiB bft2-node --id=%d --peers=%s --listen=0.0.0.0:7200 --api=127.0.0.1:7201 &"
+        assert ("\nGOMEMLIMIT=153MiB bft2-node --id=%d --peers=%s --listen=0.0.0.0:7200 --api=127.0.0.1:7201 --forward-port=7202 &"
                 % (i, BFT2_PEERS_4)) in cmd
         assert ("GOMEMLIMIT=430MiB veritas-kafka --consensus=bft2 --commit-mode=sync"
                 " --version-mode=ordered --node-id=%d --signature=node%d " % (i, i)) in cmd
@@ -632,4 +632,49 @@ def test_cli_publish_ports(tmp_path):
     out = tmp_path / "compose.json"
     assert main(["--backend", "raft", "--n", "2", "--publish-ports", "--out", str(out)]) == 0
     c = json.loads(out.read_text())
+    assert c["services"]["node2"]["ports"] == ["127.0.0.1:19902:1990", "127.0.0.1:19802:7300"]
+
+
+def test_kafka_resources_flag(tmp_path):
+    out = tmp_path / "c.json"
+    assert main(["--backend", "kafka", "--n", "4", "--kafka-cpus", "0.5", "--kafka-mem", "768m",
+                 "--out", str(out)]) == 0
+    k = json.loads(out.read_text())["services"]["kafka"]
+    assert k["cpus"] == 0.5 and k["mem_limit"] == "768m"
+    assert main(["--backend", "kafka", "--n", "4", "--out", str(out)]) == 0
+    k = json.loads(out.read_text())["services"]["kafka"]
+    assert k["cpus"] == 2 and k["mem_limit"] == "1536m"
+
+
+@pytest.mark.parametrize("backend", ["kafka", "raft", "tendermint", "bft2"])
+def test_verify_sigs_and_key_seed_flags(backend):
+    doc = gen(backend, 4, 100, "sync", 0.5, "1g", verify_sigs="all", key_seed="seed1")
+    for i in range(1, 5):
+        cmd = doc["services"]["node%d" % i]["command"][2]
+        assert " --verify-sigs=all --key-seed=seed1 &" in cmd
+    doc = gen(backend, 4, 100, "sync", 0.5, "1g")
+    assert "--verify-sigs" not in doc["services"]["node1"]["command"][2]
+
+
+def test_verify_sigs_needs_core_backend():
+    with pytest.raises(ValueError):
+        gen("kafka-orig", 4, 100, "async", 0.5, "1g", verify_sigs="ingress")
+    with pytest.raises(ValueError):
+        gen("raft", 4, 100, "sync", 0.5, "1g", verify_sigs="some")
+
+
+def test_attest_every_flags():
+    doc = gen("bft2", 4, 100, "sync", 0.5, "1g", key_seed="s", attest_every=10)
+    assert " --key-seed=s --attest-every=10 --n=4 &" in doc["services"]["node2"]["command"][2]
+    with pytest.raises(ValueError):
+        gen("raft", 4, 100, "sync", 0.5, "1g", attest_every=-1)
+
+
+def test_publish_ports_with_phase2_flags():
+    # Merge of the live demo and phase 2: a demo cluster with attestation
+    # gets both the phase-2 flags and the observer flag.
+    c = gen(backend="raft", n=4, block_size=100, commit_mode="sync", cpus=0.5, mem="1g",
+            key_seed="s", attest_every=1, publish_ports=True)
+    line = _veritas_line(c, "node2")
+    assert line.endswith(" --key-seed=s --attest-every=1 --n=4 --demo-events-addr=:7300 &")
     assert c["services"]["node2"]["ports"] == ["127.0.0.1:19902:1990", "127.0.0.1:19802:7300"]

@@ -354,3 +354,23 @@ Chỉ số dùng ở đây: **tỉ lệ ghi** = lượt ghi thành công/giây t
 - **bft2 F1/F2**: vẫn chạy (dừng ghi ≤ 1 s, trừ F2 N=7) nhưng ghi chỉ còn 0,17–0,24 (N=4) và 0,0–0,11 (N=7): khác M3 (ở M3, tps tổng của bft2 F1 còn ~80% mốc không lỗi). Nguyên nhân phù hợp với giới hạn adapter (I3): mỗi view chỉ đề xuất từ hàng đợi của leader hiện tại, view của node chết hết thời gian, và client của node đó bị mất.
 - **F5-F2 (f+1 node im lặng)**: tendermint và bft2 mất liveness như M3 (bft2 vẫn còn ghi lẻ tẻ: tps tổng ~620 gồm đọc).
 - **F4 / F5-F4**: đồng thuận không bị ảnh hưởng; auditor phát hiện sau 0,2–1,5 s ở mọi lượt có dòng CSV; client đọc từ node lỗi nhận giá trị sai (`wrong_gets` 1,7–42 nghìn mỗi lượt, cao hơn M3 vì đọc nhiều hơn). bft2 F4/F5-F4 chỉ có ở 1g (trên).
+
+## Giai đoạn 2: hiện thực (2026-11-06 → 2026-11-07)
+
+Theo spec `docs/superpowers/specs/2026-11-03-phase2-fair-comparison-and-verifiability-design.md` và plan cùng ngày. Đã có mã và unit test cho P7–P10 (Task 1–11); **chưa chạy** E7, E7f, E6', E8, E9 và `check_consistency.sh` (phiên hiện thực không có Docker). Chưa có số liệu giai đoạn 2, nên chưa có tag `p7-openloop` … `p10-attest`.
+
+### Môi trường kiểm thử
+
+- Go 1.20.14 (module chính) và 1.23.12 (`bft2node/`) chạy trực tiếp trên host, không qua `hbdb-build`.
+- Sandbox không cho mở cổng local: các test cần TCP listen (cụm bft2 trong tiến trình, raft, `httptest`, `veritas/audit`) không chạy được, kể cả hai test mới `TestForwardedBlockCommitsFromAnyLeader` và `TestForwardSurvivesOneCrash`. Phải chạy lại cả bộ test trong `hbdb-build` / `hbdb-bft2-build` trước khi đo.
+
+### Sai lệch so với plan
+
+- `protoc-gen-go` v1.3.2 thay vì v1.3.5: v1.3.2 sinh lại đúng từng byte file đã commit; `scripts/genproto_docker.sh` cố định phiên bản này.
+- Tốc độ vòng mở là một chiều của cấu hình trong `exp_lib.sh` (cột `offered_rps`), nên E7 quét nhiều tốc độ trong cùng một EXP; biến môi trường `RATE` trong `.params` chỉ là giá trị mặc định.
+- `.ops.csv` thêm các cột cuối `dropped, read_bytes_mean, verify_cpu_us_mean, proof_errors, cert_errors, dataloss_errors`.
+- bft2: lỗi F2 (iptables) chặn cả cổng chuyển tiếp 7202, để node im lặng không tiếp tục chuyển block.
+- tendermint: khi tràn hàng đợi 128 MiB, app đóng Deliver (vòng apply dừng) nhưng tiến trình không thoát.
+- Attestation: chỉ ký các block có tx ở height chia hết cho K, cộng với block không có tx khi root đã đổi từ lần ký trước; node rảnh có root chưa được ký gửi một block rỗng ("tick"). Nếu ký cả block chỉ chứa attestation thì cụm rảnh sinh block vô hạn; nếu không có tick thì đọc có xác nhận với K > 1 trên cụm rảnh không bao giờ xong.
+- Đọc có xác nhận: proof luôn được lấy tại một height đã ký (ngay nếu root hiện tại là root đã ký, nếu không thì vòng apply lấy proof ngay sau height được ký kế tiếp), rồi chờ xác nhận, tổng tối đa 5 s.
+- E8 và E9 tự gọi lại chính mình cho mỗi cặp cấu hình, mỗi cặp một EXP (`e8-<sigs>-<read>`, `e9-a<K>-<read>`), vì CSV không có cột cho chúng.

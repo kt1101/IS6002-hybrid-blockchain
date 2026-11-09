@@ -191,12 +191,15 @@ func (m *SharedLog) GetSets() []*SetRequest {
 }
 
 type Block struct {
-	Txs                  []*SharedLog `protobuf:"bytes,1,rep,name=txs,proto3" json:"txs,omitempty"`
-	Type                 MessageType  `protobuf:"varint,2,opt,name=type,proto3,enum=controller.MessageType" json:"type,omitempty"`
-	Signature            string       `protobuf:"bytes,3,opt,name=signature,proto3" json:"signature,omitempty"`
-	XXX_NoUnkeyedLiteral struct{}     `json:"-"`
-	XXX_unrecognized     []byte       `json:"-"`
-	XXX_sizecache        int32        `json:"-"`
+	Txs       []*SharedLog `protobuf:"bytes,1,rep,name=txs,proto3" json:"txs,omitempty"`
+	Type      MessageType  `protobuf:"varint,2,opt,name=type,proto3,enum=controller.MessageType" json:"type,omitempty"`
+	Signature string       `protobuf:"bytes,3,opt,name=signature,proto3" json:"signature,omitempty"`
+	// Phase 2 (--attest-every): root attestations of the proposing node,
+	// carried by its next block (or by a block with no txs).
+	Attestations         []*RootAttestation `protobuf:"bytes,4,rep,name=attestations,proto3" json:"attestations,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}           `json:"-"`
+	XXX_unrecognized     []byte             `json:"-"`
+	XXX_sizecache        int32              `json:"-"`
 }
 
 func (m *Block) Reset()         { *m = Block{} }
@@ -245,6 +248,78 @@ func (m *Block) GetSignature() string {
 	return ""
 }
 
+func (m *Block) GetAttestations() []*RootAttestation {
+	if m != nil {
+		return m.Attestations
+	}
+	return nil
+}
+
+// Phase 2: node node_id's Ed25519 signature on
+// "veritas-attest" 0x00 height(8 bytes big-endian) root.
+type RootAttestation struct {
+	Height               int64    `protobuf:"varint,1,opt,name=height,proto3" json:"height,omitempty"`
+	Root                 []byte   `protobuf:"bytes,2,opt,name=root,proto3" json:"root,omitempty"`
+	NodeId               int32    `protobuf:"varint,3,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Sig                  []byte   `protobuf:"bytes,4,opt,name=sig,proto3" json:"sig,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *RootAttestation) Reset()         { *m = RootAttestation{} }
+func (m *RootAttestation) String() string { return proto.CompactTextString(m) }
+func (*RootAttestation) ProtoMessage()    {}
+func (*RootAttestation) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bb98f398e219d6a8, []int{4}
+}
+
+func (m *RootAttestation) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_RootAttestation.Unmarshal(m, b)
+}
+func (m *RootAttestation) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_RootAttestation.Marshal(b, m, deterministic)
+}
+func (m *RootAttestation) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_RootAttestation.Merge(m, src)
+}
+func (m *RootAttestation) XXX_Size() int {
+	return xxx_messageInfo_RootAttestation.Size(m)
+}
+func (m *RootAttestation) XXX_DiscardUnknown() {
+	xxx_messageInfo_RootAttestation.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_RootAttestation proto.InternalMessageInfo
+
+func (m *RootAttestation) GetHeight() int64 {
+	if m != nil {
+		return m.Height
+	}
+	return 0
+}
+
+func (m *RootAttestation) GetRoot() []byte {
+	if m != nil {
+		return m.Root
+	}
+	return nil
+}
+
+func (m *RootAttestation) GetNodeId() int32 {
+	if m != nil {
+		return m.NodeId
+	}
+	return 0
+}
+
+func (m *RootAttestation) GetSig() []byte {
+	if m != nil {
+		return m.Sig
+	}
+	return nil
+}
+
 type GetRequest struct {
 	Signature            string   `protobuf:"bytes,1,opt,name=signature,proto3" json:"signature,omitempty"`
 	Key                  string   `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
@@ -257,7 +332,7 @@ func (m *GetRequest) Reset()         { *m = GetRequest{} }
 func (m *GetRequest) String() string { return proto.CompactTextString(m) }
 func (*GetRequest) ProtoMessage()    {}
 func (*GetRequest) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bb98f398e219d6a8, []int{4}
+	return fileDescriptor_bb98f398e219d6a8, []int{5}
 }
 
 func (m *GetRequest) XXX_Unmarshal(b []byte) error {
@@ -303,7 +378,7 @@ func (m *GetResponse) Reset()         { *m = GetResponse{} }
 func (m *GetResponse) String() string { return proto.CompactTextString(m) }
 func (*GetResponse) ProtoMessage()    {}
 func (*GetResponse) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bb98f398e219d6a8, []int{5}
+	return fileDescriptor_bb98f398e219d6a8, []int{6}
 }
 
 func (m *GetResponse) XXX_Unmarshal(b []byte) error {
@@ -332,10 +407,14 @@ func (m *GetResponse) GetValue() string {
 }
 
 type SetRequest struct {
-	Signature            string   `protobuf:"bytes,1,opt,name=signature,proto3" json:"signature,omitempty"`
-	Key                  string   `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
-	Value                string   `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
-	Version              int64    `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
+	Signature string `protobuf:"bytes,1,opt,name=signature,proto3" json:"signature,omitempty"`
+	Key       string `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	Value     string `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
+	Version   int64  `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
+	// Phase 2 (--verify-sigs): the signing client's id ("client<k>") and its
+	// Ed25519 signature on key 0x00 value 0x00 version(8 bytes big-endian).
+	ClientId             string   `protobuf:"bytes,5,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
+	Sig                  []byte   `protobuf:"bytes,6,opt,name=sig,proto3" json:"sig,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -345,7 +424,7 @@ func (m *SetRequest) Reset()         { *m = SetRequest{} }
 func (m *SetRequest) String() string { return proto.CompactTextString(m) }
 func (*SetRequest) ProtoMessage()    {}
 func (*SetRequest) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bb98f398e219d6a8, []int{6}
+	return fileDescriptor_bb98f398e219d6a8, []int{7}
 }
 
 func (m *SetRequest) XXX_Unmarshal(b []byte) error {
@@ -394,6 +473,20 @@ func (m *SetRequest) GetVersion() int64 {
 	return 0
 }
 
+func (m *SetRequest) GetClientId() string {
+	if m != nil {
+		return m.ClientId
+	}
+	return ""
+}
+
+func (m *SetRequest) GetSig() []byte {
+	if m != nil {
+		return m.Sig
+	}
+	return nil
+}
+
 type SetResponse struct {
 	Txid                 string   `protobuf:"bytes,1,opt,name=txid,proto3" json:"txid,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
@@ -405,7 +498,7 @@ func (m *SetResponse) Reset()         { *m = SetResponse{} }
 func (m *SetResponse) String() string { return proto.CompactTextString(m) }
 func (*SetResponse) ProtoMessage()    {}
 func (*SetResponse) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bb98f398e219d6a8, []int{7}
+	return fileDescriptor_bb98f398e219d6a8, []int{8}
 }
 
 func (m *SetResponse) XXX_Unmarshal(b []byte) error {
@@ -445,7 +538,7 @@ func (m *BatchSetRequest) Reset()         { *m = BatchSetRequest{} }
 func (m *BatchSetRequest) String() string { return proto.CompactTextString(m) }
 func (*BatchSetRequest) ProtoMessage()    {}
 func (*BatchSetRequest) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bb98f398e219d6a8, []int{8}
+	return fileDescriptor_bb98f398e219d6a8, []int{9}
 }
 
 func (m *BatchSetRequest) XXX_Unmarshal(b []byte) error {
@@ -490,7 +583,7 @@ func (m *BatchSetResponse) Reset()         { *m = BatchSetResponse{} }
 func (m *BatchSetResponse) String() string { return proto.CompactTextString(m) }
 func (*BatchSetResponse) ProtoMessage()    {}
 func (*BatchSetResponse) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bb98f398e219d6a8, []int{9}
+	return fileDescriptor_bb98f398e219d6a8, []int{10}
 }
 
 func (m *BatchSetResponse) XXX_Unmarshal(b []byte) error {
@@ -511,56 +604,209 @@ func (m *BatchSetResponse) XXX_DiscardUnknown() {
 
 var xxx_messageInfo_BatchSetResponse proto.InternalMessageInfo
 
+// Phase 2: value, version, Merkle proof and root of one key, all taken at
+// the same height (one hold of the executor lock).
+type GetVerifiedRequest struct {
+	Key string `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	// Phase 2 (B2): wait until the proof's height is certified (a quorum
+	// of root attestations) and return the attestations.
+	Certified            bool     `protobuf:"varint,2,opt,name=certified,proto3" json:"certified,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *GetVerifiedRequest) Reset()         { *m = GetVerifiedRequest{} }
+func (m *GetVerifiedRequest) String() string { return proto.CompactTextString(m) }
+func (*GetVerifiedRequest) ProtoMessage()    {}
+func (*GetVerifiedRequest) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bb98f398e219d6a8, []int{11}
+}
+
+func (m *GetVerifiedRequest) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_GetVerifiedRequest.Unmarshal(m, b)
+}
+func (m *GetVerifiedRequest) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_GetVerifiedRequest.Marshal(b, m, deterministic)
+}
+func (m *GetVerifiedRequest) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_GetVerifiedRequest.Merge(m, src)
+}
+func (m *GetVerifiedRequest) XXX_Size() int {
+	return xxx_messageInfo_GetVerifiedRequest.Size(m)
+}
+func (m *GetVerifiedRequest) XXX_DiscardUnknown() {
+	xxx_messageInfo_GetVerifiedRequest.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_GetVerifiedRequest proto.InternalMessageInfo
+
+func (m *GetVerifiedRequest) GetKey() string {
+	if m != nil {
+		return m.Key
+	}
+	return ""
+}
+
+func (m *GetVerifiedRequest) GetCertified() bool {
+	if m != nil {
+		return m.Certified
+	}
+	return false
+}
+
+type GetVerifiedResponse struct {
+	Value                 string             `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	Version               int64              `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	Height                int64              `protobuf:"varint,3,opt,name=height,proto3" json:"height,omitempty"`
+	RootDigest            []byte             `protobuf:"bytes,4,opt,name=root_digest,json=rootDigest,proto3" json:"root_digest,omitempty"`
+	SideNodes             [][]byte           `protobuf:"bytes,5,rep,name=side_nodes,json=sideNodes,proto3" json:"side_nodes,omitempty"`
+	NonMembershipLeafData []byte             `protobuf:"bytes,6,opt,name=non_membership_leaf_data,json=nonMembershipLeafData,proto3" json:"non_membership_leaf_data,omitempty"`
+	Attestations          []*RootAttestation `protobuf:"bytes,7,rep,name=attestations,proto3" json:"attestations,omitempty"`
+	XXX_NoUnkeyedLiteral  struct{}           `json:"-"`
+	XXX_unrecognized      []byte             `json:"-"`
+	XXX_sizecache         int32              `json:"-"`
+}
+
+func (m *GetVerifiedResponse) Reset()         { *m = GetVerifiedResponse{} }
+func (m *GetVerifiedResponse) String() string { return proto.CompactTextString(m) }
+func (*GetVerifiedResponse) ProtoMessage()    {}
+func (*GetVerifiedResponse) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bb98f398e219d6a8, []int{12}
+}
+
+func (m *GetVerifiedResponse) XXX_Unmarshal(b []byte) error {
+	return xxx_messageInfo_GetVerifiedResponse.Unmarshal(m, b)
+}
+func (m *GetVerifiedResponse) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	return xxx_messageInfo_GetVerifiedResponse.Marshal(b, m, deterministic)
+}
+func (m *GetVerifiedResponse) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_GetVerifiedResponse.Merge(m, src)
+}
+func (m *GetVerifiedResponse) XXX_Size() int {
+	return xxx_messageInfo_GetVerifiedResponse.Size(m)
+}
+func (m *GetVerifiedResponse) XXX_DiscardUnknown() {
+	xxx_messageInfo_GetVerifiedResponse.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_GetVerifiedResponse proto.InternalMessageInfo
+
+func (m *GetVerifiedResponse) GetValue() string {
+	if m != nil {
+		return m.Value
+	}
+	return ""
+}
+
+func (m *GetVerifiedResponse) GetVersion() int64 {
+	if m != nil {
+		return m.Version
+	}
+	return 0
+}
+
+func (m *GetVerifiedResponse) GetHeight() int64 {
+	if m != nil {
+		return m.Height
+	}
+	return 0
+}
+
+func (m *GetVerifiedResponse) GetRootDigest() []byte {
+	if m != nil {
+		return m.RootDigest
+	}
+	return nil
+}
+
+func (m *GetVerifiedResponse) GetSideNodes() [][]byte {
+	if m != nil {
+		return m.SideNodes
+	}
+	return nil
+}
+
+func (m *GetVerifiedResponse) GetNonMembershipLeafData() []byte {
+	if m != nil {
+		return m.NonMembershipLeafData
+	}
+	return nil
+}
+
+func (m *GetVerifiedResponse) GetAttestations() []*RootAttestation {
+	if m != nil {
+		return m.Attestations
+	}
+	return nil
+}
+
 func init() {
 	proto.RegisterEnum("controller.MessageType", MessageType_name, MessageType_value)
 	proto.RegisterType((*VerifyRequest)(nil), "controller.VerifyRequest")
 	proto.RegisterType((*VerifyResponse)(nil), "controller.VerifyResponse")
 	proto.RegisterType((*SharedLog)(nil), "controller.SharedLog")
 	proto.RegisterType((*Block)(nil), "controller.Block")
+	proto.RegisterType((*RootAttestation)(nil), "controller.RootAttestation")
 	proto.RegisterType((*GetRequest)(nil), "controller.GetRequest")
 	proto.RegisterType((*GetResponse)(nil), "controller.GetResponse")
 	proto.RegisterType((*SetRequest)(nil), "controller.SetRequest")
 	proto.RegisterType((*SetResponse)(nil), "controller.SetResponse")
 	proto.RegisterType((*BatchSetRequest)(nil), "controller.BatchSetRequest")
 	proto.RegisterType((*BatchSetResponse)(nil), "controller.BatchSetResponse")
+	proto.RegisterType((*GetVerifiedRequest)(nil), "controller.GetVerifiedRequest")
+	proto.RegisterType((*GetVerifiedResponse)(nil), "controller.GetVerifiedResponse")
 }
 
 func init() { proto.RegisterFile("proto/veritas/veritas.proto", fileDescriptor_bb98f398e219d6a8) }
 
 var fileDescriptor_bb98f398e219d6a8 = []byte{
-	// 509 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x9c, 0x54, 0x5d, 0x6f, 0xd3, 0x30,
-	0x14, 0x25, 0x4d, 0xba, 0x91, 0x9b, 0x7d, 0x54, 0x16, 0x63, 0xa1, 0x1b, 0xa2, 0x0b, 0x42, 0x54,
-	0x43, 0x2a, 0x52, 0x91, 0xc6, 0x0b, 0x12, 0x5a, 0x35, 0x34, 0x21, 0x6d, 0x3c, 0x24, 0x88, 0x07,
-	0x78, 0x88, 0xdc, 0xe6, 0xb6, 0x8d, 0x96, 0xd9, 0x99, 0xed, 0x56, 0xab, 0xf8, 0x05, 0xfc, 0x69,
-	0x84, 0xe2, 0x24, 0x4b, 0x52, 0x86, 0x04, 0x3c, 0xd5, 0x3e, 0x3e, 0xf7, 0x9c, 0x7b, 0x7d, 0xea,
-	0xc0, 0x41, 0x2a, 0xb8, 0xe2, 0xaf, 0x97, 0x28, 0x62, 0x45, 0x65, 0xf9, 0x3b, 0xd0, 0x28, 0x81,
-	0x09, 0x67, 0x4a, 0xf0, 0x24, 0x41, 0xe1, 0x1d, 0xc1, 0xf6, 0x17, 0x14, 0xf1, 0x74, 0xe5, 0xe3,
-	0xcd, 0x02, 0xa5, 0x22, 0x1d, 0x30, 0xaf, 0x70, 0xe5, 0x1a, 0x3d, 0xa3, 0x6f, 0xfb, 0xd9, 0xd2,
-	0xfb, 0x61, 0xc0, 0x4e, 0xc9, 0x91, 0x29, 0x67, 0x12, 0xc9, 0x33, 0x70, 0x04, 0xe7, 0x2a, 0x8c,
-	0xe2, 0x19, 0x4a, 0xa5, 0xc9, 0x5b, 0x3e, 0x64, 0xd0, 0x99, 0x46, 0xc8, 0x53, 0x00, 0x19, 0x47,
-	0x18, 0x32, 0x1e, 0xa1, 0x74, 0x5b, 0x3d, 0xb3, 0xbf, 0xe5, 0xdb, 0x19, 0xf2, 0x29, 0x03, 0xc8,
-	0x5b, 0x70, 0x19, 0x67, 0xe1, 0x35, 0x5e, 0x8f, 0x51, 0xc8, 0x79, 0x9c, 0x86, 0x09, 0xd2, 0x69,
-	0x18, 0x51, 0x45, 0x5d, 0x53, 0x8b, 0xed, 0x31, 0xce, 0x2e, 0xef, 0x8e, 0x2f, 0x90, 0x4e, 0xcf,
-	0xa8, 0xa2, 0xde, 0x47, 0xb0, 0x83, 0x39, 0x15, 0x18, 0x5d, 0xf0, 0x59, 0xd6, 0xaa, 0xc4, 0x1b,
-	0xed, 0x6e, 0xfa, 0xd9, 0x92, 0x1c, 0x83, 0x25, 0x51, 0xe5, 0x86, 0xce, 0xf0, 0xf1, 0xa0, 0x1a,
-	0x74, 0x10, 0xa0, 0x2a, 0x46, 0xf4, 0x35, 0xc7, 0xfb, 0x0e, 0xed, 0x51, 0xc2, 0x27, 0x57, 0xe4,
-	0x25, 0x98, 0xea, 0x56, 0xba, 0x86, 0xae, 0xd9, 0x6b, 0xd4, 0x94, 0x56, 0x7e, 0xc6, 0x20, 0xaf,
-	0xc0, 0x52, 0xab, 0x14, 0xdd, 0x56, 0xcf, 0xe8, 0xef, 0x0c, 0xf7, 0xeb, 0xcc, 0x4b, 0x94, 0x92,
-	0xce, 0xf0, 0xf3, 0x2a, 0x45, 0x5f, 0x93, 0xc8, 0x21, 0xd8, 0x32, 0x9e, 0x31, 0xaa, 0x16, 0x02,
-	0xf5, 0x4c, 0xb6, 0x5f, 0x01, 0xde, 0x3b, 0x80, 0xf3, 0xbb, 0x86, 0x9a, 0x5c, 0x63, 0x8d, 0x5b,
-	0x26, 0xd2, 0xaa, 0x12, 0x79, 0x0e, 0x8e, 0xae, 0x2e, 0xd2, 0x78, 0x04, 0xed, 0x25, 0x4d, 0x16,
-	0x65, 0x69, 0xbe, 0xf1, 0x12, 0x80, 0xe0, 0xbf, 0x2d, 0x2a, 0x4d, 0xb3, 0xa6, 0x49, 0x5c, 0xd8,
-	0x5c, 0xa2, 0x90, 0x31, 0x67, 0xae, 0xa5, 0x6f, 0xbd, 0xdc, 0x7a, 0x47, 0xe0, 0x04, 0xb5, 0x96,
-	0x08, 0x58, 0xea, 0x36, 0x8e, 0x0a, 0x27, 0xbd, 0xf6, 0xbe, 0xc1, 0xee, 0x88, 0xaa, 0xc9, 0xfc,
-	0xaf, 0xbb, 0xfa, 0x97, 0x34, 0x09, 0x74, 0x2a, 0xf1, 0xbc, 0x89, 0xe3, 0x17, 0xe0, 0xd4, 0x72,
-	0x21, 0x0e, 0x6c, 0x9e, 0xa6, 0xa9, 0xe0, 0x4b, 0xec, 0x3c, 0x20, 0x36, 0xb4, 0x4f, 0xc7, 0x5c,
-	0xa8, 0x8e, 0x31, 0xfc, 0x69, 0x80, 0x95, 0xfd, 0x2d, 0xc9, 0x09, 0x98, 0xe7, 0xa8, 0x48, 0xc3,
-	0xa8, 0x4a, 0xa9, 0xbb, 0xff, 0x1b, 0x5e, 0x0c, 0x7b, 0x02, 0x66, 0xb0, 0x5e, 0x17, 0xfc, 0xa1,
-	0xae, 0x7e, 0x49, 0xef, 0x61, 0x23, 0x7f, 0x57, 0xe4, 0x49, 0x9d, 0xd2, 0x78, 0x8f, 0xdd, 0xee,
-	0x7d, 0x47, 0x85, 0xc0, 0x07, 0x78, 0x58, 0x0e, 0x4d, 0x0e, 0xea, 0xbc, 0xb5, 0x7b, 0xee, 0x1e,
-	0xde, 0x7f, 0x98, 0xcb, 0x8c, 0x76, 0xbf, 0x6e, 0x37, 0x3e, 0x17, 0xe3, 0x0d, 0xbd, 0x7d, 0xf3,
-	0x2b, 0x00, 0x00, 0xff, 0xff, 0x6c, 0xdb, 0x99, 0x2a, 0x46, 0x04, 0x00, 0x00,
+	// 695 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x9c, 0x55, 0xcd, 0x4e, 0xdb, 0x40,
+	0x10, 0xae, 0x63, 0x27, 0xc1, 0x93, 0x00, 0xd1, 0xb6, 0x80, 0x1b, 0x68, 0x01, 0x57, 0x55, 0x11,
+	0x95, 0xa8, 0x44, 0x25, 0x7a, 0xa9, 0x84, 0x40, 0x54, 0x08, 0x09, 0x38, 0x6c, 0xaa, 0x1e, 0xda,
+	0x43, 0xb4, 0xc4, 0x43, 0xb2, 0x22, 0x78, 0x8d, 0x77, 0x89, 0xc8, 0x23, 0xf4, 0x09, 0x7a, 0xe8,
+	0xab, 0xf4, 0x19, 0xfa, 0x4c, 0xd5, 0x6e, 0x6c, 0xfc, 0xc3, 0x4f, 0x9b, 0x9e, 0xbc, 0x3b, 0xfb,
+	0xcd, 0xec, 0xcc, 0xb7, 0xdf, 0x8c, 0x61, 0x39, 0x8a, 0x85, 0x12, 0xef, 0x46, 0x18, 0x73, 0xc5,
+	0x64, 0xfa, 0xdd, 0x32, 0x56, 0x02, 0x3d, 0x11, 0xaa, 0x58, 0x0c, 0x87, 0x18, 0xfb, 0xeb, 0x30,
+	0xfb, 0x05, 0x63, 0x7e, 0x3e, 0xa6, 0x78, 0x75, 0x8d, 0x52, 0x91, 0x16, 0xd8, 0x17, 0x38, 0xf6,
+	0xac, 0x35, 0x6b, 0xc3, 0xa5, 0x7a, 0xe9, 0x7f, 0xb7, 0x60, 0x2e, 0xc5, 0xc8, 0x48, 0x84, 0x12,
+	0xc9, 0x2a, 0x34, 0x62, 0x21, 0x54, 0x37, 0xe0, 0x7d, 0x94, 0xca, 0x80, 0x9b, 0x14, 0xb4, 0xe9,
+	0xc0, 0x58, 0xc8, 0x0b, 0x00, 0xc9, 0x03, 0xec, 0x86, 0x22, 0x40, 0xe9, 0x55, 0xd6, 0xec, 0x8d,
+	0x26, 0x75, 0xb5, 0xe5, 0x54, 0x1b, 0xc8, 0x07, 0xf0, 0x42, 0x11, 0x76, 0x2f, 0xf1, 0xf2, 0x0c,
+	0x63, 0x39, 0xe0, 0x51, 0x77, 0x88, 0xec, 0xbc, 0x1b, 0x30, 0xc5, 0x3c, 0xdb, 0x04, 0x5b, 0x08,
+	0x45, 0x78, 0x72, 0x7b, 0x7c, 0x8c, 0xec, 0xfc, 0x80, 0x29, 0xe6, 0x1f, 0x81, 0xdb, 0x19, 0xb0,
+	0x18, 0x83, 0x63, 0xd1, 0xd7, 0xa9, 0x4a, 0xbc, 0x32, 0xb7, 0xdb, 0x54, 0x2f, 0xc9, 0x26, 0x38,
+	0x12, 0xd5, 0xe4, 0xc2, 0xc6, 0xf6, 0xe2, 0x56, 0x56, 0xe8, 0x56, 0x07, 0x55, 0x52, 0x22, 0x35,
+	0x18, 0xff, 0x97, 0x05, 0xd5, 0xfd, 0xa1, 0xe8, 0x5d, 0x90, 0x37, 0x60, 0xab, 0x1b, 0xe9, 0x59,
+	0xc6, 0x69, 0xa1, 0xe0, 0x94, 0xde, 0x45, 0x35, 0x82, 0xbc, 0x05, 0x47, 0x8d, 0x23, 0xf4, 0x2a,
+	0x6b, 0xd6, 0xc6, 0xdc, 0xf6, 0x52, 0x1e, 0x79, 0x82, 0x52, 0xb2, 0x3e, 0x7e, 0x1e, 0x47, 0x48,
+	0x0d, 0x88, 0xac, 0x80, 0x2b, 0x79, 0x3f, 0x64, 0xea, 0x3a, 0x46, 0x53, 0x94, 0x4b, 0x33, 0x03,
+	0xd9, 0x85, 0x26, 0x53, 0x0a, 0xa5, 0x62, 0x8a, 0x8b, 0x50, 0x7a, 0x8e, 0xb9, 0x7c, 0x39, 0x1f,
+	0x92, 0x0a, 0xa1, 0xf6, 0x32, 0x0c, 0x2d, 0x38, 0xf8, 0x03, 0x98, 0x2f, 0x01, 0xc8, 0x22, 0xd4,
+	0x06, 0xc8, 0xfb, 0x03, 0x95, 0x50, 0x92, 0xec, 0x08, 0x01, 0x47, 0x3f, 0x8d, 0x49, 0xbb, 0x49,
+	0xcd, 0x9a, 0x2c, 0x41, 0x5d, 0xbf, 0x4d, 0x97, 0x07, 0x26, 0xb7, 0x2a, 0xad, 0xe9, 0xed, 0x51,
+	0x60, 0x48, 0xe5, 0x7d, 0xcf, 0x31, 0x58, 0xbd, 0xf4, 0x3f, 0x02, 0x1c, 0xde, 0x92, 0x57, 0x2c,
+	0xcb, 0x2a, 0x97, 0x95, 0xa8, 0xa7, 0x92, 0xa9, 0xe7, 0x15, 0x34, 0x8c, 0x77, 0xa2, 0x9c, 0x67,
+	0x50, 0x1d, 0xb1, 0xe1, 0x75, 0xea, 0x3a, 0xd9, 0xf8, 0x3f, 0x2d, 0x80, 0xce, 0x7f, 0xdf, 0x91,
+	0x05, 0xb5, 0x73, 0x41, 0x89, 0x07, 0xf5, 0x11, 0xc6, 0x92, 0x8b, 0xd0, 0x54, 0x63, 0xd3, 0x74,
+	0x4b, 0x96, 0xc1, 0xed, 0x0d, 0x39, 0x86, 0x4a, 0x97, 0x5f, 0x35, 0x3e, 0x33, 0x13, 0x43, 0x46,
+	0x40, 0x2d, 0x23, 0x60, 0x1d, 0x1a, 0x9d, 0x5c, 0x09, 0x04, 0x1c, 0x75, 0xc3, 0x83, 0x24, 0x31,
+	0xb3, 0xf6, 0xbf, 0xc1, 0xfc, 0x3e, 0x53, 0xbd, 0xc1, 0x3f, 0x17, 0x31, 0x8d, 0x52, 0x09, 0xb4,
+	0xb2, 0xe0, 0x93, 0x24, 0xfc, 0x03, 0x20, 0x87, 0xa8, 0x4c, 0x5b, 0x72, 0x0c, 0x1e, 0x6c, 0x5e,
+	0x9d, 0x45, 0x0f, 0x63, 0x65, 0x50, 0x86, 0xb2, 0x19, 0x9a, 0x19, 0xfc, 0x1f, 0x15, 0x78, 0x5a,
+	0x08, 0xf3, 0xd8, 0x2b, 0xe5, 0x09, 0xad, 0x14, 0x09, 0xcd, 0x94, 0x67, 0x17, 0x94, 0x57, 0x9a,
+	0x13, 0xce, 0x5f, 0xe6, 0x44, 0x75, 0x9a, 0x39, 0x51, 0x7b, 0x64, 0x4e, 0xdc, 0x69, 0xaf, 0xfa,
+	0x94, 0xed, 0xb5, 0xf9, 0x1a, 0x1a, 0xb9, 0x96, 0x26, 0x0d, 0xa8, 0xef, 0x45, 0x51, 0x2c, 0x46,
+	0xd8, 0x7a, 0x42, 0x5c, 0xa8, 0xee, 0x9d, 0x89, 0x58, 0xb5, 0xac, 0xed, 0xdf, 0x15, 0x70, 0x74,
+	0xaa, 0x64, 0x07, 0xec, 0x43, 0x54, 0xa4, 0xf0, 0x90, 0x59, 0xd7, 0xb4, 0x97, 0xee, 0xd8, 0x13,
+	0xa6, 0x77, 0xc0, 0xee, 0x94, 0xfd, 0x3a, 0x0f, 0xf8, 0xe5, 0x45, 0xb8, 0x0b, 0xb5, 0xc9, 0x4c,
+	0x26, 0xcf, 0xf3, 0x90, 0xc2, 0x2c, 0x6f, 0xb7, 0xef, 0x3b, 0x4a, 0x02, 0x7c, 0x82, 0x99, 0x54,
+	0x54, 0xa4, 0xc0, 0x4b, 0x49, 0xc7, 0xed, 0x95, 0xfb, 0x0f, 0x93, 0x30, 0xa7, 0xa6, 0xbd, 0x53,
+	0x01, 0x91, 0x97, 0xa5, 0x3a, 0x4b, 0x02, 0x6d, 0xaf, 0x3e, 0x78, 0x3e, 0x89, 0xb7, 0x3f, 0xff,
+	0x75, 0xb6, 0xf0, 0xeb, 0x3a, 0xab, 0x99, 0xed, 0xfb, 0x3f, 0x01, 0x00, 0x00, 0xff, 0xff, 0xfc,
+	0x24, 0x22, 0x9e, 0xd2, 0x06, 0x00, 0x00,
 }
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -579,6 +825,8 @@ type NodeClient interface {
 	Set(ctx context.Context, in *SetRequest, opts ...grpc.CallOption) (*SetResponse, error)
 	Verify(ctx context.Context, in *VerifyRequest, opts ...grpc.CallOption) (*VerifyResponse, error)
 	BatchSet(ctx context.Context, in *BatchSetRequest, opts ...grpc.CallOption) (*BatchSetResponse, error)
+	// Phase 2: a read with a Merkle proof the client checks (RQ4).
+	GetVerified(ctx context.Context, in *GetVerifiedRequest, opts ...grpc.CallOption) (*GetVerifiedResponse, error)
 }
 
 type nodeClient struct {
@@ -625,12 +873,23 @@ func (c *nodeClient) BatchSet(ctx context.Context, in *BatchSetRequest, opts ...
 	return out, nil
 }
 
+func (c *nodeClient) GetVerified(ctx context.Context, in *GetVerifiedRequest, opts ...grpc.CallOption) (*GetVerifiedResponse, error) {
+	out := new(GetVerifiedResponse)
+	err := c.cc.Invoke(ctx, "/controller.Node/GetVerified", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NodeServer is the server API for Node service.
 type NodeServer interface {
 	Get(context.Context, *GetRequest) (*GetResponse, error)
 	Set(context.Context, *SetRequest) (*SetResponse, error)
 	Verify(context.Context, *VerifyRequest) (*VerifyResponse, error)
 	BatchSet(context.Context, *BatchSetRequest) (*BatchSetResponse, error)
+	// Phase 2: a read with a Merkle proof the client checks (RQ4).
+	GetVerified(context.Context, *GetVerifiedRequest) (*GetVerifiedResponse, error)
 }
 
 // UnimplementedNodeServer can be embedded to have forward compatible implementations.
@@ -648,6 +907,9 @@ func (*UnimplementedNodeServer) Verify(ctx context.Context, req *VerifyRequest) 
 }
 func (*UnimplementedNodeServer) BatchSet(ctx context.Context, req *BatchSetRequest) (*BatchSetResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BatchSet not implemented")
+}
+func (*UnimplementedNodeServer) GetVerified(ctx context.Context, req *GetVerifiedRequest) (*GetVerifiedResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetVerified not implemented")
 }
 
 func RegisterNodeServer(s *grpc.Server, srv NodeServer) {
@@ -726,6 +988,24 @@ func _Node_BatchSet_Handler(srv interface{}, ctx context.Context, dec func(inter
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Node_GetVerified_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetVerifiedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeServer).GetVerified(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/controller.Node/GetVerified",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeServer).GetVerified(ctx, req.(*GetVerifiedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 var _Node_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "controller.Node",
 	HandlerType: (*NodeServer)(nil),
@@ -745,6 +1025,10 @@ var _Node_serviceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BatchSet",
 			Handler:    _Node_BatchSet_Handler,
+		},
+		{
+			MethodName: "GetVerified",
+			Handler:    _Node_GetVerified_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

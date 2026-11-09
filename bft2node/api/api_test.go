@@ -155,3 +155,38 @@ func TestDeliverStreamsCommitLogInOrderToOneSubscriber(t *testing.T) {
 		t.Fatal("stream continued after the commit log closed")
 	}
 }
+
+type fakeForwarder struct{ fakeReplica }
+
+func (f *fakeForwarder) Forward(cmd []byte) error { return f.Submit(cmd) }
+
+// POST /forward queues the body on the replica (Forward, not Submit) with
+// the /submit status codes; it needs no network (recorder).
+func TestForwardHandler(t *testing.T) {
+	f := &fakeForwarder{fakeReplica{log: node.NewCommitLog(1 << 20), max: 10}}
+	h := ForwardHandler(f)
+	do := func(method, path string, body []byte) int {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(method, path, bytes.NewReader(body)))
+		return rec.Code
+	}
+	if code := do(http.MethodPost, wire.ForwardPath, []byte("blk")); code != http.StatusOK {
+		t.Fatalf("forward = %d, want 200", code)
+	}
+	if got := f.submitted(); len(got) != 1 || string(got[0]) != "blk" {
+		t.Fatalf("replica got %q", got)
+	}
+	if code := do(http.MethodPost, wire.ForwardPath, make([]byte, 11)); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized forward = %d, want 413", code)
+	}
+	f.setErr(node.ErrQueueFull)
+	if code := do(http.MethodPost, wire.ForwardPath, []byte("x")); code != http.StatusServiceUnavailable {
+		t.Fatalf("queue-full forward = %d, want 503", code)
+	}
+	if code := do(http.MethodGet, wire.ForwardPath, nil); code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /forward = %d, want 405", code)
+	}
+	if code := do(http.MethodPost, wire.SubmitPath, []byte("x")); code != http.StatusNotFound {
+		t.Fatalf("/submit on the forward endpoint = %d, want 404", code)
+	}
+}

@@ -141,7 +141,7 @@ parse_rc() {
 # ---- lib.sh: consensus ports ----
 eq "ports raft" "$(hbdb_consensus_ports raft)" "7100 7101"
 eq "ports tendermint" "$(hbdb_consensus_ports tendermint)" "26656"
-eq "ports bft2" "$(hbdb_consensus_ports bft2)" "7200"
+eq "ports bft2" "$(hbdb_consensus_ports bft2)" "7200 7202"
 for b in kafka-orig tm-orig kafka; do
   eq "ports $b" "$(hbdb_consensus_ports "$b")" ""
 done
@@ -266,7 +266,7 @@ contains "F5 N=3" "$r" "F5 needs N >= 4"
 r="$(parse_rc F5-F4:node4@20 bft2 4 40)"
 contains "F5 bft2 one node at N=4" "$r" "exactly f+1 = 2 nodes"
 r="$(parse_rc F2:node4@20 bft2 4 40)"
-eq "F2 bft2 parses (network, port 7200)" "${r%%|*}" 0
+eq "F2 bft2 parses (network, ports 7200 7202)" "${r%%|*}" 0
 r="$(parse_rc F5-F3:node3,node4@20 tendermint 4 40)"
 contains "F5-F3" "$r" "F5 combines F2 or F4"
 r="$(parse_rc F4-F2:node4@20 tendermint 4 40)"
@@ -909,7 +909,7 @@ awk -v t="$t_s" -v l="$tl_s" 'BEGIN { exit !(t >= 1.0 && t < 1.6 && l >= 2.0 && 
 grep -q '^docker stop c3 c4$' "$SB/state/calls" && ok || bad "itest f1 docker stop: $(grep stop "$SB/state/calls")"
 contains "itest f1 exemption logged" "$it_err" "container node3 is exited (exit code 0): stopped on purpose by FAULT=F1:node3,node4@1"
 row="$(tail -n 1 "$SB_RAW/it_f1.csv")"
-eq "itest f1 row fields" "$(echo "$row" | awk -F, '{ print NF }')" 22
+eq "itest f1 row fields" "$(echo "$row" | awk -F, '{ print NF }')" 23
 eq "itest f1 fault column" "$(echo "$row" | cut -d, -f11)" "F1:node3+node4@1"
 eq "itest f1 temp files removed" "$(ls -a "$SB_RAW/it_f1" | grep -c -e '\.stopped$' -e '\.fault\.stop$')" 0
 
@@ -1003,7 +1003,7 @@ itest f5nb EXP=it_f5nb BACKEND=bft2 FAULT=F5-F2:node3,node4@0 DURATION=2s STUB_B
 eq "itest f5-f2 bft2 rc" "$it_rc" 0
 eq "itest f5-f2 bft2 NODE_FAULTS empty" "$(cat "$SB/state/node_faults" 2>/dev/null)" ""
 eq "itest f5-f2 bft2 iptables" "$(grep -c ',iptables_applied,node[34],' "$(raw_tag it_f5nb)" 2>/dev/null)" 2
-grep -q ',iptables_drop,node3,tcp OUTPUT --dport/--sport 7200$' "$(raw_tag it_f5nb)" 2>/dev/null && ok || bad "itest f5-f2 bft2 port: $(cat "$(raw_tag it_f5nb)" 2>/dev/null)"
+grep -q ',iptables_drop,node3,tcp OUTPUT --dport/--sport 7200 7202$' "$(raw_tag it_f5nb)" 2>/dev/null && ok || bad "itest f5-f2 bft2 port: $(cat "$(raw_tag it_f5nb)" 2>/dev/null)"
 
 # L: a failed signal (no pid file in the container) is exit 3, no row.
 itest f4fail EXP=it_f4fail BACKEND=kafka FAULT=F2:node4@0 DURATION=2s STUB_BENCH_SECS=1 STUB_EXEC_RC=1
@@ -1048,7 +1048,7 @@ eq "itest snapshots signalled on every node twice" "$(grep -c '^node[1-4] sh -c 
 eq "itest snapshots collected" "$(ls "$SB_RAW/it_side/"*.breakdown/ 2>/dev/null | grep -c 'snap[12]\.json$')" 8
 nb="$(tail -n 1 "$SB_RAW/it_side.csv" 2>/dev/null | cut -d, -f22)"
 eq "itest net_bytes_per_block (4 x 1 MB / 10 blocks)" "$nb" 400000
-eq "itest row has 22 fields" "$(tail -n 1 "$SB_RAW/it_side.csv" | awk -F, '{ print NF }')" 22
+eq "itest row has 23 fields" "$(tail -n 1 "$SB_RAW/it_side.csv" | awk -F, '{ print NF }')" 23
 eq "itest final audit" "$(cat "$(it_tag it_side .final_audit)" 2>/dev/null)" "CONSISTENT"
 grep -q '^auditor --addrs=172.28.0.11:1990,172.28.0.12:1990,172.28.0.13:1990,172.28.0.14:1990 --once$' "$SB/state/auditor_once" 2>/dev/null && ok ||
   bad "itest auditor --once call: $(cat "$SB/state/auditor_once" 2>/dev/null)"
@@ -1157,9 +1157,17 @@ grep -q '^node1 node1 | .*entering leader state' "$(it_tag it_lead .leaders)" 2>
 itest noleaders EXP=it_nolead FAULT=F1:node4@0 DURATION=2s STUB_BENCH_SECS=1
 contains "itest no leader line warns" "$it_err" "no 'entering leader state' line"
 
+# V: ATTEST_EVERY > 0 keeps the "core: diverged" lines of the node logs.
+itest diverged EXP=it_div FAULT=F4:node4@0 ATTEST_EVERY=1 DURATION=2s STUB_BENCH_SECS=1 STUB_LOG_NODE=node4 STUB_LOG_LINE="2026-11-07T10:00:01.450000000Z core: diverged at height 12 (node 4)"
+eq "itest diverged rc" "$it_rc" 0
+grep -q '^node4 node4 | 2026-11-07T10:00:01.450000000Z core: diverged at height 12' "$(it_tag it_div .diverged)" 2>/dev/null && ok || bad "itest diverged file: $(cat "$(it_tag it_div .diverged)" 2>/dev/null) $it_err"
+eq "itest diverged: only node4" "$(wc -l <"$(it_tag it_div .diverged)" | tr -d ' ')" 1
+itest nodiverged EXP=it_nodiv FAULT=none DURATION=2s STUB_BENCH_SECS=1
+eq "itest attest off: no .diverged" "$(it_tag it_nodiv .diverged)" ""
+
 # up.sh turns NODE_FAULTS into gen_compose.py --node-fault flags.
 grep -q 'node_fault_args="$node_fault_args --node-fault $nf"' "$HERE/cluster/up.sh" && ok || bad "up.sh --node-fault"
-grep -q -- '--mem "$MEM" $node_fault_args' "$HERE/cluster/up.sh" && ok || bad "up.sh passes node_fault_args"
+grep -q -- '--kafka-mem "$KAFKA_MEM" $core_args $node_fault_args' "$HERE/cluster/up.sh" && ok || bad "up.sh passes node_fault_args"
 
 # The recorded fault value must be CSV/--tags safe and the tag file-name safe.
 grep -q 'fault_rec="$(echo "$FAULT" | tr '"','"' '"'+'"')"' "$HERE/run_one.sh" && ok || bad "run_one fault_rec"

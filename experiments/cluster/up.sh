@@ -13,6 +13,11 @@
 #      veritas --batch-flush of every node of a core backend).
 #      PUBLISH_PORTS=0 (1: live demo, gen_compose.py --publish-ports: node
 #      gRPC/observer ports and the TSO published on 127.0.0.1 of the host).
+#      KAFKA_CPUS=2 KAFKA_MEM=1536m (Kafka broker caps, gen_compose.py
+#      --kafka-cpus/--kafka-mem), TM_TIMEOUT_COMMIT="" (tendermint: tm_config.py
+#      --timeout-commit; empty = Tendermint's default), VERIFY_SIGS=none and
+#      KEY_SEED, ATTEST_EVERY=0 (phase 2: veritas --verify-sigs, --key-seed,
+#      --attest-every of every core node).
 # Writes experiments/cluster/generated/{compose.json,tm/}.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
@@ -25,6 +30,23 @@ MEM="${MEM:-768m}"
 NODE_FAULTS="${NODE_FAULTS:-}"
 BATCH_FLUSH="${BATCH_FLUSH:-}"
 PUBLISH_PORTS="${PUBLISH_PORTS:-0}"
+KAFKA_CPUS="${KAFKA_CPUS:-2}"
+KAFKA_MEM="${KAFKA_MEM:-1536m}"
+TM_TIMEOUT_COMMIT="${TM_TIMEOUT_COMMIT:-}"
+VERIFY_SIGS="${VERIFY_SIGS:-none}"
+KEY_SEED="${KEY_SEED:-}"
+ATTEST_EVERY="${ATTEST_EVERY:-0}"
+hbdb_require_uint ATTEST_EVERY "$ATTEST_EVERY"
+core_args=""
+if [ "$VERIFY_SIGS" != none ]; then
+  core_args="--verify-sigs $VERIFY_SIGS"
+fi
+if [ "$VERIFY_SIGS" != none ] || [ "$ATTEST_EVERY" != 0 ]; then
+  core_args="$core_args${KEY_SEED:+ --key-seed $KEY_SEED}"
+fi
+if [ "$ATTEST_EVERY" != 0 ]; then
+  core_args="$core_args --attest-every $ATTEST_EVERY"
+fi
 
 hbdb_check_backend
 hbdb_check_n "$N"
@@ -61,14 +83,15 @@ if [ "$BACKEND" = tm-orig ] || [ "$BACKEND" = tendermint ]; then
   # testnet writes hostname-based peers (nodeK); tm_config.py replaces them
   # with the node IPs and applies the original config tweaks (plus, for
   # tendermint, the larger tx/body/block limits: one tx is a Veritas block).
-  python3 "$HBDB_CLUSTER_DIR/tm_config.py" --dir "$HBDB_GEN_DIR/tm" --n "$N" --backend "$BACKEND"
+  python3 "$HBDB_CLUSTER_DIR/tm_config.py" --dir "$HBDB_GEN_DIR/tm" --n "$N" --backend "$BACKEND" \
+    ${TM_TIMEOUT_COMMIT:+--timeout-commit "$TM_TIMEOUT_COMMIT"}
 fi
 
 log "generating compose: backend=$BACKEND n=$N block_size=$BLOCK_SIZE commit_mode=$COMMIT_MODE cpus=$CPUS mem=$MEM${NODE_FAULTS:+ node_faults=$NODE_FAULTS}${BATCH_FLUSH:+ batch_flush=$BATCH_FLUSH}${publish_ports_args:+ publish_ports=1}"
 # shellcheck disable=SC2086
 python3 "$HBDB_CLUSTER_DIR/gen_compose.py" \
   --backend "$BACKEND" --n "$N" --block-size "$BLOCK_SIZE" --commit-mode "$COMMIT_MODE" \
-  --cpus "$CPUS" --mem "$MEM" $node_fault_args $batch_flush_args $publish_ports_args \
+  --cpus "$CPUS" --mem "$MEM" --kafka-cpus "$KAFKA_CPUS" --kafka-mem "$KAFKA_MEM" $core_args $node_fault_args $batch_flush_args $publish_ports_args \
   --tm-dir "$HBDB_GEN_DIR/tm" --ycsb-dir "$HBDB_YCSB_DIR" --results-dir "$HBDB_RESULTS_RAW" \
   --out "$HBDB_COMPOSE_FILE"
 

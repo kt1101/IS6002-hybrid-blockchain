@@ -54,6 +54,7 @@ Figures (main)
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import sys
 from pathlib import Path
@@ -105,8 +106,11 @@ EXPECTED_COLUMNS = [
     "ts", "commit", "exp", "backend", "n", "f", "clients", "block_size",
     "workload", "rtt_ms", "fault", "rep", "commit_mode", "tps", "lat_mean_ms",
     "lat_p50_ms", "lat_p99_ms", "errors", "wrong_gets", "host_cpu_max_pct",
-    "saturated", "net_bytes_per_block",
+    "saturated", "net_bytes_per_block", "offered_rps",
 ]  # same as HBDB_CSV_HEADER in experiments/lib.sh
+# Phase-1 CSVs (results/final/, results/cloud-bf100ms/) have the 22 columns
+# before offered_rps; load_csvs reads them with offered_rps = 0 (closed loop).
+OLD_COLUMNS = EXPECTED_COLUMNS[:-1]
 
 
 class InputError(ValueError):
@@ -127,22 +131,26 @@ def _read_one(path) -> pd.DataFrame:
     if not first:
         raise InputError("%s: empty CSV" % p)
     header = first.split(",")
-    if header != EXPECTED_COLUMNS:
+    if header not in (EXPECTED_COLUMNS, OLD_COLUMNS):
         raise InputError(
             "%s: unexpected CSV header (expected %d columns starting %s,... ending ...,%s; got %d columns: %s)"
             % (p, len(EXPECTED_COLUMNS), EXPECTED_COLUMNS[0], EXPECTED_COLUMNS[-1],
                len(header), first))
     try:
-        return pd.read_csv(p, keep_default_na=False, na_values=[""], encoding="utf-8-sig")
+        df = pd.read_csv(p, keep_default_na=False, na_values=[""], encoding="utf-8-sig")
     except (pd.errors.ParserError, UnicodeDecodeError) as e:
         raise InputError("%s: cannot parse CSV (%s)" % (p, e))
+    if header == OLD_COLUMNS:
+        df["offered_rps"] = 0
+    return df
 
 
 def load_csvs(paths) -> pd.DataFrame:
     """Read and concatenate result CSVs.
 
-    Every file must have exactly the fixed 22-column header (EXPECTED_COLUMNS);
-    otherwise InputError names the file.  Only the empty string counts as
+    Every file must have the fixed 23-column header (EXPECTED_COLUMNS) or the
+    phase-1 22-column one (OLD_COLUMNS, read with offered_rps = 0); otherwise
+    InputError names the file.  Only the empty string counts as
     missing (so a fault named "none" stays a string); empty numeric cells, e.g.
     net_bytes_per_block, become NaN.
     """
@@ -198,14 +206,36 @@ def read_write_latency(path):
     return None
 
 
+def rate_suffix(row) -> str:
+    """run_one.sh's "_rate<RATE>" tag suffix of an open-loop row ("" for
+    offered_rps 0 or missing)."""
+    r = row.get("offered_rps", 0) if hasattr(row, "get") else 0
+    try:
+        if r is None or float(r) <= 0 or math.isnan(float(r)):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    return "_rate" + _cell(float(r) if not isinstance(r, str) else float(r))
+
+
 def _ops_path(base, row):
+    """The ops sidecar of a CSV row: <base>/<exp>/<tag>[_bf..][_kc..][_tc..]
+    [_rate..].ops.csv, or None (missing or ambiguous)."""
+    return run_sidecar(base, row, ".ops.csv")
+
+
+def run_sidecar(base, row, ext):
     d = Path(base) / str(row["exp"])
     tag = run_tag(row)
-    p = d / (tag + ".ops.csv")
+    rs = rate_suffix(row)
+    p = d / (tag + rs + ext)
     if p.exists():
         return p
-    bf = sorted(d.glob(tag + "_bf*.ops.csv"))  # a non-default BATCH_FLUSH
-    return bf[0] if len(bf) == 1 else None
+    # a non-default BATCH_FLUSH / KAFKA_* / TM_TIMEOUT_COMMIT suffix
+    hits = sorted(d.glob(tag + "_*" + rs + ext))
+    if not rs:
+        hits = [h for h in hits if "_rate" not in h.name[len(tag):]]
+    return hits[0] if len(hits) == 1 else None
 
 
 def apply_write_latency(df: pd.DataFrame, base_dirs) -> pd.DataFrame:
@@ -599,6 +629,106 @@ def plot_fault_bars(agg: pd.DataFrame, exp: str, n, metric: str, out_png, refere
     return fig
 
 
+E8_EXP = re.compile(r"^(?P<prefix>.+)-(?P<sigs>none|ingress|all)-(?P<read>plain|verified|certified)$")
+E8_SIGS = ("none", "ingress", "all")
+E8_READS = ("plain", "verified", "certified")
+
+
+def read_ops(path) -> dict:
+    """{op: {column: value}} of an ops sidecar (numbers as float), {} when
+    missing or unreadable. The per-run columns (dropped, read_bytes_mean,
+    verify_cpu_us_mean) are on every line."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError, TypeError):
+        return {}
+    if not lines or lines[0].split(",")[:len(OPS_HEADER_PREFIX)] != OPS_HEADER_PREFIX:
+        return {}
+    head = lines[0].split(",")
+    out = {}
+    for line in lines[1:]:
+        f = line.split(",")
+        if len(f) != len(head):
+            continue
+        try:
+            out[f[0]] = {h: float(v) for h, v in zip(head[1:], f[1:])}
+        except ValueError:
+            continue
+    return out
+
+
+def e8_table(df: pd.DataFrame, base_dirs) -> pd.DataFrame:
+    """One row per (backend, workload, sigs, read) of the E8 EXPs
+    (<prefix>-<sigs>-<read>): means over reps of tps, the write and read p99
+    and the verified-read bytes and proof-check CPU from the ops sidecars,
+    and tps_vs_base_pct = change of tps against none/plain of the same
+    backend and workload."""
+    rows = []
+    for _, row in df.iterrows():
+        m = E8_EXP.match(str(row["exp"]))
+        if not m:
+            continue
+        ops = {}
+        for b in base_dirs:
+            side = run_sidecar(b, row, ".ops.csv")
+            if side is not None:
+                ops = read_ops(side)
+                break
+        rd, wr = ops.get("read", {}), ops.get("write", {})
+        rows.append({"backend": row["backend"], "workload": row["workload"], "sigs": m.group("sigs"),
+                     "read": m.group("read"), "tps": float(row["tps"]),
+                     "write_p99_ms": wr.get("lat_p99_ms", float("nan")),
+                     "read_p99_ms": rd.get("lat_p99_ms", float("nan")),
+                     "read_bytes_mean": rd.get("read_bytes_mean", float("nan")),
+                     "verify_cpu_us_mean": rd.get("verify_cpu_us_mean", float("nan"))})
+    cols = ["backend", "workload", "sigs", "read", "reps", "tps_mean", "tps_vs_base_pct",
+            "write_p99_ms", "read_p99_ms", "read_bytes_mean", "verify_cpu_us_mean"]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    r = pd.DataFrame(rows)
+    t = r.groupby(["backend", "workload", "sigs", "read"], as_index=False).agg(
+        reps=("tps", "size"), tps_mean=("tps", "mean"), write_p99_ms=("write_p99_ms", "mean"),
+        read_p99_ms=("read_p99_ms", "mean"), read_bytes_mean=("read_bytes_mean", "mean"),
+        verify_cpu_us_mean=("verify_cpu_us_mean", "mean"))
+    base = t[(t["sigs"] == "none") & (t["read"] == "plain")].set_index(["backend", "workload"])["tps_mean"]
+    t["tps_vs_base_pct"] = [
+        100.0 * (v / base[(b, w)] - 1) if (b, w) in base.index and base[(b, w)] > 0 else float("nan")
+        for b, w, v in zip(t["backend"], t["workload"], t["tps_mean"])]
+    order = {k: i for i, k in enumerate(E8_SIGS)}
+    rorder = {k: i for i, k in enumerate(E8_READS)}
+    t = t.assign(_s=t["sigs"].map(order), _r=t["read"].map(rorder)).sort_values(
+        ["backend", "workload", "_s", "_r"]).drop(columns=["_s", "_r"])
+    return t[cols].reset_index(drop=True)
+
+
+def plot_e8(t: pd.DataFrame, out_png):
+    """E8 figure: tps, write p99 and read p99 per (sigs/read) configuration,
+    one bar group per backend and workload."""
+    metrics = [("tps_mean", "throughput (req/s)"), ("write_p99_ms", "write p99 (ms)"),
+               ("read_p99_ms", "read p99 (ms)")]
+    groups = list(t.groupby(["backend", "workload"], sort=True))
+    cfgs = [(s, r) for s in E8_SIGS for r in E8_READS if ((t["sigs"] == s) & (t["read"] == r)).any()]
+    fig, axes = plt.subplots(1, len(metrics), figsize=(4.2 * len(metrics), 3.6), squeeze=False)
+    width = 0.8 / max(len(cfgs), 1)
+    for ax, (col, label) in zip(axes[0], metrics):
+        for k, (s, r) in enumerate(cfgs):
+            ys = []
+            for _, g in groups:
+                v = g[(g["sigs"] == s) & (g["read"] == r)][col]
+                ys.append(float(v.iloc[0]) if len(v) else float("nan"))
+            ax.bar([i + (k - (len(cfgs) - 1) / 2) * width for i in range(len(groups))], ys, width,
+                   label="%s / %s" % (s, r))
+        ax.set_xticks(range(len(groups)))
+        ax.set_xticklabels(["%s\n%s" % key for key, _ in groups])
+        ax.set_ylabel(label)
+        ax.grid(axis="y", alpha=0.3)
+    axes[0][0].legend(fontsize=7, title="verify-sigs / read", title_fontsize=7)
+    fig.suptitle("E8: signatures and verified reads")
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=120)
+    return fig
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("csv", nargs="+", help="result CSV files (results/raw/*.csv)")
@@ -626,7 +756,17 @@ def main(argv=None) -> int:
 
     written = []
     notes = []
+    e8_exps = {e for e in agg["exp"].unique() if E8_EXP.match(str(e))}
+    if e8_exps:
+        t = e8_table(raw[raw["exp"].isin(e8_exps)], sorted({str(Path(p).parent) for p in args.csv}))
+        t.to_csv(out_dir / "e8_verify.csv", index=False)
+        written.append(out_dir / "e8_verify.csv")
+        png = out_dir / "e8_verify.png"
+        plt.close(plot_e8(t, png))
+        written.append(png)
     for exp in sorted(agg["exp"].unique()):
+        if exp in e8_exps:
+            continue
         sub = agg[agg["exp"] == exp]
         made = False
         if sub["fault"].nunique() > 1:  # E6: bars per fault scenario, one figure per n

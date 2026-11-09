@@ -44,11 +44,43 @@
 #                 --batch-flush (a partial block is sent after this long),
 #                 e.g. BATCH_FLUSH=100ms; core backends only (kafka, raft,
 #                 tendermint, bft2; the original servers have no such flag).
-#                 Not a CSV column (the 22-column schema is fixed): a value
+#                 Not a CSV column (the 23-column schema is fixed): a value
 #                 other than the default adds "_bf<value>" to the run tag
 #                 (file names) and is in the "run ..." log line, and the CSV
 #                 rows of different BATCH_FLUSH values must go to different
 #                 EXPs.
+# RATE (default 0 = closed loop, as in phase 1): open-loop load, ycsbbench
+#                 --rate=RATE total requests per second issued at fixed
+#                 intervals (latency from the scheduled time); MAX_INFLIGHT
+#                 (default 4096, ycsbbench --max-inflight) caps outstanding
+#                 requests, operations due above it are dropped and counted
+#                 (the `dropped` column of <tag>.ops.csv). The offered rate is
+#                 the CSV column offered_rps (0 for a closed-loop run); a
+#                 RATE > 0 adds "_rate<RATE>" to the run tag.
+# KAFKA_CPUS=2 KAFKA_MEM=1536m: caps of the Kafka broker container
+#                 (kafka-orig, kafka; gen_compose.py --kafka-cpus/--kafka-mem);
+#                 KAFKA_CPUS=0.5 KAFKA_MEM=768m gives it one node's share. A
+#                 non-default value adds "_kc<CPUS>-<MEM>" to the run tag.
+# TM_TIMEOUT_COMMIT (default empty = Tendermint's 1s): [consensus]
+#                 timeout-commit of every node (BACKEND=tendermint;
+#                 tm_config.py --timeout-commit), e.g. 100ms, 0s; adds
+#                 "_tc<value>" to the run tag.
+# VERIFY_SIGS=none (phase 2, core backends): veritas --verify-sigs of every
+#                 node: ingress (checked at the receiving node) or all (also
+#                 by every replica before applying). SIGN (default 1 when
+#                 VERIFY_SIGS != none, else 0): ycsbbench --sign, every Set
+#                 signed with client<k>'s Ed25519 key. KEY_SEED=hbdb-phase2:
+#                 the shared key seed (veritas and ycsbbench --key-seed).
+# READ_MODE=plain (phase 2): ycsbbench --read-mode: verified = GetVerified
+#                 with a Merkle proof the client checks, certified = also a
+#                 quorum of root attestations (needs ATTEST_EVERY > 0).
+#                 Not CSV columns: give each (VERIFY_SIGS, READ_MODE) its own
+#                 EXP (the params guard of the drivers records them).
+# ATTEST_EVERY=0 (phase 2, core backends): veritas --attest-every: every
+#                 node signs its root after every K-th block and certifies
+#                 the others' (fail-stop "diverged" on a certified root that
+#                 is not its own); > 0 also copies every "core: diverged at
+#                 height" line of the node logs to <tag>.diverged.
 # PRE_DOWN_HOOK (default empty): path of an executable run once, after a
 #                 successful run's CSV row was appended and BEFORE the cluster
 #                 is torn down (down.sh), with EXP, BACKEND, N, F, CLIENTS,
@@ -98,9 +130,9 @@
 # tm-orig are not audited (their Verify races with commits / returns nothing,
 # see check_consistency.sh). A missing or empty .audit file is only a warning.
 #
-# Per-run sidecars in results/raw/<EXP>/ (the CSV keeps its 22 columns):
+# Per-run sidecars in results/raw/<EXP>/ (the CSV keeps its 23 columns):
 #   <tag>.ops.csv    ycsbbench --ops: `op,count,tps,lat_mean_ms,lat_p50_ms,
-#                    lat_p99_ms,errors,aborted`, one line for read (Get) and
+#                    lat_p99_ms,errors,aborted,dropped`, one line for read (Get) and
 #                    one for write (Set), measurement window only (the CSV row
 #                    mixes both: on a sync backend a Get is a local read, a Set
 #                    waits for a block); errors = failed ops other than gRPC
@@ -207,6 +239,16 @@ LOAD_OP_TIMEOUT="${LOAD_OP_TIMEOUT:-30s}"
 SETTLE_TIMEOUT="${SETTLE_TIMEOUT:-10m}"
 KEEP_LOGS="${KEEP_LOGS:-0}"
 BATCH_FLUSH="${BATCH_FLUSH:-}"
+RATE="${RATE:-0}"
+VERIFY_SIGS="${VERIFY_SIGS:-none}"
+READ_MODE="${READ_MODE:-plain}"
+KEY_SEED="${KEY_SEED:-hbdb-phase2}"
+ATTEST_EVERY="${ATTEST_EVERY:-0}"
+if [ "$VERIFY_SIGS" = none ]; then SIGN="${SIGN:-0}"; else SIGN="${SIGN:-1}"; fi
+KAFKA_CPUS="${KAFKA_CPUS:-2}"
+KAFKA_MEM="${KAFKA_MEM:-1536m}"
+TM_TIMEOUT_COMMIT="${TM_TIMEOUT_COMMIT:-}"
+MAX_INFLIGHT="${MAX_INFLIGHT:-4096}"
 PRE_DOWN_HOOK="${PRE_DOWN_HOOK:-}"
 VALID_MAX_WRITE_ERR_PCT="${VALID_MAX_WRITE_ERR_PCT:-1}"
 VALID_ZERO_RUN_SECS="${VALID_ZERO_RUN_SECS:-5}"
@@ -230,6 +272,34 @@ hbdb_require_uint VALID_MAX_WRITE_ERR_PCT "$VALID_MAX_WRITE_ERR_PCT"
 hbdb_require_uint VALID_ZERO_RUN_SECS "$VALID_ZERO_RUN_SECS"
 [ "$VALID_ZERO_RUN_SECS" -ge 1 ] || die "VALID_ZERO_RUN_SECS must be >= 1"
 hbdb_require_uint AUDIT_WAIT_SECS "$AUDIT_WAIT_SECS"
+echo "$RATE" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "RATE must be a non-negative number (requests per second, 0 = closed loop), got '$RATE'"
+hbdb_require_uint MAX_INFLIGHT "$MAX_INFLIGHT"
+[ "$MAX_INFLIGHT" -ge 1 ] || die "MAX_INFLIGHT must be >= 1"
+echo "$KAFKA_CPUS" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "KAFKA_CPUS must be a positive number, got '$KAFKA_CPUS'"
+echo "$KAFKA_MEM" | grep -Eq '^[0-9]+[mMgG]$' || die "KAFKA_MEM must be a number with suffix m, g, M or G, got '$KAFKA_MEM'"
+if [ -n "$TM_TIMEOUT_COMMIT" ]; then
+  echo "$TM_TIMEOUT_COMMIT" | grep -Eq '^[0-9]+(ms|s)$' || die "TM_TIMEOUT_COMMIT must look like 100ms or 0s, got '$TM_TIMEOUT_COMMIT'"
+  [ "$BACKEND" = tendermint ] || die "TM_TIMEOUT_COMMIT applies to BACKEND=tendermint only, got $BACKEND"
+fi
+case "$VERIFY_SIGS" in none | ingress | all) ;; *) die "VERIFY_SIGS must be none, ingress or all, got '$VERIFY_SIGS'" ;; esac
+case "$READ_MODE" in plain | verified | certified) ;; *) die "READ_MODE must be plain, verified or certified, got '$READ_MODE'" ;; esac
+case "$SIGN" in 0 | 1) ;; *) die "SIGN must be 0 or 1, got '$SIGN'" ;; esac
+hbdb_require_uint ATTEST_EVERY "$ATTEST_EVERY"
+if [ "$ATTEST_EVERY" != 0 ]; then
+  hbdb_backend_has_fault_policy "$BACKEND" || die "ATTEST_EVERY needs a core backend (kafka, raft, tendermint, bft2), got $BACKEND"
+fi
+if [ "$READ_MODE" = certified ] && [ "$ATTEST_EVERY" = 0 ]; then
+  die "READ_MODE=certified needs ATTEST_EVERY > 0 (no attestations to certify the reads)"
+fi
+echo "$KEY_SEED" | grep -Eq '^[A-Za-z0-9._-]+$' || die "KEY_SEED must match [A-Za-z0-9._-]+, got '$KEY_SEED'"
+if [ "$VERIFY_SIGS" != none ] || [ "$READ_MODE" != plain ]; then
+  hbdb_backend_has_fault_policy "$BACKEND" || die "VERIFY_SIGS/READ_MODE need a core backend (kafka, raft, tendermint, bft2), got $BACKEND"
+fi
+if [ "$VERIFY_SIGS" != none ] && [ "$SIGN" != 1 ]; then
+  log "warning: VERIFY_SIGS=$VERIFY_SIGS with SIGN=0: every Set will be refused"
+fi
+rate_on=0
+awk -v r="$RATE" 'BEGIN { exit !(r > 0) }' && rate_on=1
 case "$WORKLOAD" in
   '' | *[!A-Za-z0-9_-]*) die "WORKLOAD must match [A-Za-z0-9_-]+, got '$WORKLOAD'" ;;
 esac
@@ -305,12 +375,21 @@ run_file="$HBDB_YCSB_DIR/$WORKLOAD.run.dat"
 [ -s "$load_file" ] || die "missing $load_file (run experiments/ycsb/gen.sh)"
 [ -s "$run_file" ] || die "missing $run_file (run experiments/ycsb/gen.sh)"
 
-export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS BATCH_FLUSH YCSB_DIR="$HBDB_YCSB_DIR"
+export BACKEND N BLOCK_SIZE COMMIT_MODE CPUS MEM HEALTH_TIMEOUT NODE_FAULTS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT VERIFY_SIGS KEY_SEED ATTEST_EVERY YCSB_DIR="$HBDB_YCSB_DIR"
 
 tag="${BACKEND}_n${N}_f${F}_c${CLIENTS}_b${BLOCK_SIZE}_w${WORKLOAD}_rtt${RTT_MS}_${FAULT}_${COMMIT_MODE}_r${REP}"
 # A non-default BATCH_FLUSH is told apart in the file names (not in the CSV).
 if [ -n "$BATCH_FLUSH" ] && [ "$BATCH_FLUSH" != 1s ]; then
   tag="${tag}_bf${BATCH_FLUSH}"
+fi
+if [ "$KAFKA_CPUS" != 2 ] || [ "$KAFKA_MEM" != 1536m ]; then
+  tag="${tag}_kc${KAFKA_CPUS}-${KAFKA_MEM}"
+fi
+if [ -n "$TM_TIMEOUT_COMMIT" ]; then
+  tag="${tag}_tc${TM_TIMEOUT_COMMIT}"
+fi
+if [ "$rate_on" = 1 ]; then
+  tag="${tag}_rate${RATE}"
 fi
 tag="$(echo "$tag" | tr -c 'A-Za-z0-9._\n-' '_')"
 exp_dir="$HBDB_RESULTS_RAW/$EXP"
@@ -337,6 +416,7 @@ snaps_file="$exp_dir/$tag.snaps"         # "k,epoch_ms,node1 status" per breakdo
 snap_stop="$exp_dir/.$tag.snap.stop"     # aborts a pending window-start snapshot
 final_audit_file="$exp_dir/$tag.final_audit" # auditor --once output, FAULT=none (kept)
 leaders_file="$exp_dir/$tag.leaders"     # raft leader changes, FAULT != none (kept)
+diverged_file="$exp_dir/$tag.diverged"   # "core: diverged" log lines, ATTEST_EVERY > 0 (kept)
 lock_dir="$HBDB_RESULTS_RAW/.hbdb.lock"
 mkdir -p "$exp_dir"
 
@@ -348,7 +428,7 @@ ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # -dirty marks rows measured with uncommitted changes to tracked files.
 commit="$(git -C "$HBDB_ROOT" describe --always --dirty --abbrev=7 2>/dev/null | tr -d ',' || true)"
 commit="${commit:-unknown}"
-tags="ts=$ts,commit=$commit,exp=$EXP,backend=$BACKEND,n=$N,f=$F,clients=$CLIENTS,block_size=$BLOCK_SIZE,workload=$WORKLOAD,rtt_ms=$RTT_MS,fault=$fault_rec,rep=$REP,commit_mode=$COMMIT_MODE"
+tags="ts=$ts,commit=$commit,exp=$EXP,backend=$BACKEND,n=$N,f=$F,clients=$CLIENTS,block_size=$BLOCK_SIZE,workload=$WORKLOAD,rtt_ms=$RTT_MS,fault=$fault_rec,rep=$REP,commit_mode=$COMMIT_MODE,offered_rps=$RATE"
 
 # ---- cleanup on every exit path ----
 bench_pid=""
@@ -767,6 +847,14 @@ hbdb_require_uint NCPU "$ncpu"
 container_ids="$(hbdb_compose ps -q)"
 [ -n "$container_ids" ] || die "no running containers in project $HBDB_PROJECT"
 
+rate_args=""
+if [ "$rate_on" = 1 ]; then
+  rate_args="--rate=$RATE --max-inflight=$MAX_INFLIGHT"
+fi
+rate_args="$rate_args --read-mode=$READ_MODE --key-seed=$KEY_SEED"
+if [ "$SIGN" = 1 ]; then
+  rate_args="$rate_args --sign"
+fi
 log "starting ycsbbench: $CLIENTS clients over $N nodes, mode $(hbdb_bench_mode "$BACKEND")"
 hbdb_compose exec -T client ycsbbench \
   --load-path="/ycsb/$WORKLOAD.load.dat" --run-path="/ycsb/$WORKLOAD.run.dat" \
@@ -776,7 +864,7 @@ hbdb_compose exec -T client ycsbbench \
   --warmup="$WARMUP" --duration="$DURATION" \
   --out="/results/$EXP/.$tag.row.csv" --tags="$tags" \
   --timeline="/results/$EXP/$tag.timeline" --wtimeline="/results/$EXP/$tag.wtimeline" \
-  --ops="/results/$EXP/$tag.ops.csv" >"$bench_log" 2>&1 &
+  --ops="/results/$EXP/$tag.ops.csv" $rate_args >"$bench_log" 2>&1 &
 bench_pid=$!
 # Core backends: breakdown snapshot 1 at the start of the measurement window
 # (snapshot 2 follows when the bench ends), for net_bytes_per_block.
@@ -887,7 +975,7 @@ final_audit() {
 # reason and returns 1 if the run must not get a row.
 check_validity() {
   local line wok werr wab w d zero i hits bad=0 arc
-  if [ ! -s "$ops_file" ] || [ "$(head -n 1 "$ops_file")" != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted" ]; then
+  if [ ! -s "$ops_file" ] || ! head -n 1 "$ops_file" | grep -q '^op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted\(,\|$\)'; then
     log "invalid run: ycsbbench wrote no usable $ops_file (image older than this harness? rebuild with experiments/build.sh)"
     return 1
   fi
@@ -959,6 +1047,22 @@ collect_leaders() {
   [ -s "$leaders_file" ] || log "warning: no 'entering leader state' line in the node logs; $leaders_file is empty"
 }
 
+# collect_diverged: ATTEST_EVERY > 0: every "core: diverged at height" line
+# of every node log (docker timestamps, `nodeK <compose line>`) to
+# $diverged_file; empty when no node diverged (experiments/plot/rq5.py).
+collect_diverged() {
+  local i=1
+  : >"$diverged_file"
+  while [ "$i" -le "$N" ]; do
+    hbdb_compose logs --no-color --timestamps "node$i" 2>/dev/null | grep 'core: diverged at height' |
+      sed "s/^/node$i /" >>"$diverged_file" || true
+    i=$((i + 1))
+  done
+  if [ -s "$diverged_file" ]; then
+    log "diverged: $(cut -d' ' -f1 "$diverged_file" | sort -u | tr '\n' ' ')(see $diverged_file)"
+  fi
+}
+
 if wait "$bench_pid"; then
   bench_rc=0
 else
@@ -1004,6 +1108,9 @@ fi
 if [ "$BACKEND" = raft ] && [ "$FAULT" != none ]; then
   collect_leaders
 fi
+if [ "$ATTEST_EVERY" != 0 ]; then
+  collect_diverged
+fi
 if [ "$FAULT" = none ]; then
   if ! check_validity; then
     log "the run failed the validity checks; no CSV row written"
@@ -1016,7 +1123,7 @@ fi
 [ "$(head -n 1 "$row_tmp")" = "$HBDB_CSV_HEADER" ] || die "unexpected header in $row_tmp: $(head -n 1 "$row_tmp")"
 row="$(sed -n 2p "$row_tmp")"
 nf="$(echo "$row" | awk -F, '{ print NF }')"
-[ "$nf" -eq 22 ] || die "expected 22 CSV fields from ycsbbench, got $nf: $row"
+[ "$nf" -eq 23 ] || die "expected 23 CSV fields from ycsbbench, got $nf: $row"
 
 host_cpu_max_pct="$(awk 'NF { if (!seen || $1 > m) { m = $1; seen = 1 } } END { if (seen) printf "%.2f", m }' "$samples")"
 if [ -n "$host_cpu_max_pct" ]; then
@@ -1048,7 +1155,7 @@ elif hbdb_backend_has_fault_policy "$BACKEND"; then
   fi
 fi
 
-final="$(echo "$row" | cut -d, -f1-19),$host_cpu_max_pct,$saturated,$net_bytes_per_block"
+final="$(echo "$row" | cut -d, -f1-19),$host_cpu_max_pct,$saturated,$net_bytes_per_block,$(echo "$row" | cut -d, -f23)"
 if [ ! -s "$csv" ]; then
   echo "$HBDB_CSV_HEADER" >"$csv"
 fi

@@ -118,3 +118,11 @@ func (s *server) BatchSet(ctx context.Context, req *pbv.BatchSetRequest) (*pbv.B
 	// not implemented
 	return &pbv.BatchSetResponse{}, nil
 }
+
+// GetVerified is a phase-2 RPC of the shared core (veritas/core); the
+// original server does not implement it.
+func (s *server) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest) (*pbv.GetVerifiedResponse, error) {
+	return nil, errUnimplementedGetVerified
+}
+
+var errUnimplementedGetVerified = errors.New("GetVerified is not implemented by the original server")

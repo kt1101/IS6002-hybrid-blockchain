@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log"
@@ -17,6 +18,7 @@ import (
 	pbv "hybrid/proto/veritas"
 	"hybrid/veritas"
 	"hybrid/veritas/ledger"
+	"hybrid/veritas/sigs"
 )
 
 // CommitMode selects when Set returns.
@@ -85,6 +87,29 @@ type ServerConfig struct {
 	FlushInterval time.Duration // <= 0 means DefaultFlushInterval (1 s)
 	SyncTimeout   time.Duration // <= 0 means DefaultSyncTimeout
 
+	// Sigs (--verify-sigs): SigIngress checks the client signature of every
+	// Set at Set/BatchSet (codes.Unauthenticated on a bad or missing one);
+	// SigAll also makes the executor check every Set before applying it
+	// (a bad SharedLog is aborted). ClientKeys maps a SetRequest.ClientId
+	// to its public key; it is required unless Sigs is SigNone.
+	Sigs       sigs.SigMode
+	ClientKeys func(id string) (ed25519.PublicKey, bool)
+
+	// AttestEvery (--attest-every, phase 2 B2): > 0 = after every block at
+	// a height divisible by it, sign (height, root) with NodeKey and certify
+	// the attestations of all nodes (see attestor); 0 = off (phase 1, no
+	// attestation ever, no extra block). N is the number of nodes (node ids
+	// 1..N, keys NodeKeys); AttestQuorum 0 = 2f+1; AttestIdle 0 =
+	// DefaultAttestIdle.
+	AttestEvery  int
+	N            int
+	AttestQuorum int
+	AttestIdle   time.Duration
+	// CertifiedWait bounds a certified read's wait (0 = DefaultCertifiedWait).
+	CertifiedWait time.Duration
+	NodeKey       ed25519.PrivateKey
+	NodeKeys      func(nodeID int32) (ed25519.PublicKey, bool)
+
 	// OnApplied, if non-nil, is called synchronously from the apply loop
 	// after every successfully applied block (empty blocks included) and
 	// before the block's waiters are resolved. It MUST NOT block. nil = off.
@@ -99,6 +124,15 @@ type AppliedEvent struct {
 	Txs      int    // number of SetRequests in the block (sum over SharedLogs)
 	Aborted  int    // number of aborted SharedLogs
 	Root     []byte // copy of ex.RootDigest() after Apply
+}
+
+// SetVerifier is the executor check of --verify-sigs=all: the Set carries a
+// known client id and that client's valid signature.
+func SetVerifier(keys func(id string) (ed25519.PublicKey, bool)) func(*pbv.SetRequest) bool {
+	return func(s *pbv.SetRequest) bool {
+		pub, ok := keys(s.GetClientId())
+		return ok && sigs.VerifySet(pub, s.GetKey(), s.GetValue(), s.GetVersion(), s.GetSig())
+	}
 }
 
 // Server is the shared Veritas node core: it batches client Sets into
@@ -127,6 +161,7 @@ type Server struct {
 	counter int64 // SharedLog.Seq counter; atomic; first for alignment
 
 	cfg         ServerConfig
+	att         *attestor // nil unless AttestEvery > 0
 	c           consensus.Consensus
 	ex          *Executor
 	batcher     *Batcher
@@ -181,6 +216,18 @@ func NewServer(cfg ServerConfig, c consensus.Consensus, ex *Executor, l *ledger.
 	if cfg.SyncTimeout <= 0 {
 		cfg.SyncTimeout = DefaultSyncTimeout
 	}
+	if cfg.Sigs != sigs.SigNone && cfg.ClientKeys == nil {
+		panic("core: NewServer: Sigs set without ClientKeys")
+	}
+	if cfg.Sigs == sigs.SigAll {
+		ex.SetSetVerifier(SetVerifier(cfg.ClientKeys))
+	}
+	if cfg.AttestEvery < 0 {
+		panic("core: NewServer: negative AttestEvery")
+	}
+	if cfg.AttestEvery > 0 && (cfg.N < 1 || cfg.NodeKey == nil || cfg.NodeKeys == nil) {
+		panic("core: NewServer: AttestEvery needs N, NodeKey and NodeKeys")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		cfg:         cfg,
@@ -195,7 +242,13 @@ func NewServer(cfg ServerConfig, c consensus.Consensus, ex *Executor, l *ledger.
 		stopCh:      make(chan struct{}),
 		loopDone:    make(chan struct{}),
 	}
-	s.batcher = newBatcher(cfg.BlockSize, cfg.FlushInterval, s.submitBlock, s.metrics.addBatch)
+	if cfg.AttestEvery > 0 {
+		s.att = newAttestor(cfg)
+		s.batcher = newBatcherIdle(cfg.BlockSize, cfg.FlushInterval, s.submitBlock, s.metrics.addBatch,
+			s.att.idle/2, s.att.idleBlock)
+	} else {
+		s.batcher = newBatcher(cfg.BlockSize, cfg.FlushInterval, s.submitBlock, s.metrics.addBatch)
+	}
 	go s.forwardLoop()
 	go s.applyLoop()
 	return s
@@ -244,6 +297,9 @@ func (s *Server) Get(ctx context.Context, req *pbv.GetRequest) (*pbv.GetResponse
 	if err := s.stoppedErr(); err != nil {
 		return nil, err
 	}
+	if err := s.divergedErr(); err != nil {
+		return nil, err
+	}
 	raw, ok, err := s.ex.store.Get(ctx, req.GetKey())
 	if err != nil {
 		return nil, err
@@ -263,6 +319,9 @@ func (s *Server) Get(ctx context.Context, req *pbv.GetRequest) (*pbv.GetResponse
 // take a per-key lock: that lock only serialised the channel send and gave
 // no ordering guarantee.
 func (s *Server) Set(ctx context.Context, req *pbv.SetRequest) (*pbv.SetResponse, error) {
+	if err := s.checkSig(req); err != nil {
+		return nil, err
+	}
 	if err := s.commit(ctx, []*pbv.SetRequest{copySet(req)}); err != nil {
 		return nil, err
 	}
@@ -279,6 +338,9 @@ func (s *Server) BatchSet(ctx context.Context, req *pbv.BatchSetRequest) (*pbv.B
 	}
 	sets := make([]*pbv.SetRequest, len(req.GetSets()))
 	for i, r := range req.GetSets() {
+		if err := s.checkSig(r); err != nil {
+			return nil, err
+		}
 		sets[i] = copySet(r)
 	}
 	if err := s.commit(ctx, sets); err != nil {
@@ -305,12 +367,124 @@ func (s *Server) Verify(ctx context.Context, req *pbv.VerifyRequest) (*pbv.Verif
 	}, nil
 }
 
+// GetVerified returns key's value and version with a Merkle proof, the root
+// and the height they all belong to (Executor.ProveValue, one lock hold), so
+// the client can check the value against the root (driver.GetVerified). A
+// missing key is codes.NotFound.
+func (s *Server) GetVerified(ctx context.Context, req *pbv.GetVerifiedRequest) (*pbv.GetVerifiedResponse, error) {
+	if err := s.stoppedErr(); err != nil {
+		return nil, err
+	}
+	if err := s.divergedErr(); err != nil {
+		return nil, err
+	}
+	if req.GetCertified() {
+		return s.getCertified(ctx, []byte(req.GetKey()))
+	}
+	p := s.proveResp([]byte(req.GetKey()))
+	return p.resp, p.err
+}
+
+// DefaultCertifiedWait bounds how long a certified read waits.
+const DefaultCertifiedWait = 5 * time.Second
+
+// proveResp is GetVerified's proof (Executor.ProveValue) as a response.
+func (s *Server) proveResp(key []byte) certProof {
+	val, ver, h, root, proof, err := s.ex.ProveValue(key)
+	if errors.Is(err, ErrKeyNotFound) {
+		return certProof{err: status.Errorf(codes.NotFound, "key %q not found", key)}
+	}
+	if err != nil {
+		return certProof{err: err}
+	}
+	return certProof{resp: &pbv.GetVerifiedResponse{
+		Value:                 val,
+		Version:               ver,
+		Height:                h,
+		RootDigest:            root,
+		SideNodes:             proof.SideNodes,
+		NonMembershipLeafData: proof.NonMembershipLeafData,
+	}}
+}
+
+// getCertified is GetVerified(certified): a proof whose root is this node's
+// root at an attested height h, returned with the quorum of attestations
+// that certify (h, root). If the current root is one of an attested height
+// (no block with txs since), the proof is taken now; otherwise the apply
+// loop takes it right after the next attested height. Then it waits for
+// the certification. The whole wait is bounded by CertifiedWait
+// (codes.DeadlineExceeded); a certified root other than the proof's is
+// codes.DataLoss (this node diverged).
+func (s *Server) getCertified(ctx context.Context, key []byte) (*pbv.GetVerifiedResponse, error) {
+	if s.att == nil {
+		return nil, status.Error(codes.FailedPrecondition, "certified read: attestations are off (--attest-every=0)")
+	}
+	wait := s.cfg.CertifiedWait
+	if wait <= 0 {
+		wait = DefaultCertifiedWait
+	}
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+
+	p := s.proveResp(key)
+	if p.err != nil {
+		return nil, p.err
+	}
+	h, ok := s.att.attestedHeight(p.resp.GetRootDigest())
+	if ok {
+		p.resp.Height = h
+	} else {
+		r := s.att.waitNext(key)
+		select {
+		case p = <-r.out:
+		case <-ctx.Done():
+			s.att.forget(r)
+			return nil, status.Errorf(codes.DeadlineExceeded, "certified read of %q: no attested height within %v", key, wait)
+		case <-s.stopCh:
+			s.att.forget(r)
+			return nil, s.stoppedErr()
+		}
+		if p.err != nil {
+			return nil, p.err
+		}
+	}
+	root, atts, err := s.att.cert.Wait(ctx, p.resp.GetHeight())
+	if err != nil {
+		return nil, status.Errorf(codes.DeadlineExceeded, "certified read of %q: height %d not certified within %v", key, p.resp.GetHeight(), wait)
+	}
+	if string(root) != string(p.resp.GetRootDigest()) {
+		return nil, status.Errorf(codes.DataLoss, "certified read of %q: height %d certified with another root than this node's", key, p.resp.GetHeight())
+	}
+	if err := s.divergedErr(); err != nil {
+		return nil, err
+	}
+	p.resp.Attestations = atts
+	return p.resp, nil
+}
+
+// checkSig is the ingress check of --verify-sigs (SigIngress, SigAll).
+func (s *Server) checkSig(r *pbv.SetRequest) error {
+	if s.cfg.Sigs == sigs.SigNone {
+		return nil
+	}
+	pub, ok := s.cfg.ClientKeys(r.GetClientId())
+	if !ok {
+		return status.Errorf(codes.Unauthenticated, "unknown client %q", r.GetClientId())
+	}
+	if !sigs.VerifySet(pub, r.GetKey(), r.GetValue(), r.GetVersion(), r.GetSig()) {
+		return status.Errorf(codes.Unauthenticated, "bad signature of client %q on key %q", r.GetClientId(), r.GetKey())
+	}
+	return nil
+}
+
 func copySet(r *pbv.SetRequest) *pbv.SetRequest {
 	return &pbv.SetRequest{
 		Signature: r.GetSignature(),
 		Key:       r.GetKey(),
 		Value:     r.GetValue(),
 		Version:   r.GetVersion(),
+		ClientId:  r.GetClientId(),
+		Sig:       append([]byte(nil), r.GetSig()...),
 	}
 }
 
@@ -414,20 +588,54 @@ func (s *Server) submitBlock(blk *pbv.Block) error {
 	start := time.Now()
 	blk.Signature = s.cfg.Signature
 	blk.Type = pbv.MessageType_Approve
+	if s.att != nil && blk.Attestations == nil {
+		blk.Attestations = s.att.take()
+	}
 	raw, err := proto.Marshal(blk)
 	if err != nil {
 		s.failBlock(blk, err)
+		s.putBackAttestations(blk)
 		return fmt.Errorf("marshal: %w", err)
 	}
-	id := blk.Txs[0].GetSeq()
-	s.metrics.submitted(id, start)
+	var id int64
+	if len(blk.Txs) > 0 { // an attestation-only block has no consensus sample
+		id = blk.Txs[0].GetSeq()
+		s.metrics.submitted(id, start)
+	}
 	ctx, cancel := context.WithTimeout(s.ctx, submitTimeout)
 	err = s.c.Submit(ctx, raw)
 	cancel()
 	if err != nil {
-		s.metrics.unsubmitted(id)
+		if len(blk.Txs) > 0 {
+			s.metrics.unsubmitted(id)
+		}
 		s.failBlock(blk, err)
+		s.putBackAttestations(blk)
 		return fmt.Errorf("submit: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) putBackAttestations(blk *pbv.Block) {
+	if s.att != nil {
+		s.att.putBack(blk.Attestations)
+	}
+}
+
+// Diverged reports the first height at which a certified root differed
+// from this node's own root (attestations, --attest-every > 0).
+func (s *Server) Diverged() (height int64, ok bool) {
+	if s.att == nil {
+		return 0, false
+	}
+	h := s.att.diverged.Load()
+	return h, h != 0
+}
+
+// divergedErr is codes.DataLoss once the node is diverged.
+func (s *Server) divergedErr() error {
+	if h, ok := s.Diverged(); ok {
+		return status.Errorf(codes.DataLoss, "node %d diverged at height %d: its state disagrees with a certified root", s.cfg.NodeID, h)
 	}
 	return nil
 }
@@ -496,6 +704,9 @@ func (s *Server) applyLoop() {
 		s.metrics.applied(time.Since(start)-ledgerTime, ledgerTime)
 		if s.cfg.OnApplied != nil {
 			s.notifyApplied(height, &blk, aborted)
+		}
+		if s.att != nil {
+			s.att.afterApply(height, s.ex.RootDigest(), &blk, s.cfg.NodeID, s.proveResp)
 		}
 		if own && s.cfg.Commit == CommitSync {
 			s.resolveBlock(&blk, aborted)

@@ -22,6 +22,22 @@ type Replica interface {
 	MaxCommandBytes() int
 }
 
+// Forwarder is what the forward endpoint needs (node.Node implements it).
+type Forwarder interface {
+	Forward(cmd []byte) error
+	MaxCommandBytes() int
+}
+
+// ForwardHandler serves POST /forward (wire.ForwardPath) for the other
+// replicas (bft2-node --forward-port): the body is queued with f.Forward.
+func ForwardHandler(f Forwarder) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc(wire.ForwardPath, func(w http.ResponseWriter, r *http.Request) {
+		queueBody(w, r, f.MaxCommandBytes(), f.Forward)
+	})
+	return mux
+}
+
 // streamBatch is the most frames written between two flushes.
 const streamBatch = 64
 
@@ -46,11 +62,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.Serv
 
 // submit: 200 once the replica queued the command (acceptance).
 func (h *Handler) submit(w http.ResponseWriter, r *http.Request) {
+	queueBody(w, r, h.r.MaxCommandBytes(), h.r.Submit)
+}
+
+// queueBody reads a POSTed command and hands it to queue, mapping its
+// errors to the wire status codes.
+func queueBody(w http.ResponseWriter, r *http.Request, max int, queue func([]byte) error) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	max := h.r.MaxCommandBytes()
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(max)+1))
 	if err != nil {
 		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
@@ -60,7 +81,7 @@ func (h *Handler) submit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, node.ErrTooLarge.Error(), http.StatusRequestEntityTooLarge)
 		return
 	}
-	if err := h.r.Submit(body); err != nil {
+	if err := queue(body); err != nil {
 		code := http.StatusInternalServerError
 		switch {
 		case errors.Is(err, node.ErrEmpty):

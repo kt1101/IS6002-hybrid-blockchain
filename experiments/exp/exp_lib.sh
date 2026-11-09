@@ -31,7 +31,9 @@
 # the re-executed process. Elsewhere it is a no-op. NO_CAFFEINATE=1 skips it.
 #
 # Params guard: results/raw/<EXP>.params records DURATION, WARMUP, CPUS, MEM,
-# LOAD_THREADS, BATCH_FLUSH and the code commit (git describe --dirty, as
+# LOAD_THREADS, BATCH_FLUSH, KAFKA_CPUS, KAFKA_MEM, TM_TIMEOUT_COMMIT, RATE,
+# MAX_INFLIGHT, VERIFY_SIGS, READ_MODE, ATTEST_EVERY (a phase-1 file without
+# the phase-2 keys compares them against their defaults) and the code commit (git describe --dirty, as
 # run_one.sh's commit column) of the first real invocation of an EXP; a later
 # invocation (or --dry-run) with any other value dies before running anything
 # (the CSV has no columns for them, so a resumed EXP would silently mix
@@ -160,8 +162,28 @@ exp_commit() {
 # per line (unset = run_one.sh's default; LOAD_THREADS "default" = the
 # backend's default from lib.sh).
 exp_params_current() {
-  printf 'DURATION=%s\nWARMUP=%s\nCPUS=%s\nMEM=%s\nLOAD_THREADS=%s\nBATCH_FLUSH=%s\ncommit=%s\n' \
-    "$DURATION" "$WARMUP" "${CPUS:-0.5}" "${MEM:-768m}" "${LOAD_THREADS:-default}" "${BATCH_FLUSH:-1s}" "$(exp_commit)"
+  printf 'DURATION=%s\nWARMUP=%s\nCPUS=%s\nMEM=%s\nLOAD_THREADS=%s\nBATCH_FLUSH=%s\n' \
+    "$DURATION" "$WARMUP" "${CPUS:-0.5}" "${MEM:-768m}" "${LOAD_THREADS:-default}" "${BATCH_FLUSH:-1s}"
+  printf 'KAFKA_CPUS=%s\nKAFKA_MEM=%s\nTM_TIMEOUT_COMMIT=%s\nRATE=%s\nMAX_INFLIGHT=%s\n' \
+    "${KAFKA_CPUS:-2}" "${KAFKA_MEM:-1536m}" "${TM_TIMEOUT_COMMIT:-default}" "${RATE:-0}" "${MAX_INFLIGHT:-4096}"
+  printf 'VERIFY_SIGS=%s\nREAD_MODE=%s\nATTEST_EVERY=%s\n' \
+    "${VERIFY_SIGS:-none}" "${READ_MODE:-plain}" "${ATTEST_EVERY:-0}"
+  printf 'commit=%s\n' "$(exp_commit)"
+}
+
+# exp_params_default KEY: the value a key added in phase 2 had before it
+# existed (a phase-1 .params file without the key compares against it).
+exp_params_default() {
+  case "$1" in
+    KAFKA_CPUS) echo 2 ;;
+    KAFKA_MEM) echo 1536m ;;
+    TM_TIMEOUT_COMMIT) echo default ;;
+    RATE) echo 0 ;;
+    MAX_INFLIGHT) echo 4096 ;;
+    VERIFY_SIGS) echo none ;;
+    READ_MODE) echo plain ;;
+    ATTEST_EVERY) echo 0 ;;
+  esac
 }
 
 # exp_params_record: write results/raw/<EXP>.params before the first run of
@@ -186,6 +208,9 @@ exp_params_check() {
     key="${line%%=*}"
     want="${line#*=}"
     had="$(sed -n "s/^$key=//p" "$f" | head -n 1)"
+    if ! grep -q "^$key=" "$f"; then
+      had="$(exp_params_default "$key")"
+    fi
     [ "$had" != "$want" ] || continue
     if [ "$key" = commit ] && [ "${EXP_ALLOW_COMMIT_CHANGE:-0}" = 1 ]; then
       log "note: commit $want differs from $had in $f; going on (EXP_ALLOW_COMMIT_CHANGE=1)"
@@ -268,8 +293,9 @@ exp_begin() {
   EXP_DURATION_S="$(exp_dur_seconds "$DURATION")"
   # The CSV records no BATCH_FLUSH: a non-default value must not land in the
   # driver's own EXP next to 1 s rows.
-  if [ -n "${BATCH_FLUSH:-}" ] && [ "$BATCH_FLUSH" != 1s ] && [ "$EXP" = "$default_exp" ]; then
-    die "BATCH_FLUSH=$BATCH_FLUSH is not the 1 s default of E1-E6: set EXP to a new name (e.g. EXP=${default_exp}_bf$BATCH_FLUSH), the CSV has no BATCH_FLUSH column"
+  # Phase-2 drivers set EXP_DEFAULT_BATCH_FLUSH (their own default, 100ms).
+  if [ -n "${BATCH_FLUSH:-}" ] && [ "$BATCH_FLUSH" != "${EXP_DEFAULT_BATCH_FLUSH:-1s}" ] && [ "$EXP" = "$default_exp" ]; then
+    die "BATCH_FLUSH=$BATCH_FLUSH is not the ${EXP_DEFAULT_BATCH_FLUSH:-1s} default of $default_exp: set EXP to a new name (e.g. EXP=${default_exp}_bf$BATCH_FLUSH), the CSV has no BATCH_FLUSH column"
   fi
   EXP_RUN_ONE="$HBDB_ROOT/experiments/run_one.sh"
   EXP_CV_PY="$EXP_LIB_DIR/cv.py"
@@ -293,15 +319,26 @@ exp_fault_rec() {
   echo "$1" | tr ',' '+'
 }
 
-# exp_has_row CSV BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT REP: 0 if the
-# CSV has a row of that configuration and rep.
+# exp_has_row CSV BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT REP [RATE]: 0
+# if the CSV has a row of that configuration and rep. RATE (default 0) is the
+# offered_rps column (23rd; empty or missing in a 22-column CSV counts as 0).
 exp_has_row() {
   local csv="$1" fr
   [ -s "$csv" ] || return 1
   fr="$(exp_fault_rec "$9")"
-  awk -F, -v b="$2" -v n="$3" -v f="$4" -v c="$5" -v blk="$6" -v w="$7" -v rtt="$8" -v fl="$fr" -v r="${10}" \
-    'NR > 1 && $4 == b && $5 == n && $6 == f && $7 == c && $8 == blk && $9 == w && $10 == rtt && $11 == fl && $12 == r { found = 1 }
+  awk -F, -v b="$2" -v n="$3" -v f="$4" -v c="$5" -v blk="$6" -v w="$7" -v rtt="$8" -v fl="$fr" -v r="${10}" -v rate="${11:-0}" \
+    'NR > 1 && $4 == b && $5 == n && $6 == f && $7 == c && $8 == blk && $9 == w && $10 == rtt && $11 == fl && $12 == r && ($23 + 0) == (rate + 0) { found = 1 }
      END { exit !found }' "$csv"
+}
+
+# exp_rate_ok R: R is a non-negative number (an open-loop rate, 0 = closed loop).
+exp_rate_ok() {
+  echo "$1" | grep -Eq '^[0-9]+(\.[0-9]+)?$'
+}
+
+# exp_rate_on R: R > 0.
+exp_rate_on() {
+  awk -v r="$1" 'BEGIN { exit !(r + 0 > 0) }'
 }
 
 exp_add_plan() {
@@ -311,10 +348,15 @@ exp_add_plan() {
   fi
 }
 
-# exp_cfg_cv BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT: "<cv|NA> <rows>".
+# exp_cfg_cv BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT [RATE]: "<cv|NA> <rows>".
 exp_cfg_cv() {
+  local rate_filter=""
+  if exp_rate_on "${9:-0}"; then
+    rate_filter="offered_rps=$9"
+  fi
   if [ -s "$EXP_CSV" ]; then
-    python3 "$EXP_CV_PY" "$EXP_CSV" "$1" "$2" "$4" "f=$3" "block_size=$5" "workload=$6" "rtt_ms=$7" "fault=$(exp_fault_rec "$8")" || echo "NA 0"
+    # shellcheck disable=SC2086
+    python3 "$EXP_CV_PY" "$EXP_CSV" "$1" "$2" "$4" "f=$3" "block_size=$5" "workload=$6" "rtt_ms=$7" "fault=$(exp_fault_rec "$8")" $rate_filter || echo "NA 0"
   else
     echo "NA 0"
   fi
@@ -359,14 +401,18 @@ exp_require_workload() {
     die "missing YCSB data for WORKLOAD=$1 in $HBDB_YCSB_DIR (run experiments/ycsb/gen.sh)"
 }
 
-# exp_run BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT REP: one run, with the
-# retry and failure logging of the header. Returns 0 (done, skipped, failed
+# exp_run BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT REP [RATE]: one run,
+# with the retry and failure logging of the header. RATE (default 0) is the
+# run's open-loop rate (run_one.sh RATE). Returns 0 (done, skipped, failed
 # and logged); exits for an abort.
 exp_run() {
-  local b="$1" n="$2" f="$3" c="$4" blk="$5" w="$6" rtt="$7" fault="$8" r="$9" rc attempt entry desc
+  local b="$1" n="$2" f="$3" c="$4" blk="$5" w="$6" rtt="$7" fault="$8" r="$9" rate="${10:-0}" rc attempt entry desc
   desc="BACKEND=$b N=$n F=$f CLIENTS=$c BLOCK_SIZE=$blk WORKLOAD=$w RTT_MS=$rtt FAULT=$fault REP=$r"
-  exp_add_plan "$b $n $f $c $blk $w $rtt $fault $r"
-  if exp_has_row "$EXP_CSV" "$b" "$n" "$f" "$c" "$blk" "$w" "$rtt" "$fault" "$r"; then
+  if exp_rate_on "$rate"; then
+    desc="$desc RATE=$rate"
+  fi
+  exp_add_plan "$b $n $f $c $blk $w $rtt $fault $r $rate"
+  if exp_has_row "$EXP_CSV" "$b" "$n" "$f" "$c" "$blk" "$w" "$rtt" "$fault" "$r" "$rate"; then
     if [ "$EXP_DRY" = 1 ]; then
       echo "DRY_SKIP: EXP=$EXP $desc COMMIT_MODE=sync (row exists)"
     else
@@ -385,10 +431,10 @@ exp_run() {
     log "run $desc (attempt $attempt/2)"
     rc=0
     EXP="$EXP" BACKEND="$b" N="$n" F="$f" CLIENTS="$c" BLOCK_SIZE="$blk" WORKLOAD="$w" RTT_MS="$rtt" FAULT="$fault" REP="$r" \
-      COMMIT_MODE=sync PRE_DOWN_HOOK="$(exp_hook_for "$b")" "$EXP_RUN_ONE" || rc=$?
+      RATE="$rate" COMMIT_MODE=sync PRE_DOWN_HOOK="$(exp_hook_for "$b")" "$EXP_RUN_ONE" || rc=$?
     case "$rc" in
       0)
-        exp_has_row "$EXP_CSV" "$b" "$n" "$f" "$c" "$blk" "$w" "$rtt" "$fault" "$r" ||
+        exp_has_row "$EXP_CSV" "$b" "$n" "$f" "$c" "$blk" "$w" "$rtt" "$fault" "$r" "$rate" ||
           { log "run_one.sh exited 0 but $EXP_CSV has no row for: $desc"; exp_summary; exit 1; }
         return 0
         ;;
@@ -402,7 +448,7 @@ exp_run() {
         ;;
     esac
   done
-  entry="$(date -u +%Y-%m-%dT%H:%M:%SZ) $b $n $f $c $blk $w $rtt $fault $r $rc"
+  entry="$(date -u +%Y-%m-%dT%H:%M:%SZ) $b $n $f $c $blk $w $rtt $fault $r $rc${rate:+ rate=$rate}"
   echo "$entry" >>"$EXP_FAILURES"
   EXP_FAILED_NOW="${EXP_FAILED_NOW:+$EXP_FAILED_NOW
 }$entry"
@@ -410,19 +456,24 @@ exp_run() {
   return 0
 }
 
-# exp_cfg BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT: the configuration's
-# run of the current pass (EXP_PASS): rep EXP_PASS, or for pass x<k> the
-# noise rule's extra rep k (see the header).
+# exp_cfg BACKEND N F CLIENTS BLOCK WORKLOAD RTT FAULT [RATE]: the
+# configuration's run of the current pass (EXP_PASS): rep EXP_PASS, or for
+# pass x<k> the noise rule's extra rep k (see the header). RATE (default:
+# env RATE, else 0 = closed loop) is the open-loop rate, part of the
+# configuration (CSV column offered_rps).
 exp_cfg() {
-  exp_validate_cfg "$@"
+  local rate="${9:-${RATE:-0}}" cfg
+  exp_rate_ok "$rate" || die "RATE must be a non-negative number, got '$rate'"
+  exp_validate_cfg "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
   [ "$EXP_VALIDATE_ONLY" != 1 ] || return 0
-  if ! printf '%s\n' "$EXP_CFGS" | grep -Fxq "$*"; then
+  cfg="$1 $2 $3 $4 $5 $6 $7 $8 $rate"
+  if ! printf '%s\n' "$EXP_CFGS" | grep -Fxq "$cfg"; then
     EXP_CFGS="${EXP_CFGS:+$EXP_CFGS
-}$*"
+}$cfg"
   fi
   case "$EXP_PASS" in
-    x*) exp_extra_rep "${EXP_PASS#x}" "$@" ;;
-    *) exp_run "$@" "$EXP_PASS" ;;
+    x*) exp_extra_rep "${EXP_PASS#x}" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$rate" ;;
+    *) exp_run "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$EXP_PASS" "$rate" ;;
   esac
 }
 
@@ -435,15 +486,15 @@ exp_extra_rep() {
   local k="$1" r=1 cv rows
   shift
   while [ "$r" -le "$REPS" ]; do
-    exp_has_row "$EXP_CSV" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$r" || return 0
+    exp_has_row "$EXP_CSV" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$r" "${9:-0}" || return 0
     r=$((r + 1))
   done
   read -r cv rows <<EOT
 $(exp_cfg_cv "$@")
 EOT
   exp_cv_high "$cv" || return 0
-  log "CV $cv > $EXP_CV_MAX over $rows rows of $1 n=$2 f=$3 clients=$4 block=$5 workload=$6 rtt=$7 fault=$8: extra rep $k/$EXTRA_REPS (rep $((REPS + k)))"
-  exp_run "$@" "$((REPS + k))"
+  log "CV $cv > $EXP_CV_MAX over $rows rows of $1 n=$2 f=$3 clients=$4 block=$5 workload=$6 rtt=$7 fault=$8 rate=${9:-0}: extra rep $k/$EXTRA_REPS (rep $((REPS + k)))"
+  exp_run "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$((REPS + k))" "${9:-0}"
 }
 
 # exp_resolve_clients BACKEND: set EXP_RESOLVED_CLIENTS to the CLIENTS of the
@@ -510,14 +561,16 @@ exp_resolve_clients() {
 # EXP_SUMMARY_PLANNED / EXP_SUMMARY_PRESENT. A driver may define
 # exp_summary_extra to add lines.
 exp_summary() {
-  local present=0 planned=0 missing="" b n f c blk w rtt fault r cfg cv rows flag high=""
-  while IFS=' ' read -r b n f c blk w rtt fault r; do
+  local present=0 planned=0 missing="" b n f c blk w rtt fault r rate cfg cv rows flag high="" rs
+  while IFS=' ' read -r b n f c blk w rtt fault r rate; do
     [ -n "$b" ] || continue
     planned=$((planned + 1))
-    if exp_has_row "$EXP_CSV" "$b" "$n" "$f" "$c" "$blk" "$w" "$rtt" "$fault" "$r"; then
+    rs=""
+    if exp_rate_on "${rate:-0}"; then rs=" rate=$rate"; fi
+    if exp_has_row "$EXP_CSV" "$b" "$n" "$f" "$c" "$blk" "$w" "$rtt" "$fault" "$r" "${rate:-0}"; then
       present=$((present + 1))
     else
-      missing="${missing}  $b n=$n f=$f clients=$c block=$blk workload=$w rtt=$rtt fault=$fault rep=$r"$'\n'
+      missing="${missing}  $b n=$n f=$f clients=$c block=$blk workload=$w rtt=$rtt fault=$fault$rs rep=$r"$'\n'
     fi
   done <<EOT
 $EXP_PLAN
@@ -535,17 +588,19 @@ EOT
     fi
     if [ "$EXP_DRY" != 1 ] && [ -n "$EXP_CFGS" ]; then
       echo "CV of tps (sample std / mean over all reps; threshold $EXP_CV_MAX):"
-      while IFS=' ' read -r b n f c blk w rtt fault; do
+      while IFS=' ' read -r b n f c blk w rtt fault rate; do
         [ -n "$b" ] || continue
         read -r cv rows <<EOT2
-$(exp_cfg_cv "$b" "$n" "$f" "$c" "$blk" "$w" "$rtt" "$fault")
+$(exp_cfg_cv "$b" "$n" "$f" "$c" "$blk" "$w" "$rtt" "$fault" "${rate:-0}")
 EOT2
+        rs=""
+        if exp_rate_on "${rate:-0}"; then rs=" rate=$rate"; fi
         flag=""
         if exp_cv_high "$cv"; then
           flag="  ABOVE 10%"
-          high="$high $b/n$n/f$f/c$c/b$blk/w$w/rtt$rtt/$fault"
+          high="$high $b/n$n/f$f/c$c/b$blk/w$w/rtt$rtt/$fault${rs:+/rate$rate}"
         fi
-        echo "  $b n=$n f=$f clients=$c block=$blk workload=$w rtt=$rtt fault=$fault: cv=$cv ($rows rows)$flag"
+        echo "  $b n=$n f=$f clients=$c block=$blk workload=$w rtt=$rtt fault=$fault$rs: cv=$cv ($rows rows)$flag"
       done <<EOT3
 $EXP_CFGS
 EOT3

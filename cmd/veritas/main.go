@@ -29,6 +29,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -58,6 +59,7 @@ import (
 	"hybrid/veritas/core"
 	"hybrid/veritas/ledger"
 	"hybrid/veritas/observe"
+	"hybrid/veritas/sigs"
 )
 
 var (
@@ -82,6 +84,11 @@ var (
 	breakdownOut  = kingpin.Flag("breakdown-out", "core: breakdown JSON written on SIGTERM/SIGINT (default /results/breakdown-node<node-id>.json)").Default("").String()
 	faultSpec     = kingpin.Flag("fault", "core: injected replica fault: none, silent (--consensus=kafka only: send no votes) or corrupt (append "+benchmark.CorruptMarker+" to every applied value)").Default(core.FaultNone).String()
 	faultAfter    = kingpin.Flag("fault-after", "core: the fault turns on this long after the process start (e.g. 60s); SIGUSR1 turns it on at once").Default("0s").Duration()
+	verifySigs    = kingpin.Flag("verify-sigs", "core (phase 2): client Set signatures checked: none, ingress (at the receiving node: Unauthenticated) or all (also by every replica before applying: aborted)").Default("none").String()
+	keySeed       = kingpin.Flag("key-seed", "core (phase 2): seed every Ed25519 key is derived from (clients client<k>, nodes node<i>); the same on every node and client").Default(sigs.DefaultSeed).String()
+	attestEvery   = kingpin.Flag("attest-every", "core (phase 2): sign (height, root) after every block with txs at a height divisible by this and certify all nodes' attestations (0: off)").Default("0").Int()
+	attestQuorum  = kingpin.Flag("attest-quorum", "core (phase 2): attestations certifying a height (0: 2f+1, f = floor((n-1)/3))").Default("0").Int()
+	clusterN      = kingpin.Flag("n", "core (phase 2): number of nodes (node ids 1..n), needed by --attest-every").Default("0").Int()
 	faultActive   = kingpin.Flag("fault-active-file", "core: written (the --fault spec) when SIGUSR1 activates the fault; removed at start (empty: none)").Default(defaultFaultActiveFile).String()
 
 	// --consensus=raft only. The raft server ID is --signature.
@@ -123,6 +130,50 @@ func main() {
 		return
 	}
 	runCore()
+}
+
+// sigConfig parses --verify-sigs and builds the client key lookup of
+// --key-seed (nil for none).
+func sigConfig(mode, seed string) (sigs.SigMode, func(string) (ed25519.PublicKey, bool), error) {
+	m, err := sigs.ParseSigMode(mode)
+	if err != nil {
+		return sigs.SigNone, nil, fmt.Errorf("--verify-sigs: %v", err)
+	}
+	if m == sigs.SigNone {
+		return m, nil, nil
+	}
+	if seed == "" {
+		return m, nil, fmt.Errorf("--verify-sigs=%s needs a non-empty --key-seed", mode)
+	}
+	return m, sigs.ClientKeys(seed), nil
+}
+
+// attestConfig checks the attestation flags and returns the ServerConfig
+// fields they set (all zero when every == 0).
+func attestConfig(every, quorum, n, nodeID int, seed string) (core.ServerConfig, error) {
+	var c core.ServerConfig
+	if every < 0 || quorum < 0 {
+		return c, fmt.Errorf("--attest-every and --attest-quorum must be >= 0")
+	}
+	if every == 0 {
+		return c, nil
+	}
+	if n < 1 {
+		return c, fmt.Errorf("--attest-every=%d needs --n (the number of nodes)", every)
+	}
+	if nodeID < 1 || nodeID > n {
+		return c, fmt.Errorf("--attest-every needs --node-id in 1..%d (got %d)", n, nodeID)
+	}
+	if quorum > n {
+		return c, fmt.Errorf("--attest-quorum=%d > --n=%d", quorum, n)
+	}
+	if seed == "" {
+		return c, fmt.Errorf("--attest-every needs a non-empty --key-seed")
+	}
+	c.AttestEvery, c.N, c.AttestQuorum = every, n, quorum
+	c.NodeKey = sigs.KeyFor(seed, sigs.NodeID(nodeID))
+	c.NodeKeys = sigs.NodeKeys(seed, n)
+	return c, nil
 }
 
 // requireFlag fails like kingpin does for a missing required flag.
@@ -330,13 +381,28 @@ func runCore() {
 		}
 	}
 
+	sigMode, clientKeys, err := sigConfig(*verifySigs, *keySeed)
+	if err != nil {
+		kingpin.Fatalf("%v", err)
+	}
+	ac, err := attestConfig(*attestEvery, *attestQuorum, *clusterN, *nodeID, *keySeed)
+	if err != nil {
+		kingpin.Fatalf("%v", err)
+	}
 	scfg := core.ServerConfig{
+		AttestEvery:   ac.AttestEvery,
+		N:             ac.N,
+		AttestQuorum:  ac.AttestQuorum,
+		NodeKey:       ac.NodeKey,
+		NodeKeys:      ac.NodeKeys,
 		NodeID:        *nodeID,
 		Signature:     *signature,
 		BlockSize:     *blockSize,
 		Mode:          vm,
 		Commit:        cm,
 		FlushInterval: *batchFlush, // > 0 (checked above)
+		Sigs:          sigMode,
+		ClientKeys:    clientKeys,
 	}
 	var demoLis net.Listener
 	var demoSrv *http.Server

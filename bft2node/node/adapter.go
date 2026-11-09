@@ -18,11 +18,13 @@ type adapter struct {
 	queue *cmdQueue
 	log   *CommitLog
 	idle  time.Duration // how long the leader waits for a command before proposing a filler block
+	view  func() uint64 // current view (nil: 0)
 
-	committed atomic.Uint64 // non-empty commands executed
-	proposed  atomic.Uint64 // non-empty commands returned by Get
-	requeued  atomic.Uint64 // own forked commands re-queued
-	failRun   atomic.Int64  // "failed to commit" since the last Exec
+	committed  atomic.Uint64 // non-empty commands delivered
+	proposed   atomic.Uint64 // non-empty commands returned by Get
+	requeued   atomic.Uint64 // forked or stale commands re-queued
+	duplicates atomic.Uint64 // committed commands not delivered again (dedup)
+	failRun    atomic.Int64  // "failed to commit" since the last Exec
 }
 
 var (
@@ -44,6 +46,7 @@ var (
 func (a *adapter) Get(ctx context.Context) (hotstuff.Command, bool) {
 	if cmd, ok := a.queue.pop(ctx, a.idle); ok {
 		a.proposed.Add(1)
+		a.queue.setInflight(cmd, a.curView())
 		return cmd, true
 	}
 	if ctx.Err() != nil || a.queue.isClosed() {
@@ -52,36 +55,61 @@ func (a *adapter) Get(ctx context.Context) (hotstuff.Command, bool) {
 	return "", true
 }
 
-// Accept accepts every command: veritas validates blocks when it applies them.
-func (a *adapter) Accept(hotstuff.Command) bool { return true }
+func (a *adapter) curView() uint64 {
+	if a.view == nil {
+		return 0
+	}
+	return a.view()
+}
 
-// Proposed is a no-op (no de-duplication: the consensus contract lets a
-// block be delivered twice).
+// Accept accepts every command (veritas validates blocks when it applies
+// them). It is called on every replica, the leader included, for each
+// proposal it votes on: a pending command it carries moves to inflight.
+func (a *adapter) Accept(cmd hotstuff.Command) bool {
+	if cmd != "" {
+		a.queue.markInflight(cmdID([]byte(cmd)), a.curView())
+	}
+	return true
+}
+
+// Proposed is a no-op (de-duplication is in Exec, by command id).
 func (a *adapter) Proposed(hotstuff.Command) {}
 
 // Exec is called by the consensus module, on the event loop, for every
 // committed block in commit order (the same order on every replica). It
-// appends the block's command, copied, to the commit log; filler blocks
-// (empty command) are skipped on every replica alike. It blocks while the
-// commit log is over its byte limit (backpressure).
+// appends the block's command, copied, to the commit log unless the same
+// command was committed within the dedup window (two leaders proposed one
+// shared block: deterministic, so every replica skips the same copy);
+// filler blocks (empty command) are skipped on every replica alike. It
+// blocks while the commit log is over its byte limit (backpressure).
 func (a *adapter) Exec(b *hotstuff.Block) {
 	a.failRun.Store(0) // a commit succeeded (fillers count)
 	cmd := b.Command()
 	if cmd == "" {
 		return
 	}
+	id := cmdID([]byte(cmd))
+	a.queue.commit(id)
+	if !a.log.appendOnce(id, []byte(cmd)) {
+		a.duplicates.Add(1)
+		return
+	}
 	a.committed.Add(1)
-	a.log.Add([]byte(cmd))
 }
 
 // Fork is called for blocks pruned off the committed chain: they can never
-// commit (HotStuff safety), so a block this replica proposed goes back to
-// the front of its queue and is proposed again in its next view as leader.
-// Other replicas' forked blocks are their proposers' to re-queue.
+// commit (HotStuff safety), so a block this replica proposed, or a pending
+// block inflight here (forwarding: every replica holds it), goes back to
+// the front of the queue and is proposed again by the next leader that
+// has it. A block committed meanwhile is not re-queued.
 func (a *adapter) Fork(b *hotstuff.Block) {
-	if b.Proposer() != a.id || b.Command() == "" {
+	cmd := b.Command()
+	if cmd == "" {
+		return
+	}
+	if b.Proposer() != a.id && !a.queue.isInflight(cmdID([]byte(cmd))) {
 		return
 	}
 	a.requeued.Add(1)
-	a.queue.pushFront(b.Command())
+	a.queue.pushFront(cmd)
 }

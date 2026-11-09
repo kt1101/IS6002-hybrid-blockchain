@@ -104,9 +104,9 @@ newtree() {
   done
   cat >"$ROOT/experiments/run_one.sh" <<'STUB'
 #!/usr/bin/env bash
-# Stub of run_one.sh: log the environment, append one row (22 columns).
+# Stub of run_one.sh: log the environment, append one row (23 columns).
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-echo "EXP=$EXP BACKEND=$BACKEND N=$N F=$F CLIENTS=$CLIENTS BLOCK_SIZE=$BLOCK_SIZE WORKLOAD=$WORKLOAD RTT_MS=$RTT_MS FAULT=$FAULT REP=$REP COMMIT_MODE=$COMMIT_MODE DURATION=${DURATION:-} HOOK=${PRE_DOWN_HOOK:-}" >>"$root/stub.log"
+echo "EXP=$EXP BACKEND=$BACKEND N=$N F=$F CLIENTS=$CLIENTS BLOCK_SIZE=$BLOCK_SIZE WORKLOAD=$WORKLOAD RTT_MS=$RTT_MS FAULT=$FAULT REP=$REP COMMIT_MODE=$COMMIT_MODE DURATION=${DURATION:-} RATE=${RATE:-0} VERIFY_SIGS=${VERIFY_SIGS:-none} READ_MODE=${READ_MODE:-plain} ATTEST_EVERY=${ATTEST_EVERY:-0} HOOK=${PRE_DOWN_HOOK:-}" >>"$root/stub.log"
 if [ -n "${STUB_RC:-}" ] && { [ -z "${STUB_BACKEND:-}" ] || [ "$STUB_BACKEND" = "$BACKEND" ]; }; then
   exit "$STUB_RC"
 fi
@@ -117,8 +117,8 @@ fi
 tps=100
 if [ "${STUB_NOISY_REP2:-}" = 1 ] && [ "$REP" = 2 ]; then tps=300; fi
 csv="$root/results/raw/$EXP.csv"
-[ -s "$csv" ] || echo "ts,commit,exp,backend,n,f,clients,block_size,workload,rtt_ms,fault,rep,commit_mode,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,wrong_gets,host_cpu_max_pct,saturated,net_bytes_per_block" >"$csv"
-echo "2026-10-30T00:00:00Z,abc1234,$EXP,$BACKEND,$N,$F,$CLIENTS,$BLOCK_SIZE,$WORKLOAD,$RTT_MS,$(echo "$FAULT" | tr ',' '+'),$REP,$COMMIT_MODE,$tps,1,1,1,0,0,10,0," >>"$csv"
+[ -s "$csv" ] || echo "ts,commit,exp,backend,n,f,clients,block_size,workload,rtt_ms,fault,rep,commit_mode,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,wrong_gets,host_cpu_max_pct,saturated,net_bytes_per_block,offered_rps" >"$csv"
+echo "2026-10-30T00:00:00Z,abc1234,$EXP,$BACKEND,$N,$F,$CLIENTS,$BLOCK_SIZE,$WORKLOAD,$RTT_MS,$(echo "$FAULT" | tr ',' '+'),$REP,$COMMIT_MODE,$tps,1,1,1,0,0,10,0,,${RATE:-0}" >>"$csv"
 STUB
   chmod +x "$ROOT/experiments/run_one.sh"
   : >"$ROOT/stub.log"
@@ -224,7 +224,7 @@ eq "E1 N=4 block 100 workload a rtt 0 no fault" "$(grep -vc 'N=4 F=0 CLIENTS=[0-
 eq "E1 clients" "$(grep 'BACKEND=raft ' "$ROOT/stub.log" | sed 's/.*CLIENTS=\([0-9]*\) .*REP=\([0-9]\) .*/\1\/\2/' | tr '\n' ' ')" "4/1 16/1 64/1 256/1 4/2 16/2 64/2 256/2 4/3 16/3 64/3 256/3 "
 eq "E1 rep outermost across backends" "$(sed -n '1p;16p;17p' "$ROOT/stub.log" | sed 's/.*BACKEND=\([a-z0-9]*\) .*REP=\([0-9]\) .*/\1\/\2/' | tr '\n' ' ')" "kafka/1 bft2/1 kafka/2 "
 eq "E1 re-executed once under caffeinate -dims" "$(grep -c "^caffeinate -dims $ROOT/experiments/exp/e1_clients.sh$" "$CAFFEINATE_LOG")" 1
-eq "E1 params file" "$(cut -d= -f1 "$ROOT/results/raw/e1.params" | tr '\n' ' ')" "DURATION WARMUP CPUS MEM LOAD_THREADS BATCH_FLUSH commit "
+eq "E1 params file" "$(cut -d= -f1 "$ROOT/results/raw/e1.params" | tr '\n' ' ')" "DURATION WARMUP CPUS MEM LOAD_THREADS BATCH_FLUSH KAFKA_CPUS KAFKA_MEM TM_TIMEOUT_COMMIT RATE MAX_INFLIGHT VERIFY_SIGS READ_MODE ATTEST_EVERY commit "
 contains "E1 params values" "$(cat "$ROOT/results/raw/e1.params")" "DURATION=60s"
 eq "E1 no hook" "$(grep -vc 'HOOK=$' "$ROOT/stub.log")" 0
 contains "E1 summary" "$OUT" "rows present: 48 / 48 planned"
@@ -425,6 +425,20 @@ eq "params: EXP_ALLOW_COMMIT_CHANGE=1 goes on" "$RC" 0
 eq "params: ... and runs rep 2" "$(calls)" 4
 EXP=e1other DURATION=30s BACKENDS=raft REPS=1 drv e1_clients.sh
 eq "params: a new EXP may use other settings" "$RC" 0
+EXP_ALLOW_COMMIT_CHANGE=1 KAFKA_CPUS=0.5 BACKENDS=raft REPS=2 drv e1_clients.sh
+eq "params: KAFKA_CPUS refused" "$RC" 1
+contains "params: KAFKA_CPUS message names the setting" "$OUT" "KAFKA_CPUS=0.5 (EXP started with 2)"
+contains "params: KAFKA_CPUS message names .params" "$OUT" "e1.params"
+for kv in KAFKA_MEM=768m TM_TIMEOUT_COMMIT=0s RATE=500 MAX_INFLIGHT=10 VERIFY_SIGS=all READ_MODE=verified ATTEST_EVERY=1; do
+  env EXP_ALLOW_COMMIT_CHANGE=1 "$kv" BACKENDS=raft REPS=2 drv e1_clients.sh --dry-run
+  eq "params: $kv refused" "$RC" 1
+done
+# A .params file of phase 1 (without the new keys) accepts their defaults.
+sed -i.bak '/^\(KAFKA_CPUS\|KAFKA_MEM\|TM_TIMEOUT_COMMIT\|RATE\|MAX_INFLIGHT\|VERIFY_SIGS\|READ_MODE\|ATTEST_EVERY\)=/d' "$ROOT/results/raw/e1.params"
+EXP_ALLOW_COMMIT_CHANGE=1 BACKENDS=raft REPS=2 drv e1_clients.sh --dry-run
+eq "params: old .params, new keys at their defaults" "$RC" 0
+EXP_ALLOW_COMMIT_CHANGE=1 RATE=500 BACKENDS=raft REPS=2 drv e1_clients.sh --dry-run
+eq "params: old .params, RATE=500 refused" "$RC" 1
 newtree disk
 DF_STUB_AVAIL_KB=4194304 BACKENDS=raft drv e1_clients.sh
 eq "disk: < 5 GiB free stops the batch" "$RC" 1
@@ -514,12 +528,84 @@ eq "BATCH_FLUSH on kafka-orig refused" "$RC" 1
 contains "BATCH_FLUSH on kafka-orig message" "$OUT" "original server without it"
 run_one_check BATCH_FLUSH=1s BACKEND=tm-orig
 eq "BATCH_FLUSH on tm-orig refused" "$RC" 1
+run_one_check VERIFY_SIGS=some
+eq "VERIFY_SIGS=some refused" "$RC" 1
+run_one_check READ_MODE=x
+eq "READ_MODE=x refused" "$RC" 1
+run_one_check READ_MODE=verified BACKEND=kafka-orig COMMIT_MODE=async
+eq "READ_MODE on kafka-orig refused" "$RC" 1
+run_one_check READ_MODE=certified
+eq "READ_MODE=certified without ATTEST_EVERY refused" "$RC" 1
+contains "certified message" "$OUT" "needs ATTEST_EVERY > 0"
+run_one_check ATTEST_EVERY=x
+eq "ATTEST_EVERY=x refused" "$RC" 1
 run_one_check PRE_DOWN_HOOK=/nonexistent/hook
 eq "missing PRE_DOWN_HOOK refused" "$RC" 1
 contains "missing PRE_DOWN_HOOK message" "$OUT" "is not an executable file"
 eq "run_one checks never reached docker" "$(grep -c . "$TMP_ROOT_DOCKER_LOG")" 0
 eq "refused runs create nothing" "$(ls "$SRC_ROOT/results/raw/zzcheck" 2>/dev/null | wc -l | tr -d ' ')" 0
 contains "tag suffix for a non-default BATCH_FLUSH" "$(grep -F 'tag="${tag}_bf${BATCH_FLUSH}"' "$SRC_ROOT/experiments/run_one.sh")" '_bf'
+
+# ----------------------------------------------------------- E7 rate sweep ----
+newtree e7
+OUT="$("$ROOT/experiments/exp/e7_rate.sh" --dry-run 2>/dev/null)"
+eq "e7 --dry-run: 3 backends x 7 rates + tendermint x 6, x 3 reps" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 81
+eq "e7: tendermint has its own rates" "$(printf '%s\n' "$OUT" | grep 'BACKEND=tendermint' | grep -c 'RATE=600 ')" 3
+eq "e7: CLIENTS=256 N=4 block 100 workload a" "$(printf '%s\n' "$OUT" | grep -vc 'N=4 F=0 CLIENTS=256 BLOCK_SIZE=100 WORKLOAD=a ')" 0
+OUT="$(KAFKA_CPUS=0.5 KAFKA_MEM=768m BACKENDS=kafka "$ROOT/experiments/exp/e7_rate.sh" --dry-run 2>/dev/null)"
+eq "e7 kafka only: 7 rates x 3 reps" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 21
+OUT="$(RATES="100 200" TM_RATES="10" "$ROOT/experiments/exp/e7_rate.sh" --dry-run 2>/dev/null)"
+eq "e7 RATES/TM_RATES override" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 21
+RATES="100 x" drv e7_rate.sh --dry-run
+eq "e7 bad rate refused" "$RC" 1
+BACKENDS=raft REPS=1 EXTRA_REPS=0 RATES="100 200" drv e7_rate.sh
+eq "e7 real run ok" "$RC" 0
+eq "e7: two runs" "$(calls)" 2
+contains "e7: run_one gets RATE" "$(cat "$ROOT/stub.log")" "RATE=200"
+eq "e7: offered_rps recorded" "$(tail -n 1 "$ROOT/results/raw/e7.csv" | cut -d, -f23)" 200
+BACKENDS=raft REPS=1 EXTRA_REPS=0 RATES="100 200" drv e7_rate.sh
+eq "e7 resume: nothing to run" "$(calls)" 2
+eq "e7 params record MEM=1g and BATCH_FLUSH=100ms" "$(grep -E '^(MEM|BATCH_FLUSH)=' "$ROOT/results/raw/e7.params" | tr '\n' ' ')" "MEM=1g BATCH_FLUSH=100ms "
+
+# ------------------------------------------------------- E6' open-loop rate ----
+newtree e6rate
+OUT="$(E6_RATE_BFT2=1300 BACKENDS=bft2 E6_KINDS="F1 F2" F5_KINDS=F5-F2 E6_LEADER=0 "$ROOT/experiments/exp/e6_faults.sh" --dry-run 2>/dev/null)"
+eq "e6 E6_RATE_BFT2: 18 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 18
+eq "e6 E6_RATE_BFT2: every run has RATE=1300" "$(printf '%s\n' "$OUT" | grep -vc ' RATE=1300 ')" 0
+OUT="$(E6_RATE_BFT2=1300 BACKENDS="raft bft2" E6_KINDS="F1" F5_KINDS=F5-F2 E6_LEADER=0 "$ROOT/experiments/exp/e6_faults.sh" --dry-run 2>/dev/null)"
+eq "e6: raft without its rate stays closed loop" "$(printf '%s\n' "$OUT" | grep 'BACKEND=raft' | grep -c 'RATE=')" 0
+E6_RATE_BFT2=abc BACKENDS=bft2 drv e6_faults.sh --dry-run
+eq "e6 bad E6_RATE_BFT2 refused" "$RC" 1
+
+# ------------------------------------------------------------- E8 verify ----
+newtree e8
+OUT="$("$ROOT/experiments/exp/e8_verify.sh" --dry-run 2>/dev/null)"
+eq "e8 --dry-run: 72 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 72
+eq "e8: 6 EXPs" "$(printf '%s\n' "$OUT" | grep -o 'EXP=[^ ]*' | sort -u | tr '\n' ' ')" "EXP=e8-all-plain EXP=e8-all-verified EXP=e8-ingress-plain EXP=e8-ingress-verified EXP=e8-none-plain EXP=e8-none-verified "
+eq "e8: only raft and bft2" "$(printf '%s\n' "$OUT" | grep -o 'BACKEND=[^ ]*' | sort -u | tr '\n' ' ')" "BACKEND=bft2 BACKEND=raft "
+eq "e8: workloads a and c" "$(printf '%s\n' "$OUT" | grep -o 'WORKLOAD=[^ ]*' | sort -u | tr '\n' ' ')" "WORKLOAD=a WORKLOAD=c "
+OUT="$(E8_RATE_RAFT=800 "$ROOT/experiments/exp/e8_verify.sh" --dry-run 2>/dev/null)"
+eq "e8: E8_RATE_RAFT on every raft run" "$(printf '%s\n' "$OUT" | grep 'BACKEND=raft' | grep -vc ' RATE=800 ')" 0
+BACKENDS=raft REPS=1 EXTRA_REPS=0 E8_SIGS="all" E8_READS="verified" drv e8_verify.sh
+eq "e8 real run ok" "$RC" 0
+eq "e8: 2 runs (workloads a, c)" "$(calls)" 2
+contains "e8: run_one gets VERIFY_SIGS and READ_MODE" "$(cat "$ROOT/stub.log")" "VERIFY_SIGS=all READ_MODE=verified"
+eq "e8: rows in e8-all-verified" "$(rows e8-all-verified)" 2
+
+# ------------------------------------------------------------ E9 attest ----
+newtree e9
+OUT="$("$ROOT/experiments/exp/e9_attest.sh" --dry-run 2>/dev/null)"
+eq "e9 --dry-run: 75 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 75
+eq "e9: 5 EXPs" "$(printf '%s\n' "$OUT" | grep -o 'EXP=[^ ]*' | sort -u | tr '\n' ' ')" "EXP=e9-a0-plain EXP=e9-a1-certified EXP=e9-a1-plain EXP=e9-a10-certified EXP=e9-a10-plain "
+eq "e9: raft runs" "$(printf '%s\n' "$OUT" | grep -c 'BACKEND=raft ')" 30
+eq "e9: F5-F4 only on bft2" "$(printf '%s\n' "$OUT" | grep 'FAULT=F5-F4' | grep -vc 'BACKEND=bft2 ')" 0
+eq "e9: F5-F4 runs" "$(printf '%s\n' "$OUT" | grep -c 'FAULT=F5-F4:node4,node3@60 ')" 15
+eq "e9: F4 on node4" "$(printf '%s\n' "$OUT" | grep -c 'FAULT=F4:node4@60 ')" 30
+BACKENDS=raft REPS=1 EXTRA_REPS=0 E9_ATTEST="1" E9_FAULTS="none" drv e9_attest.sh
+eq "e9 real run ok" "$RC" 0
+eq "e9: 2 runs (plain, certified)" "$(calls)" 2
+contains "e9: run_one gets ATTEST_EVERY and READ_MODE" "$(cat "$ROOT/stub.log")" "READ_MODE=certified ATTEST_EVERY=1"
+eq "e9: certified rows in e9-a1-certified" "$(rows e9-a1-certified)" 1
 
 echo "test_exp.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
