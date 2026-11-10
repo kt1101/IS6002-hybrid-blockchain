@@ -2,7 +2,7 @@
 
 Đọc cùng: plan `docs/superpowers/plans/2026-11-09-phase3-accountability.md`, spec `docs/superpowers/specs/2026-11-09-phase3-accountability-design.md`.
 Nhánh `claude/wizardly-robinson-fdaa8d` (worktree `.claude/worktrees/wizardly-robinson-fdaa8d`), dựa trên phase 2 `claude/charming-hopper-hy6x4e`. **Chưa push.**
-Cập nhật: 2026-11-10 (Task 7 xong, smoke Task 8 đạt).
+Cập nhật: 2026-11-10 (Task 7 xong, smoke Task 8 đạt, E7 dừng do máy quá tải).
 
 ## Task đã xong
 
@@ -29,7 +29,10 @@ Trang Notion tiến độ (memory `notion-progress-page`): id `413fc8af-e746-811
 ## Sau Task 7
 
 - ~~Task 8 Step 4 (smoke)~~: đạt 2026-11-10 (`EXP=smoke-p3`): node 4 bị loại `bad_read` cùng height 378 trên 4 node, `wrong_gets` = 0, `evidence_sent` = 2, `failovers` = 4.
-- Task 2: E7 (raft, bft2) → `E9_RATE_*` = 80% bão hòa → E9; ghi NOTES; tag `p7-openloop`, `p10-attest`.
+- Task 2 (đang dừng, 2026-11-10): E7 lần 1 (`EXP=e7`, lưới mặc định) dừng ở 41/42 + rep thêm. Từ ~02:43 UTC máy quá tải (Teams, `kernel_task` ~150%, VM Docker ~600% CPU kể cả khi không có cụm, load 18–32): rep 3 và bft2 3000/4000 rep 2 chỉ còn ~một nửa thông lượng → **dữ liệu `results/raw/e7*` không dùng được**. Hàng sạch (rep 1–2, trước 02:30): raft và bft2 giữ 500 req/s; ở 1000 thông lượng đạt nhưng write p99 > 2 s (raft 2,3–3,6 s, bft2 2,6–4,3 s); đỉnh raft ~1360–1400 tps, bft2 ~1150–1270 tps.
+  - Làm tiếp: người dùng khởi động lại Docker Desktop, máy nguội (kiểm `uptime` load < ~4, VM Docker gần 0% khi không có cụm); chuyển `results/raw/e7.csv`, `e7.params`, `e7/` sang `e7-noisy*`; chạy lại `EXP=e7 BACKENDS="raft bft2" RATES="250 500 600 700 800 900 1000 1500 2000" caffeinate -i experiments/exp/e7_rate.sh` (54 lượt, ~1,7 giờ) trong Terminal panel; phân tích bằng `MPLCONFIGDIR=$TMPDIR/mpl ~/anaconda3/bin/python3 experiments/plot/saturation.py results/raw/e7.csv --ops-dir results/raw --out results/e7` (python hệ thống không có pandas).
+  - Rồi `E9_RATE_RAFT`/`E9_RATE_BFT2` = 80% bão hòa → E9 (75 lượt, ~6 giờ); ghi NOTES; tag `p7-openloop`, `p10-attest`.
+  - bft2 thỉnh thoảng lỗi khởi động (replica nối nhau trước khi peer lắng nghe; health fail, driver tự chạy lại).
 - Task 10: chạy E10, E11, E12 (`E1x_RATE_*` hoặc E9's qua `exp_rate_for`), `rq6.py`, NOTES, tag `p11-accountability`.
 - Task 11 (tùy chọn): Kafka approve theo quorum.
 
