@@ -419,8 +419,10 @@ func (s *Server) Evicted(ctx context.Context, req *pbv.EvictedRequest) (*pbv.Evi
 // verify is codes.InvalidArgument; otherwise the evidence goes on this
 // node's next block and every node judges it in the apply loop
 // (Accountant.CheckRead), so all of them evict the culprit at the same
-// height or none does. Evidence on a node this node already evicted is
-// acknowledged and not sent again.
+// height or none does. Evidence on a node this node already evicted, or a
+// copy of evidence this node queued lately (attestor.addEvidence), is
+// acknowledged and not sent again; when maxPendingEvidence reports already
+// wait for a block the answer is codes.ResourceExhausted.
 func (s *Server) ReportEvidence(ctx context.Context, ev *pbv.Evidence) (*pbv.EvidenceAck, error) {
 	if s.att == nil {
 		return nil, status.Error(codes.FailedPrecondition, "ReportEvidence: attestations are off (--attest-every=0)")
@@ -434,7 +436,9 @@ func (s *Server) ReportEvidence(ctx context.Context, ev *pbv.Evidence) (*pbv.Evi
 		return nil, status.Errorf(codes.InvalidArgument, "ReportEvidence: no valid signature of node %d on the read", ev.GetCulprit())
 	}
 	if _, gone := s.att.acct.Height(ev.GetCulprit()); !gone {
-		s.att.addEvidence(ev)
+		if s.att.addEvidence(ev) == evidenceFull {
+			return nil, status.Errorf(codes.ResourceExhausted, "ReportEvidence: %d reports already wait for a block", maxPendingEvidence)
+		}
 	}
 	return &pbv.EvidenceAck{}, nil
 }

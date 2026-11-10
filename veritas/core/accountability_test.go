@@ -335,12 +335,12 @@ func TestEvidenceHeldUntilCertified(t *testing.T) {
 	if a.Epoch() != 0 || a.Held() != 1 {
 		t.Fatalf("evidence of an uncertified height: epoch %d, held %d; want 0 and 1", a.Epoch(), a.Held())
 	}
-	a.RecheckHeld(cert, keys, 1, 101)
+	a.RecheckHeld(cert, 1, 101)
 	if a.Held() != 1 || a.Epoch() != 0 {
 		t.Fatalf("still uncertified: held %d, epoch %d", a.Held(), a.Epoch())
 	}
 	certified = true
-	a.RecheckHeld(cert, keys, 1, 102)
+	a.RecheckHeld(cert, 1, 102)
 	if h, ok := a.Height(4); !ok || h != 102 || a.Reason(4) != EvictBadRead || a.Held() != 0 {
 		t.Fatalf("after certification: evicted %v at %d (%s), held %d; want node 4 at 102 (bad_read), 0",
 			ok, h, a.Reason(4), a.Held())

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"sync"
 
@@ -15,8 +16,27 @@ import (
 )
 
 // maxHeldEvidence bounds the evidence kept for heights not yet certified;
-// beyond it the oldest is dropped (EvidenceDropped).
+// beyond it the evidence of the lowest held height (the next to leave the
+// certifier window) is dropped first (EvidenceDropped).
 const maxHeldEvidence = 4096
+
+// evidenceKey names one piece of read evidence: the culprit and the digest
+// of the read it signed (sigs.ReadDigest).
+type evidenceKey struct {
+	culprit int32
+	digest  [sha256.Size]byte
+}
+
+func evidenceKeyOf(ev *pbv.Evidence) evidenceKey {
+	return evidenceKey{culprit: ev.GetCulprit(), digest: sigs.ReadDigest(ev.GetRead())}
+}
+
+// heldEvidence is evidence whose signature was checked, waiting for its
+// height to be certified.
+type heldEvidence struct {
+	ev  *pbv.Evidence
+	key evidenceKey
+}
 
 // Eviction reasons (the <reason> of the "core: evicted node" log line).
 const (
@@ -40,14 +60,17 @@ type Accountant struct {
 	evicted  map[int32]int64  // node -> height of its eviction
 	reasons  map[int32]string // node -> reason of its eviction
 	epoch    int64
-	held     []*pbv.Evidence // evidence of heights not yet certified (apply loop)
+	held     map[int64][]heldEvidence // by height: evidence of heights not yet certified (apply loop)
+	heldKeys map[evidenceKey]struct{} // what held holds (a copy of held evidence is not held twice)
+	heldN    int
 	rejected int64
 	dropped  int64
 }
 
 // NewAccountant is the accountant of node self.
 func NewAccountant(self int32) *Accountant {
-	return &Accountant{self: self, evicted: make(map[int32]int64), reasons: make(map[int32]string)}
+	return &Accountant{self: self, evicted: make(map[int32]int64), reasons: make(map[int32]string),
+		held: make(map[int64][]heldEvidence), heldKeys: make(map[evidenceKey]struct{})}
 }
 
 // Evict evicts node at height for reason. The first eviction of a node logs
@@ -141,12 +164,7 @@ const (
 // It takes no lock: cert and keys are called outside the Accountant's.
 func judgeRead(ev *pbv.Evidence, cert func(h int64) ([]byte, bool),
 	keys func(int32) (ed25519.PublicKey, bool), minHeight int64) readVerdict {
-	r := ev.GetRead()
-	if r == nil || r.GetNodeId() != ev.GetCulprit() || r.GetHeight() != ev.GetHeight() {
-		return verdictReject
-	}
-	pub, ok := keys(ev.GetCulprit())
-	if !ok || !sigs.VerifyRead(pub, r) {
+	if !evidenceSigned(ev, keys) {
 		return verdictReject
 	}
 	if ev.GetHeight() < minHeight {
@@ -156,6 +174,23 @@ func judgeRead(ev *pbv.Evidence, cert func(h int64) ([]byte, bool),
 	if !ok {
 		return verdictHold
 	}
+	return judgeAgainst(ev.GetRead(), root)
+}
+
+// evidenceSigned reports whether ev is well formed and its read carries the
+// culprit's signature.
+func evidenceSigned(ev *pbv.Evidence, keys func(int32) (ed25519.PublicKey, bool)) bool {
+	r := ev.GetRead()
+	if r == nil || r.GetNodeId() != ev.GetCulprit() || r.GetHeight() != ev.GetHeight() {
+		return false
+	}
+	pub, ok := keys(ev.GetCulprit())
+	return ok && sigs.VerifyRead(pub, r)
+}
+
+// judgeAgainst decides a signed read against the certified root of its
+// height: verdictBad or verdictReject (a correct read).
+func judgeAgainst(r *pbv.SignedRead, root []byte) readVerdict {
 	if !bytes.Equal(r.GetRoot(), root) {
 		return verdictBad // signed a root that is not the certified one
 	}
@@ -192,26 +227,86 @@ func (a *Accountant) CheckRead(ev *pbv.Evidence, cert func(h int64) ([]byte, boo
 			a.rejected++
 		}
 	case verdictHold:
-		a.held = append(a.held, ev)
-		if len(a.held) > maxHeldEvidence {
-			a.held = a.held[1:]
-			a.dropped++
-		}
+		a.holdLocked(ev)
 	default:
 		a.countLocked(v)
 	}
 }
 
-// RecheckHeld judges the held evidence again (apply loop only), after a
-// block certified a height; what is still not certified stays held.
-func (a *Accountant) RecheckHeld(cert func(h int64) ([]byte, bool),
-	keys func(int32) (ed25519.PublicKey, bool), minHeight, curHeight int64) {
+// holdLocked keeps signature-checked evidence until its height is certified;
+// a copy of evidence already held is rejected (no news).
+func (a *Accountant) holdLocked(ev *pbv.Evidence) {
+	k := evidenceKeyOf(ev)
+	if _, dup := a.heldKeys[k]; dup {
+		a.rejected++
+		return
+	}
+	a.heldKeys[k] = struct{}{}
+	h := ev.GetHeight()
+	a.held[h] = append(a.held[h], heldEvidence{ev: ev, key: k})
+	a.heldN++
+	for a.heldN > maxHeldEvidence {
+		low := int64(math.MaxInt64)
+		for hh := range a.held {
+			if hh < low {
+				low = hh
+			}
+		}
+		evs := a.held[low]
+		delete(a.heldKeys, evs[0].key)
+		if len(evs) == 1 {
+			delete(a.held, low)
+		} else {
+			a.held[low] = evs[1:]
+		}
+		a.heldN--
+		a.dropped++
+	}
+}
+
+// RecheckHeld judges the held evidence of the heights certified by now
+// (apply loop only, after a block certified a height), in increasing height
+// order, so every node evicts in the same order. The signatures were checked
+// when the evidence was held and are not checked again; only the heights are
+// looked up (cert) and each read's proof checked against its certified root.
+// Heights below minHeight (out of the certifier window) are dropped; the
+// others stay held.
+func (a *Accountant) RecheckHeld(cert func(h int64) ([]byte, bool), minHeight, curHeight int64) {
 	a.mu.Lock()
-	held := a.held
-	a.held = nil
+	hs := make([]int64, 0, len(a.held))
+	for h := range a.held {
+		hs = append(hs, h)
+	}
 	a.mu.Unlock()
-	for _, ev := range held {
-		a.CheckRead(ev, cert, keys, minHeight, curHeight)
+	sort.Slice(hs, func(i, j int) bool { return hs[i] < hs[j] })
+	for _, h := range hs {
+		var root []byte
+		inWindow := h >= minHeight
+		if inWindow {
+			var ok bool
+			if root, ok = cert(h); !ok {
+				continue
+			}
+		}
+		a.mu.Lock()
+		evs := a.held[h]
+		delete(a.held, h)
+		a.heldN -= len(evs)
+		for _, he := range evs {
+			delete(a.heldKeys, he.key)
+			if !inWindow {
+				a.dropped++
+				continue
+			}
+			if _, gone := a.evicted[he.ev.GetCulprit()]; gone || judgeAgainst(he.ev.GetRead(), root) != verdictBad {
+				a.rejected++
+				continue
+			}
+			if !a.evictLocked(he.ev.GetCulprit(), curHeight, EvictBadRead) {
+				a.rejected++
+			}
+		}
+		a.mu.Unlock()
 	}
 }
 
@@ -247,5 +342,5 @@ func (a *Accountant) EvidenceDropped() int64 {
 func (a *Accountant) Held() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return len(a.held)
+	return a.heldN
 }

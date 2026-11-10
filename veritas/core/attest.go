@@ -50,6 +50,8 @@ type attestor struct {
 	pending      []*pbv.RootAttestation
 	pendingEv    []*pbv.Evidence // read evidence to carry on the next block (phase 3)
 	pendingSince time.Time       // oldest of pending and pendingEv
+	evSeen       map[evidenceKey]struct{} // evidence queued here lately (resent copies are dropped)
+	evSeenFIFO   []evidenceKey            // evSeen in queueing order, at most evidenceSeenKeep
 
 	// rootMu guards byRoot and readers, shared between the apply loop and
 	// the GetVerified(certified) handlers.
@@ -81,6 +83,7 @@ func newAttestor(cfg ServerConfig) *attestor {
 		appliedAt: make(map[int64]time.Time),
 		byRoot:    make(map[string]int64),
 		conflicts: make(map[int64]bool),
+		evSeen:    make(map[evidenceKey]struct{}),
 	}
 }
 
@@ -148,7 +151,7 @@ func (a *attestor) afterApply(h int64, root []byte, blk *pbv.Block, nodeID int, 
 		return r, ok
 	}
 	if certified && a.acct.Held() > 0 {
-		a.acct.RecheckHeld(certRoot, a.keys, a.cert.MinHeight(), h)
+		a.acct.RecheckHeld(certRoot, a.cert.MinHeight(), h)
 	}
 	for _, ev := range blk.GetEvidence() {
 		a.acct.CheckRead(ev, certRoot, a.keys, a.cert.MinHeight(), h)
@@ -258,15 +261,48 @@ func (a *attestor) takeEvidence() []*pbv.Evidence {
 	return p
 }
 
+// maxPendingEvidence bounds the read evidence waiting for this node's next
+// block (ReportEvidence answers ResourceExhausted beyond it); with
+// evidenceSeenKeep, the number of queued evidence keys a node remembers, it
+// keeps a client that resends evidence from bloating the blocks.
+const (
+	maxPendingEvidence = 256
+	evidenceSeenKeep   = 4096
+)
+
+// evidenceAdd is what addEvidence did with a report.
+type evidenceAdd int
+
+const (
+	evidenceQueued    evidenceAdd = iota
+	evidenceDuplicate             // queued here lately: dropped
+	evidenceFull                  // maxPendingEvidence already wait: dropped
+)
+
 // addEvidence queues read evidence for this node's next block (phase 3,
-// ReportEvidence).
-func (a *attestor) addEvidence(ev *pbv.Evidence) {
+// ReportEvidence), unless the same evidence was queued here among the last
+// evidenceSeenKeep or the queue is full.
+func (a *attestor) addEvidence(ev *pbv.Evidence) evidenceAdd {
+	k := evidenceKeyOf(ev)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if _, dup := a.evSeen[k]; dup {
+		return evidenceDuplicate
+	}
+	if len(a.pendingEv) >= maxPendingEvidence {
+		return evidenceFull
+	}
+	a.evSeen[k] = struct{}{}
+	a.evSeenFIFO = append(a.evSeenFIFO, k)
+	if len(a.evSeenFIFO) > evidenceSeenKeep {
+		delete(a.evSeen, a.evSeenFIFO[0])
+		a.evSeenFIFO = a.evSeenFIFO[1:]
+	}
 	if len(a.pending) == 0 && len(a.pendingEv) == 0 {
 		a.pendingSince = time.Now()
 	}
 	a.pendingEv = append(a.pendingEv, ev)
+	return evidenceQueued
 }
 
 // putBack re-queues attestations and evidence whose block failed to submit.

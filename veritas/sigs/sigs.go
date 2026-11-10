@@ -201,6 +201,13 @@ func readBytesOf(r *pbv.SignedRead) []byte {
 		r.GetSideNodes(), r.GetNonMembershipLeafData())
 }
 
+// ReadDigest is the SHA-256 of the bytes a node signs for r (ReadBytes, so
+// neither NodeId nor Sig): with the signer, it names one read (the evidence
+// queues use it to drop resent copies).
+func ReadDigest(r *pbv.SignedRead) [sha256.Size]byte {
+	return sha256.Sum256(readBytesOf(r))
+}
+
 // SignRead signs ReadBytes of r with k (r.Sig is ignored).
 func SignRead(k ed25519.PrivateKey, r *pbv.SignedRead) []byte {
 	return ed25519.Sign(k, readBytesOf(r))
