@@ -126,9 +126,9 @@ func TestRecheckHeldByHeight(t *testing.T) {
 		return nil, false
 	}
 	a := NewAccountant(1)
-	a.CheckRead(signedEvidence(3, 20, "k", good), cert, keys, 1, 100)          // root matches, bad proof: bad read
+	a.CheckRead(signedEvidence(3, 20, "k", good), cert, keys, 1, 100)            // root matches, bad proof: bad read
 	a.CheckRead(signedEvidence(4, 21, "k", []byte("wrong")), cert, keys, 1, 100) // wrong root: bad read
-	a.CheckRead(signedEvidence(2, 5, "k", good), cert, keys, 1, 100)            // leaves the window
+	a.CheckRead(signedEvidence(2, 5, "k", good), cert, keys, 1, 100)             // leaves the window
 	if a.Held() != 3 {
 		t.Fatalf("held %d, want 3", a.Held())
 	}

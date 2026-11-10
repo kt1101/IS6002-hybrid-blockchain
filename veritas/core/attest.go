@@ -48,8 +48,8 @@ type attestor struct {
 
 	mu           sync.Mutex
 	pending      []*pbv.RootAttestation
-	pendingEv    []*pbv.Evidence // read evidence to carry on the next block (phase 3)
-	pendingSince time.Time       // oldest of pending and pendingEv
+	pendingEv    []*pbv.Evidence          // read evidence to carry on the next block (phase 3)
+	pendingSince time.Time                // oldest of pending and pendingEv
 	evSeen       map[evidenceKey]struct{} // evidence queued here lately (resent copies are dropped)
 	evSeenFIFO   []evidenceKey            // evSeen in queueing order, at most evidenceSeenKeep
 
