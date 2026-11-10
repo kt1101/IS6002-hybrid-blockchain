@@ -35,6 +35,12 @@
 #                          made by experiments/ycsb/gen.sh: 10k records,
 #                          100k operations by default)
 #   KEEP_LOGS=0 (1: keep container logs also on success)
+#   HOST_GUARD=1 on macOS hosts (where vm_stat exists), else 0: the host-noise
+#                 guard (see "Host guard" below); HOST_OTHER_CPU_MAX=200 (%,
+#                 summed ps %CPU of the host processes outside the Docker VM),
+#                 HOST_SWAPOUT_MAX=1000 (host swap-outs, pages, during the run
+#                 phase), HOST_BUSY_WAIT_SECS=900, HOST_GUARD_POLL_SECS=30,
+#                 HOST_SAMPLE_SECS=5
 #   BACKEND=tendermint additionally needs COMMIT_MODE=sync, CLIENTS <= 256 and
 #                 LOAD_THREADS <= 256 (hbdb_check_tendermint_limits in lib.sh:
 #                 Tendermint's 256-request ABCI queue per block)
@@ -206,6 +212,28 @@
 # SETTLE_TIMEOUT + WARMUP + DURATION + 120 s (exit 3), in case a call that
 # ignores its deadline (e.g. a hung TSO request) keeps it from exiting.
 #
+# Host guard (HOST_GUARD=1): host_cpu_max_pct only adds up the containers'
+# CPU, so a host busy with other work (the 2026-11-10 E7 sweep: Teams,
+# kernel_task throttling, swapping) slows the Docker VM without showing up
+# there. The load average does not tell it apart either: the cluster itself
+# keeps load1 at ~10-13 on a clean run. The guard therefore watches the CPU
+# of the host processes outside the Docker VM (ps %CPU summed, the VM and
+# Docker's own processes left out; ~130% on an idle desktop with the Claude
+# app open) and the host's swap-outs (vm_stat):
+#   - before the run (before the cluster lock): while the other processes
+#     use more than HOST_OTHER_CPU_MAX % it waits, checking every
+#     HOST_GUARD_POLL_SECS, for at most HOST_BUSY_WAIT_SECS, then refuses to
+#     run (exit 4: the drivers abort the batch; rerun it once the host is idle);
+#   - during the run phase: one sample every HOST_SAMPLE_SECS to <tag>.host
+#     (`epoch_ms,load1,other_cpu_pct,swapouts`), plus one at the end;
+#   - after the run: one line per run in results/raw/<EXP>/host-runs.csv
+#     (`ts,tag,load1_max,other_cpu_mean_pct,other_cpu_max_pct,swapouts_delta,
+#     verdict`); verdict noisy (mean other CPU > HOST_OTHER_CPU_MAX, or more
+#     than HOST_SWAPOUT_MAX pages swapped out during the run phase) fails the
+#     run (exit 3, no CSV row, retried by the drivers), whatever the FAULT.
+# ps that prints nothing (a sandbox) leaves the guard unchecked (a warning).
+# Off by default on non-macOS hosts: there the containers are host processes.
+#
 # Lock: only one run_one.sh at a time may use compose project hbdb. It takes
 # the directory results/raw/.hbdb.lock (mkdir is atomic; file `owner` holds
 # "pid EXP tag") and releases it on every exit path. If the lock is held by a
@@ -222,7 +250,10 @@
 #       2 cluster not healthy (no CSV row),
 #       3 benchmark failed, was killed by the watchdog, or a cluster container
 #       died or was OOM-killed during it (checked with docker inspect: status,
-#       OOMKilled, exit code; no CSV row).
+#       OOMKilled, exit code; no CSV row), or the host was noisy during it
+#       (host guard),
+#       4 the host stayed busy for HOST_BUSY_WAIT_SECS before the run (host
+#       guard; nothing ran).
 #       down.sh always runs at the end.
 set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
@@ -266,6 +297,12 @@ PRE_DOWN_HOOK="${PRE_DOWN_HOOK:-}"
 VALID_MAX_WRITE_ERR_PCT="${VALID_MAX_WRITE_ERR_PCT:-1}"
 VALID_ZERO_RUN_SECS="${VALID_ZERO_RUN_SECS:-5}"
 AUDIT_WAIT_SECS="${AUDIT_WAIT_SECS:-5}"
+if command -v vm_stat >/dev/null 2>&1; then HOST_GUARD="${HOST_GUARD:-1}"; else HOST_GUARD="${HOST_GUARD:-0}"; fi
+HOST_OTHER_CPU_MAX="${HOST_OTHER_CPU_MAX:-200}"
+HOST_SWAPOUT_MAX="${HOST_SWAPOUT_MAX:-1000}"
+HOST_BUSY_WAIT_SECS="${HOST_BUSY_WAIT_SECS:-900}"
+HOST_GUARD_POLL_SECS="${HOST_GUARD_POLL_SECS:-30}"
+HOST_SAMPLE_SECS="${HOST_SAMPLE_SECS:-5}"
 
 # ---- validate input (nothing touches Docker before this passes) ----
 case "$EXP" in
@@ -285,6 +322,13 @@ hbdb_require_uint VALID_MAX_WRITE_ERR_PCT "$VALID_MAX_WRITE_ERR_PCT"
 hbdb_require_uint VALID_ZERO_RUN_SECS "$VALID_ZERO_RUN_SECS"
 [ "$VALID_ZERO_RUN_SECS" -ge 1 ] || die "VALID_ZERO_RUN_SECS must be >= 1"
 hbdb_require_uint AUDIT_WAIT_SECS "$AUDIT_WAIT_SECS"
+case "$HOST_GUARD" in 0 | 1) ;; *) die "HOST_GUARD must be 0 or 1, got '$HOST_GUARD'" ;; esac
+hbdb_require_uint HOST_OTHER_CPU_MAX "$HOST_OTHER_CPU_MAX"
+hbdb_require_uint HOST_SWAPOUT_MAX "$HOST_SWAPOUT_MAX"
+hbdb_require_uint HOST_BUSY_WAIT_SECS "$HOST_BUSY_WAIT_SECS"
+hbdb_require_uint HOST_GUARD_POLL_SECS "$HOST_GUARD_POLL_SECS"
+[ "$HOST_GUARD_POLL_SECS" -ge 1 ] || die "HOST_GUARD_POLL_SECS must be >= 1"
+hbdb_require_uint HOST_SAMPLE_SECS "$HOST_SAMPLE_SECS"
 echo "$RATE" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "RATE must be a non-negative number (requests per second, 0 = closed loop), got '$RATE'"
 hbdb_require_uint MAX_INFLIGHT "$MAX_INFLIGHT"
 [ "$MAX_INFLIGHT" -ge 1 ] || die "MAX_INFLIGHT must be >= 1"
@@ -431,6 +475,8 @@ audit_err="$exp_dir/.$tag.audit.err"     # stdout/stderr of the audit supervisor
 ops_file="$exp_dir/$tag.ops.csv"         # per-op-kind summary (kept)
 wtimeline_file="$exp_dir/$tag.wtimeline" # successful Sets per second (kept)
 stats_file="$exp_dir/$tag.stats"         # every docker stats sample (kept)
+host_file="$exp_dir/$tag.host"           # host guard samples, HOST_GUARD=1 (kept)
+host_runs="$exp_dir/host-runs.csv"       # host guard verdict per run, HOST_GUARD=1 (kept)
 snaps_file="$exp_dir/$tag.snaps"         # "k,epoch_ms,node1 status" per breakdown snapshot (kept)
 snap_stop="$exp_dir/.$tag.snap.stop"     # aborts a pending window-start snapshot
 final_audit_file="$exp_dir/$tag.final_audit" # auditor --once output, FAULT=none (kept)
@@ -802,7 +848,77 @@ host_state() {
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$tag,$1,$load,$vm" >>"$exp_dir/host.log" 2>/dev/null || true
 }
 
+# ---- host guard (see the header) ----
+# host_other_cpu: summed ps %CPU of the host processes outside the Docker VM
+# (empty when ps prints nothing).
+host_other_cpu() {
+  ps -A -o %cpu=,comm= 2>/dev/null | awk '
+    { c = $1; $1 = ""; n++ }
+    $0 ~ /Virtualization|[Dd]ocker|vpnkit|qemu|hyperkit/ { next }
+    { s += c }
+    END { if (n) printf "%.1f", s }' || true
+}
+# host_sample: one `epoch_ms,load1,other_cpu_pct,swapouts` line.
+host_sample() {
+  local load cpu sw
+  load="$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{ print $1 }' || true)"
+  cpu="$(host_other_cpu)"
+  sw="$(vm_stat 2>/dev/null | awk '/^Swapouts/ { gsub(/\./, "", $2); print $2 }' || true)"
+  echo "$(hbdb_epoch_ms),$load,$cpu,$sw"
+}
+# host_guard_wait: before the run, wait for the other processes to calm down
+# (exit 4 after HOST_BUSY_WAIT_SECS).
+host_guard_wait() {
+  [ "$HOST_GUARD" = 1 ] || return 0
+  local waited=0 cpu
+  while :; do
+    cpu="$(host_other_cpu)"
+    if [ -z "$cpu" ]; then
+      log "warning: host guard: ps gave no CPU figures; the host is not checked"
+      return 0
+    fi
+    if awk -v c="$cpu" -v m="$HOST_OTHER_CPU_MAX" 'BEGIN { exit !(c <= m) }'; then
+      [ "$waited" -eq 0 ] || log "host guard: processes outside the Docker VM down to ${cpu}% CPU after ${waited}s; starting"
+      return 0
+    fi
+    if [ "$waited" -ge "$HOST_BUSY_WAIT_SECS" ]; then
+      log "host busy: processes outside the Docker VM use ${cpu}% CPU (HOST_OTHER_CPU_MAX=$HOST_OTHER_CPU_MAX) after ${waited}s of waiting; refusing to run (exit 4)"
+      exit 4
+    fi
+    [ "$waited" -gt 0 ] || log "host guard: processes outside the Docker VM use ${cpu}% CPU (> HOST_OTHER_CPU_MAX=$HOST_OTHER_CPU_MAX); waiting up to ${HOST_BUSY_WAIT_SECS}s"
+    sleep "$HOST_GUARD_POLL_SECS"
+    waited=$((waited + HOST_GUARD_POLL_SECS))
+  done
+}
+# host_verdict: one line in $host_runs; returns 1 when the run was noisy.
+host_verdict() {
+  [ "$HOST_GUARD" = 1 ] || return 0
+  if [ ! -s "$host_file" ] || [ "$(wc -l <"$host_file")" -lt 2 ]; then
+    log "warning: no host samples in $host_file; host guard verdict skipped"
+    return 0
+  fi
+  host_sample >>"$host_file"
+  local v
+  v="$(awk -F, -v cmax="$HOST_OTHER_CPU_MAX" -v smax="$HOST_SWAPOUT_MAX" '
+    NR == 1 { next }
+    $2 != "" { l = $2 + 0; if (!ln || l > lmax) lmax = l; ln++ }
+    $3 != "" { c = $3 + 0; cs += c; cn++; if (c > ctop) ctop = c }
+    $4 != "" { if (!sn) s0 = $4; s1 = $4; sn++ }
+    END {
+      cmean = cn ? cs / cn : 0
+      sd = sn ? s1 - s0 : 0
+      noisy = (cn && cmean > cmax) || (sn && sd > smax)
+      printf "%s,%s,%s,%s,%s\n", ln ? sprintf("%.2f", lmax) : "", cn ? sprintf("%.1f", cmean) : "", cn ? sprintf("%.1f", ctop) : "", sn ? sd : "", noisy ? "noisy" : "ok"
+    }' "$host_file")"
+  [ -s "$host_runs" ] || echo "ts,tag,load1_max,other_cpu_mean_pct,other_cpu_max_pct,swapouts_delta,verdict" >"$host_runs"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ),$tag,$v" >>"$host_runs"
+  log "host during the run (load1_max,other_cpu_mean_pct,other_cpu_max_pct,swapouts_delta,verdict): $v"
+  case "$v" in *,noisy) return 1 ;; esac
+  return 0
+}
+
 # ---- cluster ----
+host_guard_wait
 acquire_lock
 [ -s "$exp_dir/host.log" ] || echo "ts,tag,phase,load1,load5,load15,free_mb,compressor_mb,swapouts" >"$exp_dir/host.log"
 host_state start
@@ -857,7 +973,7 @@ fi
 
 rm -f "$row_tmp" "$samples" "$sampler_stop" "$watchdog_fired" "$exp_dir/$tag.timeline"
 rm -f "$audit_file" "$audit_pidfile" "$audit_stop" "$audit_err"
-rm -f "$ops_file" "$wtimeline_file" "$stats_file" "$snaps_file" "$snap_stop" "$final_audit_file" "$leaders_file"
+rm -f "$ops_file" "$wtimeline_file" "$stats_file" "$snaps_file" "$snap_stop" "$final_audit_file" "$leaders_file" "$host_file"
 : >"$bench_log"
 : >"$samples"
 echo "$HBDB_STATS_HEADER" >"$stats_file"
@@ -950,10 +1066,14 @@ fi
 # cadence is roughly one sample per second; a call that prints nothing (e.g.
 # the daemon is down) is followed by a 0.5 s pause instead of a busy loop.
 # The loop exits once this run_one.sh is gone (no orphan after a SIGKILL).
+if [ "$HOST_GUARD" = 1 ]; then
+  echo "epoch_ms,load1,other_cpu_pct,swapouts" >"$host_file"
+fi
 (
   set +e
   parent=$$
   started=0
+  host_last=0
   while [ ! -e "$sampler_stop" ]; do
     kill -0 "$parent" 2>/dev/null || exit 0
     if [ "$started" = 0 ] && grep -q 'ycsbbench: run phase started' "$bench_log" 2>/dev/null; then
@@ -971,6 +1091,10 @@ fi
       printf '%s\n' "$out" | hbdb_stats_lines "$ms" "$utc" >>"$stats_file"
       printf '%s\n' "$out" |
         awk -F, -v n="$ncpu" 'NF >= 2 { gsub(/[% ]/, "", $2); s += $2; c++ } END { if (c > 0) printf "%.2f\n", s / (100 * n) * 100 }' >>"$samples"
+      if [ "$HOST_GUARD" = 1 ] && [ $(($(hbdb_epoch_ms) - host_last)) -ge $((HOST_SAMPLE_SECS * 1000)) ]; then
+        host_sample >>"$host_file"
+        host_last="$(hbdb_epoch_ms)"
+      fi
     else
       sleep 0.5 # waiting for the run-phase marker
     fi
@@ -1186,6 +1310,10 @@ if [ "$FAULT" = none ]; then
     log "the run failed the validity checks; no CSV row written"
     exit 3
   fi
+fi
+if ! host_verdict; then
+  log "the host was noisy during the run (see $host_runs); no CSV row written"
+  exit 3
 fi
 
 # ---- assemble the final row ----

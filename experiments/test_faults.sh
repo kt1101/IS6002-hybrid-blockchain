@@ -927,6 +927,26 @@ chmod +x "$SB/bin/docker"
 # run_one.sh's host_state reads vm.loadavg; some sandboxes forbid sysctl.
 printf '#!/bin/sh\necho "{ 1.00 1.00 1.00 }"\n' >"$SB/bin/sysctl"
 chmod +x "$SB/bin/sysctl"
+# The host guard reads ps and vm_stat: STUB_PS_CPU is the %CPU of the one
+# process outside the Docker VM; vm_stat's Swapouts grows by STUB_SWAP_STEP
+# pages per call (state in $STUB_STATE).
+cat >"$SB/bin/ps" <<'EOF'
+#!/bin/sh
+echo "650.0 /System/Library/Frameworks/Virtualization.framework/XPCServices/com.apple.Virtualization.VirtualMachine"
+echo "  4.0 /Applications/Docker.app/Contents/MacOS/com.docker.backend"
+echo "${STUB_PS_CPU:-50.0} /Applications/Some App.app/Contents/MacOS/Some App"
+EOF
+cat >"$SB/bin/vm_stat" <<'EOF'
+#!/bin/sh
+f="$STUB_STATE/swapouts"
+n="$(cat "$f" 2>/dev/null || echo 1000)"
+echo "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
+echo "Pages free:                               5000."
+echo "Pages occupied by compressor:             1000."
+echo "Swapouts:                            $n."
+echo $((n + ${STUB_SWAP_STEP:-0})) >"$f"
+EOF
+chmod +x "$SB/bin/ps" "$SB/bin/vm_stat"
 SB_RAW="$SB/results/raw"
 # itest NAME ENV...: run the sandboxed run_one.sh; sets it_rc, it_err.
 itest() {
@@ -1252,6 +1272,29 @@ eq "itest ATTEST_QUORUM=f+1 reaches up.sh as 2" "$(cat "$SB/state/attest_quorum"
 itest p3default EXP=it_p3d DURATION=2s STUB_BENCH_SECS=1
 grep -q -- '--failover\|--sign-reads\|--attest-quorum' "$SB/state/calls" && bad "itest: phase 3 bench flags without FAILOVER/SIGN_READS/ATTEST_QUORUM" || ok
 eq "itest default ATTEST_QUORUM reaches up.sh as 0" "$(cat "$SB/state/attest_quorum" 2>/dev/null)" 0
+
+# Host guard: a quiet host gets a host-runs.csv line `ok` and a row; the
+# Docker VM's own CPU does not count.
+itest hostok EXP=it_hostok DURATION=2s STUB_BENCH_SECS=1 HOST_SAMPLE_SECS=0
+eq "itest host guard quiet host rc" "$it_rc" 0
+eq "itest host guard quiet host verdict" "$(tail -n 1 "$SB_RAW/it_hostok/host-runs.csv" 2>/dev/null | cut -d, -f4-7)" "50.0,50.0,0,ok"
+eq "itest host guard quiet host row" "$(tail -n +2 "$SB_RAW/it_hostok.csv" 2>/dev/null | wc -l | tr -d ' ')" 1
+eq "itest host guard samples header" "$(head -n 1 "$(it_tag it_hostok .host)" 2>/dev/null)" "epoch_ms,load1,other_cpu_pct,swapouts"
+# A busy host: refused before the lock and before any docker call (exit 4).
+itest hostbusy EXP=it_hostbusy DURATION=2s STUB_BENCH_SECS=1 STUB_PS_CPU=350.0 HOST_BUSY_WAIT_SECS=0
+eq "itest host guard busy host rc" "$it_rc" 4
+contains "itest host guard busy host message" "$it_err" "refusing to run (exit 4)"
+eq "itest host guard busy host touched no docker" "$(cat "$SB/state/calls" 2>/dev/null)" ""
+eq "itest host guard busy host lock free" "$(ls -d "$SB_RAW/.hbdb.lock" 2>/dev/null)" ""
+# Swapping during the run: noisy, no row (exit 3), whatever the FAULT.
+itest hostswap EXP=it_hostswap DURATION=2s STUB_BENCH_SECS=1 STUB_SWAP_STEP=5000 HOST_SAMPLE_SECS=0
+eq "itest host guard swapping rc" "$it_rc" 3
+eq "itest host guard swapping verdict" "$(tail -n 1 "$SB_RAW/it_hostswap/host-runs.csv" 2>/dev/null | cut -d, -f7)" "noisy"
+eq "itest host guard swapping no row" "$(cat "$SB_RAW/it_hostswap.csv" 2>/dev/null | wc -l | tr -d ' ')" 0
+# HOST_GUARD=0: none of it.
+itest hostoff EXP=it_hostoff DURATION=2s STUB_BENCH_SECS=1 STUB_PS_CPU=350.0 HOST_GUARD=0
+eq "itest host guard off rc" "$it_rc" 0
+eq "itest host guard off no host-runs.csv" "$(ls "$SB_RAW/it_hostoff/host-runs.csv" 2>/dev/null)" ""
 
 # up.sh turns NODE_FAULTS into gen_compose.py --node-fault flags.
 grep -q 'node_fault_args="$node_fault_args --node-fault $nf"' "$HERE/cluster/up.sh" && ok || bad "up.sh --node-fault"
