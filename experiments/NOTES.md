@@ -399,3 +399,19 @@ Theo spec `docs/superpowers/specs/2026-11-03-phase2-fair-comparison-and-verifiab
 - `readlie` bật lúc t = 20,0 s, xác nhận lúc 20,5 s. `<tag>.evict`: cả 4 node ghi `evicted node 4 at height 378 (bad_read)`, **cùng height**, khoảng 1,2–1,7 s sau khi lỗi bật (log 01:39:59.85–.93Z).
 - `.ops.csv`: `rejected_reads` = 3, `failovers` = 4 (4 worker có node chính là node4), `evidence_sent` = 2, `wrong_before_failover` = 0, `cert_timeouts` = 0, `quorum_errors` = 0.
 - `.diverged` và `.certs` rỗng: F6 không đổi trạng thái, nên không có root mâu thuẫn và không có dòng `core: certified height` (dòng này chỉ ghi khi có root mâu thuẫn). Auditor: 52 tick, đều nhất quán.
+
+## Giai đoạn 2/3: E7 quét tốc độ trên M3 (Task 2, 2026-11-10)
+
+Lệnh: `EXP=e7 BACKENDS="raft bft2" RATES="250 500 600 700 800 900 1000 1500 2000" experiments/exp/e7_rate.sh` (N=4, 256 client, block 100, flush 100 ms, workload A, 60 s + 10 s warmup, 3 rep; bft2 2000 có 5 rep do CV 0,098). Commit đo `7461028`, 14:31–16:01 UTC, 56 hàng, không lượt nào hỏng. Phân tích: `experiments/plot/saturation.py results/raw/e7.csv --ops-dir results/raw --out results/e7` (bản `4c86bc4`), kết quả `results/e7/saturation.csv`, `saturation_points.csv`.
+
+**Lượt quét đầu (`results/raw/e7-noisy*`, lưới mặc định) bỏ toàn bộ**, kể cả rep 1–2 trước 02:30: raft 1000 req/s khi đó write p99 2,3–3,6 s, nay 0,9–2,1 s (trung bình 1,4 s); compressor của host 6,5–8,5 GB (nay ~4 GB), từ ~02:43 host swap ~66k trang/phút. Lượt mới: swap-out của host chỉ tăng ~23k trang trong lượt đầu tiên rồi đứng yên; load1 3,9–13 (cụm tự tạo ~10–13), chỉ vượt 15 ở bft2 2000 (cụm quá tải).
+
+| backend | sat_rps (p99 ≤ 2 s) | tps tại đó | write p99 | slo_rps (p99 ≤ 1 s, liên tục) | write p99 | **E9_RATE** |
+|---|---|---|---|---|---|---|
+| raft | 1000 | 999,5 | 1388 ms | 600 | 262 ms | **480** |
+| bft2 | 1000 | 999,9 | 1824 ms | 600 | 458 ms | **480** |
+
+- Thông lượng bám tốc độ đặt tới 1000 (CV ≤ 0,005); 1500: raft 1498 tps (p99 3,5 s), bft2 1498 tps nhưng drop 1076 op; 2000: raft 1961, bft2 1862 tps (drop 33,9k), p99 3,9 / 5,8 s.
+- Write p99 dao động giữa rep ở vùng 700–1000 (bft2 700: 3,2 / 1,3 / 1,4 s; raft 1000: 0,9 / 1,2 / 2,1 s) và không đơn điệu (raft 900 trung bình 0,98 s nằm trong SLO, 700/800 thì không). `slo_rps` dừng ở rate đầu tiên vượt SLO nên lấy 600 cho cả hai.
+- **Định nghĩa tốc độ E9–E12** (khác plan, theo rà soát): `e9_rate` = 80% của rate cao nhất mà nó và mọi rate thấp hơn đều có tps ≥ 0,95R, write p99 ≤ 1 s và không drop. Theo plan cũ (80% của `sat_rps`) sẽ là 800 req/s, nơi write p99 đã 1,0–1,6 s và hàng đợi chi phối. `E9_RATE_RAFT=480`, `E9_RATE_BFT2=480`.
+- Abort (cột `errors` của CSV chính gộp lỗi và abort; `.ops.csv` tách `aborted`): raft có abort (vd. 6 ở 500, 73 ở 1500), bft2 = 0. Nguyên nhân: raft/kafka dùng phiên bản TSO (`VersionClient`), Set có phiên bản ≤ phiên bản đã lưu bị bỏ khi thứ tự đồng thuận khác thứ tự TSO; bft2/tendermint dùng `VersionOrdered` (phiên bản = vị trí trong block), không bao giờ abort.
