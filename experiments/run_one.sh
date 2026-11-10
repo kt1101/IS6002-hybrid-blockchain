@@ -223,7 +223,8 @@
 #   - before the run (before the cluster lock): while the other processes
 #     use more than HOST_OTHER_CPU_MAX % it waits, checking every
 #     HOST_GUARD_POLL_SECS, for at most HOST_BUSY_WAIT_SECS, then refuses to
-#     run (exit 4: the drivers abort the batch; rerun it once the host is idle);
+#     run (exit 4: the drivers retry once, then record the run in
+#     <EXP>.failures and go on, so a sweep resumes once the host is idle);
 #   - during the run phase: one sample every HOST_SAMPLE_SECS to <tag>.host
 #     (`epoch_ms,load1,other_cpu_pct,swapouts`), plus one at the end;
 #   - after the run: one line per run in results/raw/<EXP>/host-runs.csv

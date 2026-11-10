@@ -80,9 +80,11 @@
 # reuse an EXP with a different DURATION, WARMUP, BATCH_FLUSH or CPUS/MEM: the
 # existing rows would be taken as done (the params guard refuses it).
 #
-# Failures: run_one.sh exit 2 (cluster unhealthy) or 3 (bench failed, a
-# container died, a fault was not injected) is retried once on a fresh
-# cluster; if it fails again, "<utc> backend n f clients block workload rtt
+# Failures: run_one.sh exit 2 (cluster unhealthy), 3 (bench failed, a
+# container died, a fault was not injected, the host was noisy during the
+# run) or 4 (the host stayed busy before the run; nothing ran) is retried
+# once (on a fresh cluster; for 4 the host guard waits again first); if it
+# fails again, "<utc> backend n f clients block workload rtt
 # fault rep rc" is appended to results/raw/<EXP>.failures (append-only) and
 # the batch continues. Exit 1 (harness or input error) or any other code
 # (130 after Ctrl-C) aborts the batch with that code.
@@ -457,7 +459,7 @@ exp_run() {
           { log "run_one.sh exited 0 but $EXP_CSV has no row for: $desc"; exp_summary; exit 1; }
         return 0
         ;;
-      2 | 3)
+      2 | 3 | 4)
         log "run_one.sh exit $rc for: $desc"
         ;;
       *)

@@ -269,6 +269,11 @@ contains "failing backend: summary" "$OUT" "failures in this run (also in"
 newtree fail2
 STUB_RC=2 BACKENDS=raft drv e1_clients.sh
 eq "rc 2 is retried too" "$(calls)" 24
+newtree fail4
+STUB_RC=4 STUB_BACKEND=raft BACKENDS="raft kafka" drv e1_clients.sh
+eq "rc 4 (busy host) is retried, then recorded" "$(calls)" $((12 * 2 + 12))
+eq "rc 4: the sweep goes on (rows of the other backend)" "$(rows e1)" 12
+contains "rc 4: .failures records it" "$(head -1 "$ROOT/results/raw/e1.failures")" " raft 4 0 4 100 a 0 none 1 4"
 newtree abort
 STUB_RC=1 BACKENDS=raft drv e1_clients.sh
 eq "rc 1 aborts the batch with 1" "$RC" 1
