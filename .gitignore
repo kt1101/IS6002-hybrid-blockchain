@@ -25,6 +25,10 @@ experiments/cluster/generated/
 __pycache__/
 .superpowers/
 results/ycsb/
+# Consistency-check output (experiments/check_consistency.sh) and the logs
+# that drivers and tests are redirected to in the checkout root
+results/consistency/
+/*.log
 
 # Per-run sidecars of the final data set (rebuilt by experiments/plot/assemble_final.py)
 results/final/*/
