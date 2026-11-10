@@ -417,3 +417,23 @@ Lệnh: `EXP=e7 BACKENDS="raft bft2" RATES="250 500 600 700 800 900 1000 1500 20
 - Giới hạn của E9 ở 480 req/s: thông lượng bằng tốc độ nạp (dưới điểm bão hòa), nên E9 chỉ đo được chi phí **độ trễ** của attestation, không đo được mất thông lượng.
 - Nguồn gốc commit: tốc độ E9 lấy từ E7 chạy ở commit `7461028`; E9 chạy ở commit sau khi gộp nhánh `-p3fix` (mục 5–8 của rà soát: hàng đợi evidence, thời điểm failover; host guard). Đường ghi (Set → block → apply) không đổi giữa hai commit.
 - Abort (cột `errors` của CSV chính gộp lỗi và abort; `.ops.csv` tách `aborted`): raft có abort, tăng theo tải (ghi bị abort mỗi rep: 5–7 ở 500, 23–33 ở 1000, 61–94 ở 1500 req/s, tối đa ~0,2% số ghi), bft2 = 0 ở mọi rate. Nguyên nhân: raft/kafka dùng phiên bản TSO (`VersionClient`), Set có phiên bản ≤ phiên bản đã lưu bị bỏ khi thứ tự đồng thuận khác thứ tự TSO; bft2/tendermint dùng `VersionOrdered` (phiên bản = vị trí trong block), không bao giờ abort.
+
+## Giai đoạn 2/3: E9 attestation trên M3 (Task 2, 2026-11-10/11)
+
+Lệnh: `E9_RATE_RAFT=480 E9_RATE_BFT2=480 experiments/exp/e9_attest.sh` (N=4, 256 client, MEM=1g, flush 100 ms, 180 s + 10 s warmup, lỗi ở giây 60, 3 rep; raft 10 + bft2 15 cấu hình). Commit đo `9560921` (sau khi gộp rà soát; đường ghi như E7 `7461028`). 19:25–23:39 UTC, 75/75 hàng, `failures in this run: none`; host guard: 75/75 `ok`, 0 lượt bị loại vì host (chạy thử trước đó: 1 lượt raft bị loại đúng, CPU ngoài Docker trung bình 261%, write p99 1,23 s). Phân tích: `experiments/plot/rq5.py results/raw/e9-*.csv --raw-dir results/raw --out results/e9` → `results/e9/rq5_runs.csv`, `rq5_summary.csv`.
+
+| backend | attest | đọc | lỗi | phát hiện trong giao thức | detect_protocol_s | detect_auditor_s | wrong_gets | tps |
+|---|---|---|---|---|---|---|---|---|
+| raft | 0 | plain | F4 | 0/3 | – | 0,17 | 4733 | 480 |
+| raft | 1 | plain / certified | F4 | 3/3, 3/3 | 0,38 / 0,32 | 0,26 / 0,19 | 0 / 0 | 440 / 441 |
+| raft | 10 | plain / certified | F4 | 3/3, 3/3 | 0,47 / 0,45 | 0,44 / 0,13 | 0 / 0 | 441 / 440 |
+| bft2 | 0 | plain | F4 | 0/3 | – | 0,87 | 4723 | 480 |
+| bft2 | 1 | plain / certified | F4 | 3/3, 3/3 | 0,32 / 0,31 | 1,15 / 0,81 | 0 / 0 | 441 / 440 |
+| bft2 | 10 | plain / certified | F4 | 3/3, 3/3 | 0,40 / 0,45 | 0,89 / 0,55 | 0 / 0 | 441 / 441 |
+| bft2 | 0 | plain | F5-F4 | 0/3 | – | 0,88 | 9522 | 480 |
+| bft2 | 1 | plain / certified | F5-F4 | 0/3, 1/3 | – / 0,38 | 0,84 / 0,83 | 9544 / 0 | 480 / 320 |
+| bft2 | 10 | plain / certified | F5-F4 | 0/3, 0/3 | – | 0,47 / 0,57 | 9530 / 0 | 480 / 320 |
+
+- F4 (1 node sai, quorum 2f+1 = 3): attestation phát hiện ở mọi lượt trong 0,3–0,47 s (attest 10 chậm hơn attest 1 ~0,1 s); node lệch tự từ chối đọc (`DataLoss`), nên `wrong_gets` = 0 kể cả đọc thường; mất ~40 tps = 1/4 số đọc (gửi tới node4) trong 120 s sau lỗi, vd. raft a1 plain rep 1: 7095 đọc lỗi (không bật failover ở E9). Không attestation: client nhận ~4,7k giá trị sai mỗi lượt, auditor thấy trong 0,17–0,88 s.
+- F5-F4 (2 node sai thông đồng, bft2): không phía nào đủ 3 chữ ký, không height nào được xác nhận → không phát hiện trong giao thức; đọc thường vẫn nhận ~9,5k giá trị sai; đọc certified không nhận giá trị sai nhưng mọi đọc sau lỗi đều hết hạn chờ chứng chỉ (vd. a1 rep 2: 14441 đọc thành công = phần trước lỗi, 27535 lỗi) → tps 320 (mất sẵn sàng đọc, đúng như spec 11). Một ngoại lệ chưa giải thích: bft2 a1 certified rep 1 có dòng `diverged` sau 0,38 s (cần xem log trước khi dùng con số này).
+- **Độ trễ ghi không so được giữa các mức attestation.** Write p99 của lượt không lỗi ở 480 req/s là 0,86–2,66 s (E7 60 s ở 500: raft 0,26–0,63 s, bft2 0,45–0,96 s) và tăng dần theo thời gian chạy (raft: 0,86–1,51 s lúc 19:25–20:00, 1,56–2,66 s lúc 22:50–23:30) trong khi host sạch (CPU ngoài Docker 11–32%, swap 0). Driver chạy các cặp theo thứ tự a0 → a1 → a10, nên chi phí độ trễ của attestation lẫn với xu hướng này. Cần: chạy lại một nhóm đối chứng a0 xen kẽ (hoặc driver xáo thứ tự cặp) trước khi kết luận RQ5 về độ trễ. Lượt 180 s cũng có p99 cao hơn lượt 60 s ở cùng tải: có thể do các đợt dừng hiếm (snapshot raft, GC) chiếm top 1%; chưa kiểm.
