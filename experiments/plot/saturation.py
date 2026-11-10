@@ -13,10 +13,18 @@ every rep). The saturation throughput sat_rps is the largest sustained R
 (kc<cpus>-<mem>, tc<timeout>; "default" for none), so E7 and E7f runs of one
 backend are told apart.
 
+Latency-bounded rate (phase 3, the rate of the E9-E12 drivers): slo_rps
+is the largest R such that R and every lower swept rate meet tps >= 0.95 * R,
+write p99 <= --slo-ms (default 1000 ms) and dropped = 0 (the knee of the
+latency curve, before the write p99 climbs towards the 2 s of sat_rps);
+e9_rate = round(0.8 * slo_rps). Taking 80% of sat_rps instead would run
+E9-E12 where the write p99 is already 1-2 s and queueing dominates.
+
 Writes <out>/saturation.csv (backend,config,sat_rps,tps_at_sat,
-write_p99_ms_at_sat,reps; sat_rps empty when no rate is sustained) and
-<out>/saturation_points.csv (every (backend, config, rate) with its means),
-prints both tables and the notes. Exit 0, or 2 on unusable input.
+write_p99_ms_at_sat,reps,slo_rps,write_p99_ms_at_slo,e9_rate; empty when no
+rate qualifies) and <out>/saturation_points.csv (every (backend, config,
+rate) with its means), prints both tables and the notes. Exit 0, or 2 on
+unusable input.
 """
 import argparse
 import math
@@ -28,10 +36,13 @@ import plot
 
 TPS_FRACTION = 0.95
 MAX_WRITE_P99_MS = 2000.0
+SLO_WRITE_P99_MS = 1000.0
+E9_FRACTION = 0.8
 
-SAT_COLUMNS = ["backend", "config", "sat_rps", "tps_at_sat", "write_p99_ms_at_sat", "reps"]
+SAT_COLUMNS = ["backend", "config", "sat_rps", "tps_at_sat", "write_p99_ms_at_sat", "reps",
+               "slo_rps", "write_p99_ms_at_slo", "e9_rate"]
 POINT_COLUMNS = ["backend", "config", "offered_rps", "reps", "tps_mean", "write_p99_ms_mean",
-                 "dropped", "sustained"]
+                 "dropped", "sustained", "within_slo"]
 
 
 class Result:
@@ -78,7 +89,7 @@ def _num(v):
     return int(f) if f.is_integer() else f
 
 
-def analyse(csv_paths, ops_dir):
+def analyse(csv_paths, ops_dir, slo_ms=SLO_WRITE_P99_MS):
     res = Result()
     df = plot.load_csvs(csv_paths)
     df = df[df["offered_rps"].astype(float) > 0]
@@ -105,25 +116,42 @@ def analyse(csv_paths, ops_dir):
         p99 = math.fsum(r[1] for r in reps) / len(reps)
         dropped = sum(r[2] for r in reps)
         ok = tps >= TPS_FRACTION * rate and p99 <= MAX_WRITE_P99_MS and dropped == 0
+        slo = tps >= TPS_FRACTION * rate and p99 <= slo_ms and dropped == 0
         pt = {"backend": b, "config": cfg, "offered_rps": _num(rate), "reps": len(reps),
               "tps_mean": round(tps, 2), "write_p99_ms_mean": round(p99, 3),
-              "dropped": dropped, "sustained": int(ok)}
+              "dropped": dropped, "sustained": int(ok), "within_slo": int(slo)}
         res.points.append(pt)
         by_cfg.setdefault((b, cfg), []).append(pt)
 
     for (b, cfg), pts in sorted(by_cfg.items()):
+        knee = None
+        for p in pts:  # ascending rates: stop at the first one over the SLO
+            if not p["within_slo"]:
+                break
+            knee = p
+        slo_cols = {"slo_rps": "", "write_p99_ms_at_slo": "", "e9_rate": ""}
+        if knee is None:
+            res.notes.append("%s/%s: the lowest rate %s is already over the %g ms write p99 SLO"
+                             % (b, cfg, pts[0]["offered_rps"], slo_ms))
+        else:
+            slo_cols = {"slo_rps": knee["offered_rps"],
+                        "write_p99_ms_at_slo": _num(knee["write_p99_ms_mean"]),
+                        "e9_rate": int(round(E9_FRACTION * float(knee["offered_rps"])))}
+            if knee is pts[-1]:
+                res.notes.append("%s/%s: the highest rate %s is within the SLO; slo_rps may be higher"
+                                 % (b, cfg, knee["offered_rps"]))
         good = [p for p in pts if p["sustained"]]
         if not good:
-            res.sat.append({"backend": b, "config": cfg, "sat_rps": "", "tps_at_sat": "",
-                            "write_p99_ms_at_sat": "", "reps": ""})
+            res.sat.append(dict({"backend": b, "config": cfg, "sat_rps": "", "tps_at_sat": "",
+                                 "write_p99_ms_at_sat": "", "reps": ""}, **slo_cols))
             res.notes.append("%s/%s: no rate sustained (lowest rate %s already fails); sweep lower rates"
                              % (b, cfg, pts[0]["offered_rps"]))
             continue
         best = max(good, key=lambda p: p["offered_rps"])
-        res.sat.append({"backend": b, "config": cfg, "sat_rps": best["offered_rps"],
-                        "tps_at_sat": _num(best["tps_mean"]),
-                        "write_p99_ms_at_sat": _num(best["write_p99_ms_mean"]),
-                        "reps": best["reps"]})
+        res.sat.append(dict({"backend": b, "config": cfg, "sat_rps": best["offered_rps"],
+                             "tps_at_sat": _num(best["tps_mean"]),
+                             "write_p99_ms_at_sat": _num(best["write_p99_ms_mean"]),
+                             "reps": best["reps"]}, **slo_cols))
         higher = [p for p in pts if p["offered_rps"] > best["offered_rps"] and p["sustained"]]
         if not higher and best is pts[-1]:
             res.notes.append("%s/%s: the highest rate %s is sustained; saturation may be higher"
@@ -150,9 +178,11 @@ def main(argv=None):
     p.add_argument("csv", nargs="+")
     p.add_argument("--ops-dir", required=True, help="dir holding <exp>/<tag>.ops.csv (results/raw)")
     p.add_argument("--out", required=True)
+    p.add_argument("--slo-ms", type=float, default=SLO_WRITE_P99_MS,
+                   help="write p99 bound of slo_rps / e9_rate (default %(default)s)")
     a = p.parse_args(argv)
     try:
-        res = analyse(a.csv, Path(a.ops_dir))
+        res = analyse(a.csv, Path(a.ops_dir), a.slo_ms)
     except plot.InputError as e:
         print("saturation.py: error: %s" % e, file=sys.stderr)
         return 2

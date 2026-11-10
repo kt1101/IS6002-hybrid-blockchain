@@ -13,8 +13,9 @@
 # The CSV has no column for ATTEST_EVERY / READ_MODE: every pair writes its
 # own EXP <E9_PREFIX>-a<K>-<read> (e9-a0-plain, e9-a1-plain, e9-a1-certified,
 # e9-a10-plain, e9-a10-certified); this script runs itself once per pair
-# (E9_PAIR, internal). Load: open loop at E9_RATE_<BACKEND> (80% of the E7
-# saturation throughput) or E9_RATE; unset = closed loop. With
+# (E9_PAIR, internal). Load: open loop at E9_RATE_<BACKEND> (e9_rate of
+# saturation.py: 80% of the largest E7 rate with write p99 <= 1 s) or
+# E9_RATE; unset = closed loop. With
 # ATTEST_EVERY > 0 run_one.sh keeps every "core: diverged at height" line of
 # the node logs in <tag>.diverged; experiments/plot/rq5.py reads them with
 # the .faults, .audit and .ops.csv sidecars.

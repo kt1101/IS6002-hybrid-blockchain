@@ -193,7 +193,8 @@ exp_params_default() {
 
 # exp_rate_for PREFIX BACKEND (phase 3 drivers): the open-loop rate of
 # BACKEND: <PREFIX>_RATE_<BACKEND>, else <PREFIX>_RATE, else E9's
-# E9_RATE_<BACKEND> / E9_RATE (80% of the E7 saturation throughput, Task 2);
+# E9_RATE_<BACKEND> / E9_RATE (e9_rate of experiments/plot/saturation.py:
+# 80% of the largest E7 rate whose write p99 stays <= 1 s, Task 2);
 # empty = closed loop.
 exp_rate_for() {
   local up v

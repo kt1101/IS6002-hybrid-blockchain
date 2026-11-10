@@ -73,7 +73,38 @@ def test_main_writes_csv(tmp_path, capsys):
     out = tmp_path / "out"
     assert saturation.main([str(csv_path), "--ops-dir", str(raw), "--out", str(out)]) == 0
     lines = (out / "saturation.csv").read_text().splitlines()
-    assert lines[0] == "backend,config,sat_rps,tps_at_sat,write_p99_ms_at_sat,reps"
+    assert lines[0] == ("backend,config,sat_rps,tps_at_sat,write_p99_ms_at_sat,reps,"
+                        "slo_rps,write_p99_ms_at_slo,e9_rate")
     assert lines[1].startswith("raft,default,1000,")
+    assert lines[1].endswith(",1000,800,800")
     assert (out / "saturation_points.csv").exists()
     assert "raft" in capsys.readouterr().out
+
+
+def test_slo_rate_is_the_knee(tmp_path):
+    # 1000 is sustained (p99 <= 2 s) but over the 1 s SLO; 1500 is within the
+    # SLO again (noise) and must not count: slo_rps stops at the first miss.
+    csv_path, raw = _fixture(tmp_path, [(500, 499, 300), (700, 699, 900), (1000, 995, 1500),
+                                        (1500, 1490, 950)])
+    res = saturation.analyse([csv_path], raw)
+    s = res.sat[0]
+    assert s["sat_rps"] == 1500
+    assert s["slo_rps"] == 700
+    assert s["write_p99_ms_at_slo"] == 900
+    assert s["e9_rate"] == 560
+
+
+def test_slo_ms_option(tmp_path):
+    csv_path, raw = _fixture(tmp_path, [(500, 499, 300), (700, 699, 900)])
+    res = saturation.analyse([csv_path], raw, slo_ms=500)
+    assert res.sat[0]["slo_rps"] == 500
+    assert res.sat[0]["e9_rate"] == 400
+    assert [p["within_slo"] for p in res.points] == [1, 0]
+
+
+def test_slo_none(tmp_path):
+    csv_path, raw = _fixture(tmp_path, [(500, 499, 1300)])
+    res = saturation.analyse([csv_path], raw)
+    assert res.sat[0]["slo_rps"] == "" and res.sat[0]["e9_rate"] == ""
+    assert res.sat[0]["sat_rps"] == 500
+    assert any("SLO" in n for n in res.notes)
