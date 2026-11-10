@@ -108,6 +108,7 @@ Nguyên tắc: **mọi quyết định loại node đều tất định**, đư�
 - Attestation của node bị loại không còn được đếm: mọi attestation của nó được xử lý sau khi bị loại đều bỏ, kể cả attestation đến trễ của các height trước đó (cắt theo thứ tự block, không theo height được ký; nếu cắt theo height, với quorum f+1 phía còn lại vẫn có thể được xác nhận ở một height khác và cả hai phía bị loại).
 - Node bị loại (nếu trung thực về mã, tức F4) trả `codes.PermissionDenied` cho mọi đọc. Node độc hại có thể vẫn trả lời; client không tin nó nữa (dưới).
 - Mỗi lần loại tăng `epoch`. `GetVerifiedResponse.evicted_epoch` cho client biết có thay đổi; client gọi `Evicted` trên node đang dùng và bỏ các node trong danh sách.
+- Quorum của Certifier **không đổi** sau khi loại (2f+1 của N, hoặc f+1): node bị loại chỉ bị bỏ qua. Với N=4, quorum 3, loại node 4 thì node 1–3 đều phải ký mọi height; thêm một node chậm hoặc im lặng là đọc có chứng nhận dừng (client chỉ thấy `cert_timeouts`). Hạ quorum (q − e là an toàn khi e node bị loại đều chắc chắn lỗi) cần mọi node đổi ở cùng vị trí block và client đổi theo (`--attest-quorum` cố định); không làm ở giai đoạn 3. Test `TestQuorumFixedAfterEviction`.
 
 ### 3.4 Chuyển node phía client (`--failover`)
 
@@ -189,4 +190,5 @@ Tổng giai đoạn 3 (không kể P2): 126–150 lượt, mỗi lượt 2,5–4
 - F6 không có bằng chứng nếu node né ký (trừ `sign-always`).
 - Bằng chứng đọc chỉ kiểm được trong cửa sổ 1024 height đã xác nhận.
 - Quorum f+1 không an toàn khi có ≥ f+1 node lỗi thông đồng; 2f+1 an toàn nhưng mất sẵn sàng đọc.
+- Quorum không giảm sau khi loại node (3.3): sau một lần loại ở N=4, chỉ cần thêm một node chậm là đọc có chứng nhận dừng. Chưa có cấu hình E11 đo trường hợp này (harness chỉ gắn một loại fault mỗi lượt).
 - E10–E12 chỉ có raft và bft2; mọi giới hạn của giai đoạn 1–2 vẫn áp dụng.
