@@ -429,7 +429,9 @@ func main() {
 			Failovers:           rstats.Failovers.Load(),
 			WrongBeforeFailover: rstats.WrongBeforeFailover.Load(),
 			EvidenceSent:        rstats.EvidenceSent.Load(),
-			CertTimeouts:        rstats.CertTimeouts.Load()}
+			CertTimeouts:        rstats.CertTimeouts.Load(),
+			FirstFailoverUnixMs: rstats.FirstFailoverMs.Load(),
+			EvidenceFailed:      rstats.EvidenceFailed.Load()}
 		if err := benchmark.WriteOpsCSV(*opsPath, rec.OpSummaries(), x); err != nil {
 			panic(err)
 		}

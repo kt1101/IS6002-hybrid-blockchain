@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -54,7 +55,9 @@ type readStats struct {
 	Failovers           atomic.Int64 // moves of a reader to another node
 	WrongBeforeFailover atomic.Int64 // corrupt values accepted from a node the reader left afterwards
 	EvidenceSent        atomic.Int64 // bad-read evidence accepted by a node
+	EvidenceFailed      atomic.Int64 // bad-read evidence a node refused (e.g. ResourceExhausted: its queue is full)
 	CertTimeouts        atomic.Int64 // certified reads that timed out (DeadlineExceeded)
+	FirstFailoverMs     atomic.Int64 // unix ms of the first move of any reader, 0 = none
 }
 
 // reader reads keys for one worker (closed loop) or one driver slot (open
@@ -122,6 +125,7 @@ func (r *reader) moveLocked() bool {
 		j := (r.cur + k) % n
 		if !r.excludedLocked(j) {
 			r.stats.Failovers.Add(1)
+			r.stats.FirstFailoverMs.CompareAndSwap(0, time.Now().UnixMilli())
 			r.stats.WrongBeforeFailover.Add(r.corrupt[r.cur])
 			r.corrupt[r.cur] = 0
 			r.cur = j
@@ -282,8 +286,10 @@ func (r *reader) report(ctx context.Context, i int, key string, resp *pbv.GetVer
 		return
 	}
 	ev := &pbv.Evidence{Culprit: resp.GetNodeId(), Height: resp.GetHeight(), Read: sigs.SignedReadOf(key, resp)}
-	if r.nodes[to].ReportEvidence(ctx, ev) == nil {
+	if err := r.nodes[to].ReportEvidence(ctx, ev); err == nil {
 		r.stats.EvidenceSent.Add(1)
+	} else if ctx.Err() == nil {
+		r.stats.EvidenceFailed.Add(1)
 	}
 }
 

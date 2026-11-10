@@ -17,7 +17,7 @@ def _ts(sec):
 
 
 def _run(tmp_path, exp="e11-F6-cert-fo-sign", fault="F6:node4@60", backend="raft", n=4, wrong=0,
-         inject_action="readlie_on", evictions=(), certs=(), ops=(3, 4, 2, 0), rate=800):
+         inject_action="readlie_on", evictions=(), certs=(), ops=(3, 4, 2, 0), rate=800, first_fo=None, ev_failed=None):
     """One CSV row plus its sidecars; evictions: (reporter, sec, culprit id, height, reason)."""
     raw = tmp_path / "raw"
     (raw / exp).mkdir(parents=True, exist_ok=True)
@@ -33,9 +33,14 @@ def _run(tmp_path, exp="e11-F6-cert-fo-sign", fault="F6:node4@60", backend="raft
     tag = rq6.run_tag(row) + "_bf100ms_rate%d" % rate
     d = raw / exp
     rej, fo, sent, cto = ops
+    hdr, extra = OPS_HEADER, ""
+    if first_fo is not None:
+        hdr, extra = OPS_HEADER + ",first_failover_unix_ms", ",%d" % first_fo
+    if ev_failed is not None:
+        hdr, extra = hdr + ",evidence_failed", extra + ",%d" % ev_failed
     (d / (tag + ".ops.csv")).write_text(
-        "%s\nread,1,1.00,1.000,1.000,2.000,0,0,0,900,30,0,0,0,%d,%d,%d,%d\n"
-        "write,1,1.00,1.000,1.000,123.000,0,0,0,900,30,0,0,0,0,0,0,0\n" % (OPS_HEADER, rej, fo, sent, cto))
+        "%s\nread,1,1.00,1.000,1.000,2.000,0,0,0,900,30,0,0,0,%d,%d,%d,%d%s\n"
+        "write,1,1.00,1.000,1.000,123.000,0,0,0,900,30,0,0,0,0,0,0,0%s\n" % (hdr, rej, fo, sent, cto, extra, extra))
     if fault != "none":
         (d / (tag + ".faults")).write_text(
             FAULTS_HEADER + "\n1970-01-01T00:00:00Z,0,0,0,%s,run_phase_start,,\n"
@@ -140,3 +145,41 @@ def test_run_tag_matches_plot():
            "rtt_ms": 0, "fault": "F5-F4:node4+node3@60", "commit_mode": "sync", "rep": 2, "offered_rps": 800}
     assert rq6.run_tag(row) == plot.run_tag(row)
     assert rq6.rate_suffix(row) == plot.rate_suffix(row)
+
+
+def test_failover_s_from_first_failover(tmp_path):
+    p, raw = _run(tmp_path, evictions=ALL_EVICT_NODE4, first_fo=61250)
+    assert rq6.analyse([p], raw).runs[0]["failover_s"] == pytest.approx(1.25, abs=1e-3)
+
+
+def test_failover_before_injection_noted(tmp_path):
+    p, raw = _run(tmp_path, evictions=ALL_EVICT_NODE4, first_fo=30000)
+    res = rq6.analyse([p], raw)
+    assert res.runs[0]["failover_s"] == ""
+    assert any("before the injection" in n for n in res.notes)
+
+
+def test_no_failover_no_value(tmp_path):
+    p, raw = _run(tmp_path, ops=(0, 0, 0, 0), first_fo=0)
+    res = rq6.analyse([p], raw)
+    assert res.runs[0]["failover_s"] == ""
+    assert not any("failover" in n for n in res.notes)
+
+
+def test_old_sidecar_failover_noted(tmp_path):
+    p, raw = _run(tmp_path)  # failovers=4, no first_failover_unix_ms column
+    res = rq6.analyse([p], raw)
+    assert res.runs[0]["failover_s"] == ""
+    assert any("failover_s not recorded" in n for n in res.notes)
+
+
+def test_evidence_failed_column(tmp_path):
+    p, raw = _run(tmp_path, evictions=ALL_EVICT_NODE4, first_fo=61000, ev_failed=3)
+    res = rq6.analyse([p], raw)
+    assert res.runs[0]["evidence_failed"] == 3
+    assert res.summary[0]["evidence_failed"] == 3
+
+
+def test_evidence_failed_missing_column_empty(tmp_path):
+    p, raw = _run(tmp_path, evictions=ALL_EVICT_NODE4)
+    assert rq6.analyse([p], raw).runs[0]["evidence_failed"] == ""

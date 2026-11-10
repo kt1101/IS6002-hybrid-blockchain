@@ -17,10 +17,13 @@ by EXP, backend and fault kind. For every CSV row, from its run sidecars
   faulty node; empty when that never happens.
 * same_height: True when every node logged each culprit's eviction at the
   same height (the eviction is decided in the apply loop, so it must be).
-* failover_s: not recorded by ycsbbench yet: always empty, with a note when
-  the run had FAILOVER on (the note names the run).
+* failover_s: first_failover_unix_ms of the read line of <tag>.ops.csv (the
+  client's first move of any reader to another node) minus the injection;
+  empty when the run had no failover or no injection, or (with a note) when
+  the first failover came before the injection, or when the sidecar has no
+  such column (an older ycsbbench) although the run failed over.
 * wrong_gets: the CSV column (corrupt values the client accepted).
-* rejected_reads, evidence_sent, cert_timeouts: the read line of
+* rejected_reads, evidence_sent, evidence_failed, cert_timeouts: the read line of
   <tag>.ops.csv (rejected_reads falls back to proof_errors + cert_errors +
   dataloss_errors of phase 2; a missing column is left empty).
 * honest_evicted: distinct nodes outside FAULT that some node evicted.
@@ -58,11 +61,12 @@ CERT = re.compile(r"core: certified height (\d+) root ([0-9a-f]+)")
 FAULT_NODES = re.compile(r"^[A-Z0-9-]+:([^@]+)@")
 
 RUN_COLUMNS = ["exp", "backend", "n", "fault", "rep", "fault_kind", "detect_evidence_s", "evict_all_s",
-               "same_height", "failover_s", "wrong_gets", "rejected_reads", "evidence_sent", "cert_timeouts",
-               "honest_evicted", "wrong_root_heights", "certs_heights", "tps"]
+               "same_height", "failover_s", "wrong_gets", "rejected_reads", "evidence_sent", "evidence_failed",
+               "cert_timeouts", "honest_evicted", "wrong_root_heights", "certs_heights", "tps"]
 SUMMARY_COLUMNS = ["exp", "backend", "fault_kind", "runs", "detected_runs", "evicted_all_runs",
-                   "detect_evidence_s", "evict_all_s", "wrong_gets", "rejected_reads", "evidence_sent",
-                   "cert_timeouts", "honest_evicted", "wrong_root_heights", "tps"]
+                   "detect_evidence_s", "evict_all_s", "failover_s", "wrong_gets", "rejected_reads",
+                   "evidence_sent", "evidence_failed", "cert_timeouts", "honest_evicted", "wrong_root_heights",
+                   "tps"]
 
 
 class InputError(ValueError):
@@ -296,13 +300,22 @@ def analyse(csv_paths, raw_dir):
         detect, evict_all, same, honest_ev, wrong_h = eviction_metrics(evictions, n, culprits, inj)
         if kind != "none" and not evictions:
             res.notes.append("%s: no .evict line (no node was evicted)" % label)
-        if "failovers" in rd and _int_or_empty(rd, "failovers"):
-            res.notes.append("%s: failover_s not recorded (ycsbbench logs no failover times)" % label)
+        failover = None
+        first_fo = _int_or_empty(rd, "first_failover_unix_ms")
+        if first_fo and inj is not None:
+            failover = first_fo / 1000.0 - inj
+            if failover < 0:
+                res.notes.append("%s: first failover %.3f s before the injection; failover_s left empty"
+                                 % (label, -failover))
+                failover = None
+        elif first_fo == "" and _int_or_empty(rd, "failovers"):
+            res.notes.append("%s: failover_s not recorded (ops sidecar without first_failover_unix_ms)" % label)
         res.runs.append({
             "exp": row["exp"], "backend": row["backend"], "n": n, "fault": fault, "rep": row["rep"],
             "fault_kind": kind, "detect_evidence_s": _round(detect), "evict_all_s": _round(evict_all),
-            "same_height": same, "failover_s": "", "wrong_gets": int(float(row["wrong_gets"] or 0)),
+            "same_height": same, "failover_s": _round(failover), "wrong_gets": int(float(row["wrong_gets"] or 0)),
             "rejected_reads": rejected, "evidence_sent": _int_or_empty(rd, "evidence_sent"),
+            "evidence_failed": _int_or_empty(rd, "evidence_failed"),
             "cert_timeouts": _int_or_empty(rd, "cert_timeouts"), "honest_evicted": honest_ev,
             "wrong_root_heights": wrong_h, "certs_heights": len(read_cert_heights(run_sidecar(raw_dir, row, ".certs"))),
             "tps": float(row["tps"] or "nan"),
@@ -328,8 +341,8 @@ def analyse(csv_paths, raw_dir):
             "exp": exp, "backend": b, "fault_kind": kind, "runs": len(rs),
             "detected_runs": sum(r["detect_evidence_s"] != "" for r in rs),
             "evicted_all_runs": sum(r["evict_all_s"] != "" for r in rs),
-            **{c: mean(rs, c) for c in ("detect_evidence_s", "evict_all_s", "wrong_gets", "rejected_reads",
-                                       "evidence_sent", "cert_timeouts", "honest_evicted",
+            **{c: mean(rs, c) for c in ("detect_evidence_s", "evict_all_s", "failover_s", "wrong_gets", "rejected_reads",
+                                       "evidence_sent", "evidence_failed", "cert_timeouts", "honest_evicted",
                                        "wrong_root_heights", "tps")},
         })
     return res

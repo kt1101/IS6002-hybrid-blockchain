@@ -208,19 +208,19 @@ func TestWriteOpsCSV(t *testing.T) {
 		{Op: "write", Count: 0, Aborted: 7},
 	}
 	if err := WriteOpsCSV(path, ops, OpsExtra{Dropped: 5, ReadBytesMean: 812.25, VerifyMicrosMean: 31, ProofErrors: 1, CertErrors: 2, DataLossErrors: 3,
-		RejectedReads: 4, QuorumErrors: 5, Failovers: 6, WrongBeforeFailover: 7, EvidenceSent: 8, CertTimeouts: 9}); err != nil {
+		RejectedReads: 4, QuorumErrors: 5, Failovers: 6, WrongBeforeFailover: 7, EvidenceSent: 8, CertTimeouts: 9, FirstFailoverUnixMs: 1700000000123, EvidenceFailed: 2}); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := OpsCSVHeader + "\nread,30,3.00,1.000,1.000,1.250,1,0,5,812.2,31.0,1,2,3,4,5,6,7,8,9\nwrite,0,0.00,0.000,0.000,0.000,0,7,5,812.2,31.0,1,2,3,4,5,6,7,8,9\n"
+	want := OpsCSVHeader + "\nread,30,3.00,1.000,1.000,1.250,1,0,5,812.2,31.0,1,2,3,4,5,6,7,8,9,1700000000123,2\nwrite,0,0.00,0.000,0.000,0.000,0,7,5,812.2,31.0,1,2,3,4,5,6,7,8,9,1700000000123,2\n"
 	if string(data) != want {
 		t.Fatalf("ops csv=%q want %q", data, want)
 	}
 	if OpsCSVHeader != "op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dropped,read_bytes_mean,verify_cpu_us_mean,proof_errors,cert_errors,dataloss_errors,"+
-		"rejected_reads,quorum_errors,failovers,wrong_before_failover,evidence_sent,cert_timeouts" {
+		"rejected_reads,quorum_errors,failovers,wrong_before_failover,evidence_sent,cert_timeouts,first_failover_unix_ms,evidence_failed" {
 		t.Fatalf("OpsCSVHeader changed: %q (experiments/run_one.sh parses it)", OpsCSVHeader)
 	}
 }

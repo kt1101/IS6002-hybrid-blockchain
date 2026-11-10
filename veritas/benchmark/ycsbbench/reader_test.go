@@ -32,6 +32,7 @@ type fakeNode struct {
 	gets, certs, evictedCalls, reports int
 	signedCalls                        int
 	lastEvidence                       *pbv.Evidence
+	reportErr                          error
 }
 
 type certAnswer struct {
@@ -76,7 +77,7 @@ func (f *fakeNode) ReportEvidence(ctx context.Context, ev *pbv.Evidence) error {
 	defer f.mu.Unlock()
 	f.reports++
 	f.lastEvidence = ev
-	return nil
+	return f.reportErr
 }
 
 func (f *fakeNode) calls() int {
@@ -363,7 +364,24 @@ func TestReaderConcurrent(t *testing.T) {
 }
 
 func TestOpsCSVPhase3Columns(t *testing.T) {
-	if !strings.HasSuffix(benchmark.OpsCSVHeader, ",rejected_reads,quorum_errors,failovers,wrong_before_failover,evidence_sent,cert_timeouts") {
+	if !strings.HasSuffix(benchmark.OpsCSVHeader, ",rejected_reads,quorum_errors,failovers,wrong_before_failover,evidence_sent,cert_timeouts,first_failover_unix_ms,evidence_failed") {
 		t.Fatalf("OpsCSVHeader = %q", benchmark.OpsCSVHeader)
+	}
+}
+
+func TestReaderEvidenceRefusedCounted(t *testing.T) {
+	fs, api := fakes(4)
+	fs[0].certResps = []certAnswer{
+		{badResp(1, false), proofErr()},
+		{badResp(1, true), proofErr()},
+	}
+	fs[1].reportErr = status.Error(codes.ResourceExhausted, "full")
+	st := &readStats{}
+	r := newReader(api, 0, readerConfig{Mode: driver.ReadCertified, Failover: true, SignReads: signOnFailure, F: 1}, st)
+	if _, err := r.Read(context.Background(), "k"); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if fs[1].reports != 1 || st.EvidenceSent.Load() != 0 || st.EvidenceFailed.Load() != 1 {
+		t.Fatalf("reports %d, sent %d, failed %d; want 1, 0, 1", fs[1].reports, st.EvidenceSent.Load(), st.EvidenceFailed.Load())
 	}
 }
