@@ -2,7 +2,7 @@
 
 Đọc cùng: plan `docs/superpowers/plans/2026-11-09-phase3-accountability.md`, spec `docs/superpowers/specs/2026-11-09-phase3-accountability-design.md`.
 Nhánh `claude/wizardly-robinson-fdaa8d` (worktree `.claude/worktrees/wizardly-robinson-fdaa8d`), dựa trên phase 2 `claude/charming-hopper-hy6x4e`. **Chưa push.**
-Cập nhật: 2026-11-10 (Task 7 xong).
+Cập nhật: 2026-11-10 (Task 7 xong, smoke Task 8 đạt).
 
 ## Task đã xong
 
@@ -13,7 +13,7 @@ Cập nhật: 2026-11-10 (Task 7 xong).
 | 3 (F6 readlie) | `84d47ca` | test Go qua |
 | 4 (certifier AddResult, skip) | `5d5a085` | |
 | 5 + 6 (Accountant, eviction, signed reads, evidence) | `0a3ad5b` | một commit chung (xem "Khác plan") |
-| 8 (harness) | `1f78ebf`, `e5dc2af` | chưa smoke run trên Docker (Step 4) |
+| 8 (harness) | `1f78ebf`, `e5dc2af` | smoke Step 4 đạt (NOTES "smoke test truy vết") |
 | 9 (driver E10–E12, rq6.py) | `fa5f62d` | |
 | 7 phần 1 (recorder cột ops, driver API) | `0a14006` | |
 | 7 phần 2 (`reader.go`, cờ ycsbbench) | xem `git log` | `go vet` + `go test -race ./veritas/...` qua |
@@ -28,7 +28,7 @@ Trang Notion tiến độ (memory `notion-progress-page`): id `413fc8af-e746-811
 
 ## Sau Task 7
 
-- Task 8 Step 4 (smoke): `BACKEND=raft N=4 ATTEST_EVERY=1 READ_MODE=certified FAILOVER=1 SIGN_READS=on-failure FAULT=F6:node4@20 DURATION=40s experiments/run_one.sh` (cần `EXP`, `CLIENTS`, `RATE` theo `run_one.sh`; build lại ảnh trước: `experiments/build.sh`).
+- ~~Task 8 Step 4 (smoke)~~: đạt 2026-11-10 (`EXP=smoke-p3`): node 4 bị loại `bad_read` cùng height 378 trên 4 node, `wrong_gets` = 0, `evidence_sent` = 2, `failovers` = 4.
 - Task 2: E7 (raft, bft2) → `E9_RATE_*` = 80% bão hòa → E9; ghi NOTES; tag `p7-openloop`, `p10-attest`.
 - Task 10: chạy E10, E11, E12 (`E1x_RATE_*` hoặc E9's qua `exp_rate_for`), `rq6.py`, NOTES, tag `p11-accountability`.
 - Task 11 (tùy chọn): Kafka approve theo quorum.

@@ -390,3 +390,12 @@ Theo spec `docs/superpowers/specs/2026-11-03-phase2-fair-comparison-and-verifiab
 - `ATTEST_EVERY=1 MEM=1g BATCH_FLUSH=100ms experiments/check_consistency.sh <b>`: kafka, raft, tendermint, bft2 đều **CONSISTENT**, không có dòng `core: diverged` trong log.
 - `gofmt -l veritas cmd` chỉ liệt kê 5 file gốc không sửa (`veritas/benchmark/util.go`, `veritas/server.go`, `cmd/kafkabench`, `cmd/mongodb`, `cmd/veritastm-mongodb`).
 
+
+## Giai đoạn 3: smoke test truy vết (Task 8 Step 4, 2026-11-10)
+
+`EXP=smoke-p3 BACKEND=raft N=4 ATTEST_EVERY=1 READ_MODE=certified FAILOVER=1 SIGN_READS=on-failure FAULT=F6:node4@20 DURATION=40s experiments/run_one.sh` ở commit `3935e95` (ảnh build lại bằng `experiments/build.sh`; flush mặc định 1 s, 16 client). Lệnh Docker chạy trong Terminal panel của session.
+
+- Exit 0, có dòng CSV: 18,25 tps (trần ~CLIENTS / 0,9 s của flush 1 s), `errors` = 0, **`wrong_gets` = 0**.
+- `readlie` bật lúc t = 20,0 s, xác nhận lúc 20,5 s. `<tag>.evict`: cả 4 node ghi `evicted node 4 at height 378 (bad_read)`, **cùng height**, khoảng 1,2–1,7 s sau khi lỗi bật (log 01:39:59.85–.93Z).
+- `.ops.csv`: `rejected_reads` = 3, `failovers` = 4 (4 worker có node chính là node4), `evidence_sent` = 2, `wrong_before_failover` = 0, `cert_timeouts` = 0, `quorum_errors` = 0.
+- `.diverged` và `.certs` rỗng: F6 không đổi trạng thái, nên không có root mâu thuẫn và không có dòng `core: certified height` (dòng này chỉ ghi khi có root mâu thuẫn). Auditor: 52 tick, đều nhất quán.
