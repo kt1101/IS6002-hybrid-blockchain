@@ -40,7 +40,7 @@
 #                 summed ps %CPU of the host processes outside the Docker VM),
 #                 HOST_SWAPOUT_MAX=1000 (host swap-outs, pages, during the run
 #                 phase), HOST_BUSY_WAIT_SECS=900, HOST_GUARD_POLL_SECS=30,
-#                 HOST_SAMPLE_SECS=5
+#                 HOST_SAMPLE_SECS=5, HOST_GAP_MAX_SECS=3*HOST_SAMPLE_SECS (0 = off)
 #   BACKEND=tendermint additionally needs COMMIT_MODE=sync, CLIENTS <= 256 and
 #                 LOAD_THREADS <= 256 (hbdb_check_tendermint_limits in lib.sh:
 #                 Tendermint's 256-request ABCI queue per block)
@@ -230,8 +230,12 @@
 #   - after the run: one line per run in results/raw/<EXP>/host-runs.csv
 #     (`ts,tag,load1_max,other_cpu_mean_pct,other_cpu_max_pct,swapouts_delta,
 #     verdict`); verdict noisy (mean other CPU > HOST_OTHER_CPU_MAX, or more
-#     than HOST_SWAPOUT_MAX pages swapped out during the run phase) fails the
-#     run (exit 3, no CSV row, retried by the drivers), whatever the FAULT.
+#     than HOST_SWAPOUT_MAX pages swapped out during the run phase, or two
+#     run-phase samples more than HOST_GAP_MAX_SECS apart: the host slept, as
+#     with a closed lid on battery, which caffeinate cannot stop, or stalled)
+#     fails the run (exit 3, no CSV row, retried by the drivers), whatever
+#     the FAULT. The end-of-run sample is left out of the gap check: it is
+#     taken after the bench and the sidecars, normally 1-16 s later.
 # ps that prints nothing (a sandbox) leaves the guard unchecked (a warning).
 # Off by default on non-macOS hosts: there the containers are host processes.
 #
@@ -304,6 +308,7 @@ HOST_SWAPOUT_MAX="${HOST_SWAPOUT_MAX:-1000}"
 HOST_BUSY_WAIT_SECS="${HOST_BUSY_WAIT_SECS:-900}"
 HOST_GUARD_POLL_SECS="${HOST_GUARD_POLL_SECS:-30}"
 HOST_SAMPLE_SECS="${HOST_SAMPLE_SECS:-5}"
+HOST_GAP_MAX_SECS="${HOST_GAP_MAX_SECS:-$((${HOST_SAMPLE_SECS:-5} * 3))}"
 
 # ---- validate input (nothing touches Docker before this passes) ----
 case "$EXP" in
@@ -330,6 +335,7 @@ hbdb_require_uint HOST_BUSY_WAIT_SECS "$HOST_BUSY_WAIT_SECS"
 hbdb_require_uint HOST_GUARD_POLL_SECS "$HOST_GUARD_POLL_SECS"
 [ "$HOST_GUARD_POLL_SECS" -ge 1 ] || die "HOST_GUARD_POLL_SECS must be >= 1"
 hbdb_require_uint HOST_SAMPLE_SECS "$HOST_SAMPLE_SECS"
+hbdb_require_uint HOST_GAP_MAX_SECS "$HOST_GAP_MAX_SECS"
 echo "$RATE" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || die "RATE must be a non-negative number (requests per second, 0 = closed loop), got '$RATE'"
 hbdb_require_uint MAX_INFLIGHT "$MAX_INFLIGHT"
 [ "$MAX_INFLIGHT" -ge 1 ] || die "MAX_INFLIGHT must be >= 1"
@@ -898,9 +904,16 @@ host_verdict() {
     log "warning: no host samples in $host_file; host guard verdict skipped"
     return 0
   fi
+  # Largest gap between two run-phase samples (ms), before the end sample.
+  local gap v
+  gap="$(awk -F, 'NR > 1 && $1 != "" { if (p && $1 - p > g) g = $1 - p; p = $1 } END { printf "%d", g }' "$host_file")"
   host_sample >>"$host_file"
-  local v
-  v="$(awk -F, -v cmax="$HOST_OTHER_CPU_MAX" -v smax="$HOST_SWAPOUT_MAX" '
+  if [ "$HOST_GAP_MAX_SECS" -gt 0 ] && [ "$gap" -gt $((HOST_GAP_MAX_SECS * 1000)) ]; then
+    log "host samples $((gap / 1000)) s apart during the run (> HOST_GAP_MAX_SECS=$HOST_GAP_MAX_SECS): the host slept or stalled"
+  else
+    gap=0
+  fi
+  v="$(awk -F, -v cmax="$HOST_OTHER_CPU_MAX" -v smax="$HOST_SWAPOUT_MAX" -v gap="$gap" '
     NR == 1 { next }
     $2 != "" { l = $2 + 0; if (!ln || l > lmax) lmax = l; ln++ }
     $3 != "" { c = $3 + 0; cs += c; cn++; if (c > ctop) ctop = c }
@@ -908,7 +921,7 @@ host_verdict() {
     END {
       cmean = cn ? cs / cn : 0
       sd = sn ? s1 - s0 : 0
-      noisy = (cn && cmean > cmax) || (sn && sd > smax)
+      noisy = (cn && cmean > cmax) || (sn && sd > smax) || gap > 0
       printf "%s,%s,%s,%s,%s\n", ln ? sprintf("%.2f", lmax) : "", cn ? sprintf("%.1f", cmean) : "", cn ? sprintf("%.1f", ctop) : "", sn ? sd : "", noisy ? "noisy" : "ok"
     }' "$host_file")"
   [ -s "$host_runs" ] || echo "ts,tag,load1_max,other_cpu_mean_pct,other_cpu_max_pct,swapouts_delta,verdict" >"$host_runs"

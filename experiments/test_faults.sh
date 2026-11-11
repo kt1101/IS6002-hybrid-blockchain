@@ -929,9 +929,11 @@ printf '#!/bin/sh\necho "{ 1.00 1.00 1.00 }"\n' >"$SB/bin/sysctl"
 chmod +x "$SB/bin/sysctl"
 # The host guard reads ps and vm_stat: STUB_PS_CPU is the %CPU of the one
 # process outside the Docker VM; vm_stat's Swapouts grows by STUB_SWAP_STEP
-# pages per call (state in $STUB_STATE).
+# pages per call (state in $STUB_STATE); STUB_PS_SLEEP (s) delays every ps
+# call, which spaces the host samples out (a host that slept or stalled).
 cat >"$SB/bin/ps" <<'EOF'
 #!/bin/sh
+[ -z "${STUB_PS_SLEEP:-}" ] || sleep "$STUB_PS_SLEEP"
 echo "650.0 /System/Library/Frameworks/Virtualization.framework/XPCServices/com.apple.Virtualization.VirtualMachine"
 echo "  4.0 /Applications/Docker.app/Contents/MacOS/com.docker.backend"
 echo "${STUB_PS_CPU:-50.0} /Applications/Some App.app/Contents/MacOS/Some App"
@@ -1291,6 +1293,17 @@ itest hostswap EXP=it_hostswap DURATION=2s STUB_BENCH_SECS=1 STUB_SWAP_STEP=5000
 eq "itest host guard swapping rc" "$it_rc" 3
 eq "itest host guard swapping verdict" "$(tail -n 1 "$SB_RAW/it_hostswap/host-runs.csv" 2>/dev/null | cut -d, -f7)" "noisy"
 eq "itest host guard swapping no row" "$(cat "$SB_RAW/it_hostswap.csv" 2>/dev/null | wc -l | tr -d ' ')" 0
+# A host that slept: run-phase samples further apart than HOST_GAP_MAX_SECS.
+itest hostgap EXP=it_hostgap DURATION=4s STUB_BENCH_SECS=4 STUB_PS_SLEEP=1.5 HOST_SAMPLE_SECS=0 HOST_GAP_MAX_SECS=1
+eq "itest host guard gap rc" "$it_rc" 3
+contains "itest host guard gap message" "$it_err" "(> HOST_GAP_MAX_SECS=1): the host slept or stalled"
+eq "itest host guard gap verdict" "$(tail -n 1 "$SB_RAW/it_hostgap/host-runs.csv" 2>/dev/null | cut -d, -f7)" "noisy"
+eq "itest host guard gap no row" "$(cat "$SB_RAW/it_hostgap.csv" 2>/dev/null | wc -l | tr -d ' ')" 0
+# The same spacing under a larger HOST_GAP_MAX_SECS passes.
+itest hostgapok EXP=it_hostgapok DURATION=4s STUB_BENCH_SECS=4 STUB_PS_SLEEP=1.5 HOST_SAMPLE_SECS=0 HOST_GAP_MAX_SECS=5
+eq "itest host guard gap within limit rc" "$it_rc" 0
+eq "itest host guard gap within limit verdict" "$(tail -n 1 "$SB_RAW/it_hostgapok/host-runs.csv" 2>/dev/null | cut -d, -f7)" "ok"
+eq "itest host guard gap within limit samples" "$([ "$(wc -l <"$(it_tag it_hostgapok .host)")" -ge 4 ] && echo yes)" "yes"
 # HOST_GUARD=0: none of it.
 itest hostoff EXP=it_hostoff DURATION=2s STUB_BENCH_SECS=1 STUB_PS_CPU=350.0 HOST_GUARD=0
 eq "itest host guard off rc" "$it_rc" 0
