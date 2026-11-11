@@ -17,7 +17,17 @@ experiments/exp/e9_attest.sh). For every CSV row, from its run sidecars
 * wrong_gets: the CSV column (reads the client accepted with a corrupt value).
 * rejected_gets: proof_errors + cert_errors + dataloss_errors of <tag>.ops.csv
   (reads the client refused, or a diverged node refused).
-* tps (CSV) and write_p99_ms (the ops write line).
+* tps (CSV); write_p50_ms, write_mean_ms, write_p99_ms (the ops write line);
+  read_p50_ms, read_p99_ms (the ops read line). p99 over 3 reps is noisy:
+  the summary reports p50 and mean as the main latency figures, the p99 mean
+  with its min and max over the reps.
+* injection_race: 1 for an F5 run (f+1 faulty nodes) with a .diverged line.
+  With quorum 2f+1 a height is certified only if at most f nodes were faulty
+  when it was attested, so a detection means the injections took effect at
+  different heights (e.g. node3 corrupt before height h, node4 after: nodes
+  1, 2, 4 certify h and node3 diverges). Such runs keep their
+  detect_protocol_s but are left out of detected_runs and of the summary's
+  detect_protocol_s (race_runs counts them; a note names each).
 
 Writes <out>/rq5_runs.csv (one line per run) and <out>/rq5_summary.csv
 (means per backend, attest_every, read_mode and fault kind), prints both
@@ -38,9 +48,12 @@ DOCKER_TS = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z")
 DIVERGED = "core: diverged at height"
 
 RUN_COLUMNS = ["exp", "backend", "attest_every", "read_mode", "fault", "rep", "fault_kind",
-               "detect_protocol_s", "detect_auditor_s", "wrong_gets", "rejected_gets", "tps", "write_p99_ms"]
+               "detect_protocol_s", "detect_auditor_s", "wrong_gets", "rejected_gets", "tps", "write_p99_ms",
+               "write_p50_ms", "write_mean_ms", "read_p50_ms", "read_p99_ms", "injection_race"]
 SUMMARY_COLUMNS = ["backend", "attest_every", "read_mode", "fault_kind", "runs", "detected_runs",
-                   "detect_protocol_s", "detect_auditor_s", "wrong_gets", "rejected_gets", "tps", "write_p99_ms"]
+                   "detect_protocol_s", "detect_auditor_s", "wrong_gets", "rejected_gets", "tps", "write_p99_ms",
+                   "write_p50_ms", "write_mean_ms", "write_p99_min_ms", "write_p99_max_ms", "read_p50_ms",
+                   "read_p99_ms", "race_runs"]
 
 
 class Result:
@@ -112,7 +125,11 @@ def analyse(csv_paths, raw_dir):
                "read_mode": m.group("read"), "fault": fault, "rep": row["rep"], "fault_kind": kind,
                "detect_protocol_s": "", "detect_auditor_s": "", "wrong_gets": int(row["wrong_gets"]),
                "rejected_gets": rejected, "tps": float(row["tps"]),
-               "write_p99_ms": wr.get("lat_p99_ms", float("nan"))}
+               "write_p99_ms": wr.get("lat_p99_ms", float("nan")),
+               "write_p50_ms": wr.get("lat_p50_ms", float("nan")),
+               "write_mean_ms": wr.get("lat_mean_ms", float("nan")),
+               "read_p50_ms": rd.get("lat_p50_ms", float("nan")),
+               "read_p99_ms": rd.get("lat_p99_ms", float("nan")), "injection_race": 0}
         if kind != "none":
             label = "%s %s rep %s" % (row["exp"], fault, row["rep"])
             inj = injection_epoch(plot.run_sidecar(raw_dir, row, ".faults"), fault)
@@ -125,6 +142,11 @@ def analyse(csv_paths, raw_dir):
                         res.notes.append("%s: no .diverged line (no in-protocol detection)" % label)
                 else:
                     out["detect_protocol_s"] = _round(div - inj)
+                    if kind.startswith("F5"):
+                        out["injection_race"] = 1
+                        res.notes.append("%s: in-protocol detection under f+1 faulty nodes: the injections "
+                                         "took effect at different heights (injection race); left out of "
+                                         "detected_runs" % label)
                 audit = plot.run_sidecar(raw_dir, row, ".audit")
                 if audit is not None:
                     try:
@@ -141,13 +163,23 @@ def analyse(csv_paths, raw_dir):
         vals = [float(r[col]) for r in rs if r[col] != "" and not math.isnan(float(r[col]))]
         return round(sum(vals) / len(vals), 3) if vals else ""
 
+    def extreme(rs, col, f):
+        vals = [float(r[col]) for r in rs if r[col] != "" and not math.isnan(float(r[col]))]
+        return round(f(vals), 3) if vals else ""
+
     for (b, k, rdm, kind), rs in sorted(groups.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
+        clean = [r for r in rs if not r["injection_race"]]
         res.summary.append({"backend": b, "attest_every": k, "read_mode": rdm, "fault_kind": kind,
-                            "runs": len(rs), "detected_runs": sum(r["detect_protocol_s"] != "" for r in rs),
-                            "detect_protocol_s": mean(rs, "detect_protocol_s"),
+                            "runs": len(rs), "detected_runs": sum(r["detect_protocol_s"] != "" for r in clean),
+                            "detect_protocol_s": mean(clean, "detect_protocol_s"),
                             "detect_auditor_s": mean(rs, "detect_auditor_s"),
                             "wrong_gets": mean(rs, "wrong_gets"), "rejected_gets": mean(rs, "rejected_gets"),
-                            "tps": mean(rs, "tps"), "write_p99_ms": mean(rs, "write_p99_ms")})
+                            "tps": mean(rs, "tps"), "write_p99_ms": mean(rs, "write_p99_ms"),
+                            "write_p50_ms": mean(rs, "write_p50_ms"), "write_mean_ms": mean(rs, "write_mean_ms"),
+                            "write_p99_min_ms": extreme(rs, "write_p99_ms", min),
+                            "write_p99_max_ms": extreme(rs, "write_p99_ms", max),
+                            "read_p50_ms": mean(rs, "read_p50_ms"), "read_p99_ms": mean(rs, "read_p99_ms"),
+                            "race_runs": len(rs) - len(clean)})
     return res
 
 

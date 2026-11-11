@@ -78,3 +78,28 @@ def test_fault_none(tmp_path):
     p, raw = _run(tmp_path, exp="e9-a0-plain", fault="none", diverged_ms=None)
     r = rq5.analyse([p], raw).runs[0]
     assert r["fault_kind"] == "none" and r["detect_protocol_s"] == "" and r["attest_every"] == 0
+
+
+def test_latency_columns(tmp_path):
+    p, raw = _run(tmp_path)
+    r = rq5.analyse([p], raw).runs[0]
+    assert (r["write_p50_ms"], r["write_mean_ms"], r["write_p99_ms"]) == (1.0, 1.0, 123.0)
+    assert (r["read_p50_ms"], r["read_p99_ms"]) == (1.0, 2.0)
+    assert r["injection_race"] == 0
+
+
+def test_summary_p99_range(tmp_path):
+    p, raw = _run(tmp_path)
+    res = rq5.analyse([p], raw)
+    s = res.summary[0]
+    assert s["write_p99_min_ms"] == s["write_p99_max_ms"] == 123.0
+    assert s["write_p50_ms"] == 1.0 and s["read_p99_ms"] == 2.0 and s["race_runs"] == 0
+
+
+def test_f5_detection_is_an_injection_race(tmp_path):
+    p, raw = _run(tmp_path, fault="F5-F4:node4+node3@60")
+    res = rq5.analyse([p], raw)
+    r, s = res.runs[0], res.summary[0]
+    assert r["injection_race"] == 1 and r["detect_protocol_s"] == 0.45
+    assert s["detected_runs"] == 0 and s["detect_protocol_s"] == "" and s["race_runs"] == 1
+    assert any("injection race" in n for n in res.notes)
