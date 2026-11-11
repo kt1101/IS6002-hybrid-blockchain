@@ -431,9 +431,31 @@ Lệnh: `E9_RATE_RAFT=480 E9_RATE_BFT2=480 experiments/exp/e9_attest.sh` (N=4, 2
 | bft2 | 1 | plain / certified | F4 | 3/3, 3/3 | 0,32 / 0,31 | 1,15 / 0,81 | 0 / 0 | 441 / 440 |
 | bft2 | 10 | plain / certified | F4 | 3/3, 3/3 | 0,40 / 0,45 | 0,89 / 0,55 | 0 / 0 | 441 / 441 |
 | bft2 | 0 | plain | F5-F4 | 0/3 | – | 0,88 | 9522 | 480 |
-| bft2 | 1 | plain / certified | F5-F4 | 0/3, 1/3 | – / 0,38 | 0,84 / 0,83 | 9544 / 0 | 480 / 320 |
+| bft2 | 1 | plain / certified | F5-F4 | 0/3, 0/3 (+1 race) | – / (0,38) | 0,84 / 0,83 | 9544 / 0 | 480 / 320 |
 | bft2 | 10 | plain / certified | F5-F4 | 0/3, 0/3 | – | 0,47 / 0,57 | 9530 / 0 | 480 / 320 |
 
 - F4 (1 node sai, quorum 2f+1 = 3): attestation phát hiện ở mọi lượt trong 0,3–0,47 s (attest 10 chậm hơn attest 1 ~0,1 s); node lệch tự từ chối đọc (`DataLoss`), nên `wrong_gets` = 0 kể cả đọc thường; mất ~40 tps = 1/4 số đọc (gửi tới node4) trong 120 s sau lỗi, vd. raft a1 plain rep 1: 7095 đọc lỗi (không bật failover ở E9). Không attestation: client nhận ~4,7k giá trị sai mỗi lượt, auditor thấy trong 0,17–0,88 s.
-- F5-F4 (2 node sai thông đồng, bft2): không phía nào đủ 3 chữ ký, không height nào được xác nhận → không phát hiện trong giao thức; đọc thường vẫn nhận ~9,5k giá trị sai; đọc certified không nhận giá trị sai nhưng mọi đọc sau lỗi đều hết hạn chờ chứng chỉ (vd. a1 rep 2: 14441 đọc thành công = phần trước lỗi, 27535 lỗi) → tps 320 (mất sẵn sàng đọc, đúng như spec 11). Một ngoại lệ chưa giải thích: bft2 a1 certified rep 1 có dòng `diverged` sau 0,38 s (cần xem log trước khi dùng con số này).
-- **Độ trễ ghi không so được giữa các mức attestation.** Write p99 của lượt không lỗi ở 480 req/s là 0,86–2,66 s (E7 60 s ở 500: raft 0,26–0,63 s, bft2 0,45–0,96 s) và tăng dần theo thời gian chạy (raft: 0,86–1,51 s lúc 19:25–20:00, 1,56–2,66 s lúc 22:50–23:30) trong khi host sạch (CPU ngoài Docker 11–32%, swap 0). Driver chạy các cặp theo thứ tự a0 → a1 → a10, nên chi phí độ trễ của attestation lẫn với xu hướng này. Cần: chạy lại một nhóm đối chứng a0 xen kẽ (hoặc driver xáo thứ tự cặp) trước khi kết luận RQ5 về độ trễ. Lượt 180 s cũng có p99 cao hơn lượt 60 s ở cùng tải: có thể do các đợt dừng hiếm (snapshot raft, GC) chiếm top 1%; chưa kiểm.
+- F5-F4 (2 node sai thông đồng, bft2): không phía nào đủ 3 chữ ký, không height nào được xác nhận → không phát hiện trong giao thức; đọc thường vẫn nhận ~9,5k giá trị sai; đọc certified không nhận giá trị sai nhưng mọi đọc sau lỗi đều hết hạn chờ chứng chỉ (vd. a1 rep 2: 14441 đọc thành công = phần trước lỗi, 27535 lỗi) → tps 320 (mất sẵn sàng đọc, đúng như spec 11). bft2 a1 certified rep 1 là **race của việc tiêm lỗi**, không phải lỗi Certifier: hai SIGUSR1 gửi cùng lúc (21:19:38.844) nhưng node3 áp lỗi trước height 3013, node4 sau; ở height 3013 chỉ một node sai nên node 1, 2, 4 xác nhận root đúng `ca48b58e` (quorum 3 hợp lệ), node3 lệch và bị cả 4 node loại ở height 3020 (`divergent_root`). `rq5.py` đánh dấu `injection_race` và không tính vào `detected_runs`.
+**Độ trễ (phân tích lại, vòng review 2; `rq5.py` `333fc26`, không đo thêm).** Lượt không lỗi, trung bình 3 rep:
+
+| backend | attest | đọc | write p50 | write mean | write p99 (min–max) | read p50 | read p99 | queue/block (node) |
+|---|---|---|---|---|---|---|---|---|
+| raft | 0 | plain | 71 | 102 | 1179 (859–1514) | 1,1 | 63 | 6,6 |
+| raft | 1 | plain | 81 | 115 | 1326 (1155–1478) | 1,1 | 62 | 11,0 |
+| raft | 1 | certified | 78 | 116 | 1380 (1305–1466) | 92 | 1498 | 14,6 |
+| raft | 10 | plain | 77 | 115 | 1461 (1036–1757) | 1,1 | 63 | 11,6 |
+| raft | 10 | certified | 82 | 137 | 2144 (1560–2662) | 223 | 2257 | 23,6 |
+| bft2 | 0 | plain | 100 | 144 | 1798 (1537–2041) | 1,3 | 63 | 3,3 |
+| bft2 | 1 | plain | 99 | 147 | 1679 (1430–1872) | 1,2 | 67 | 4,6 |
+| bft2 | 1 | certified | 98 | 152 | 1887 (1727–2051) | 102 | 1970 | 3,2 |
+| bft2 | 10 | plain | 102 | 163 | 2167 (1935–2438) | 1,2 | 74 | 2,9 |
+| bft2 | 10 | certified | 96 | 160 | 2266 (1889–2558) | 225 | 2583 | 7,7 |
+
+(ms; queue/block = thời gian một block chờ apply loop, trung bình 4 node, từ breakdown snapshot đầu/cuối cửa sổ.)
+
+- **Chắc:** đọc certified đắt: read p50 ~92–102 ms ở attest 1 và ~223–225 ms ở attest 10 (chờ height được attest kế tiếp), so với 1,1 ms đọc thường; read p99 1,5–2,6 s. Không phụ thuộc thứ tự chạy (a10-plain chạy sau a1-certified vẫn 1,1 ms).
+- **Chắc:** write p50 không đổi theo attestation (raft 71–82, bft2 96–102 ms).
+- **Chưa chắc:** ảnh hưởng của attestation lên đuôi độ trễ ghi. Write p99 lệch 300–1100 ms giữa các rep; chỉ raft a10-certified nổi lên (mean 137 so với 115 ms, p99 2,1 so với 1,5 s). Các cặp chạy theo thứ tự a0 → a1 → a10 nên mean/p99 còn lẫn với thứ tự.
+- **Giải thích cần nêu (không sửa mã):** đọc certified chờ height kế tiếp được chứng minh ngay trong apply loop (`attestor.afterApply` gọi `prove` cho mọi reader đang chờ, `ProveValue` giữ khóa độc quyền của executor), nên block kế tiếp xếp hàng sau các proof. Breakdown ủng hộ: queue/block certified > plain cùng attest_every (raft a1 14,6 so với 11,0 ms, a10 23,6 so với 11,6; bft2 a10 7,7 so với 2,9), execute/block không đổi (1,2–1,9 ms); ở a10 reader dồn qua 10 block rồi được chứng minh một lượt. Mỗi cặp plain/certified cùng mức chạy liền nhau nên so sánh này ít bị thứ tự chi phối.
+- **Lượt 180 s so với 60 s:** độ trễ xấu dần trong lượt, không phải vài đợt dừng hiếm. `.wtimeline` (Set thành công/giây, nạp 240/s) có độ lệch chuẩn 12–27/s ở 1/3 đầu (như E7 60 s: 16), 20–58 ở 1/3 giữa và 54–108 ở 1/3 cuối; các giây < 120 Set chỉ xuất hiện ở 2/3 sau (0 / 0–2 / 1–4). Nguyên nhân (trạng thái lớn dần: SMT, ledger, store; GC) chưa xác định; CPU/bộ nhớ node trong `docker stats` không cho thấy xu hướng rõ. Hệ quả: `slo_rps` của E7 (lượt 60 s) chỉ đúng cho lượt 60 s; giữ 480 req/s cho E9–E12 nhưng nêu rằng ở lượt 180 s write p99 đã 1–2,7 s.
+- Thứ tự chạy của driver E10–E12 đã đổi sang xen kẽ (vòng ngoài là rep, cấu hình xoay vòng); nếu sau E10–E12 vẫn chưa tách được ảnh hưởng của attestation lên ghi thì đề xuất E9b (chỉ lượt không lỗi, xen kẽ, 5 rep, ~50 lượt).
