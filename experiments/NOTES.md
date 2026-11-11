@@ -462,4 +462,67 @@ Lệnh: `E9_RATE_RAFT=480 E9_RATE_BFT2=480 experiments/exp/e9_attest.sh` (N=4, 2
 
 ## Sự cố: E10 chạy vòng kín (2026-11-11 00:41 UTC)
 
-Lần khởi chạy đầu E10–E12 mất biến `E9_RATE_*` (lời nhắc cập nhật oh-my-zsh của tab Terminal mới nuốt ký tự đầu, `export` thành `xport`), nên `e10-plain` chạy vòng kín (2077 tps) trước khi bị dừng; vòng lặp kịp dựng cụm cho `e11-F4-plain`. Dữ liệu (1 lượt E10, params của e11-F4-plain) đã xóa, không dùng; chạy lại từ 00:44 UTC ở 480 req/s. Từ nay E10–E12 từ chối chạy khi không có tốc độ (trừ `E1x_CLOSED_LOOP=1`).
+Lần khởi chạy đầu E10–E12 mất biến `E9_RATE_*` (lời nhắc cập nhật oh-my-zsh của tab Terminal mới nuốt ký tự đầu, `export` thành `xport`), nên `e10-plain` chạy vòng kín (2077 tps) trước khi bị dừng; vòng lặp kịp dựng cụm cho `e11-F4-plain`. Dữ liệu (1 lượt E10, params của e11-F4-plain) đã tách ra `results/raw/mistake-closedloop-*`, không dùng; chạy lại từ 00:44 UTC ở 480 req/s. Từ nay E10–E12 từ chối chạy khi không có tốc độ (trừ `E1x_CLOSED_LOOP=1`).
+
+## Giai đoạn 3: E10–E12 trên M3 (Task 8–9, 2026-11-11)
+
+Lệnh: `E9_RATE_RAFT=480 E9_RATE_BFT2=480 experiments/exp/e1{0,1,2}_*.sh` (N=4, 256 client, MEM=1g, flush 100 ms, 180 s + 10 s warmup, lỗi ở giây 60, 3 rep, thứ tự xen kẽ theo rep). Commit đo `0f85077` (113 hàng) và `855ee23` (1 hàng chạy lại, `EXP_ALLOW_COMMIT_CHANGE=1`; giữa hai commit chỉ đổi driver, plot, NOTES, không đổi `veritas/`, cluster hay `run_one.sh`). E10 00:44–02:08 UTC, E11 02:06–13:43 (dừng 02:54–11:38), E12 13:42–15:48. 48 + 42 + 24 hàng, `failures in this run: none` ở lần chạy cuối. Phân tích: `experiments/plot/rq6.py results/raw/e1[012]-*.csv --raw-dir results/raw --out results/e1x` → `results/e1x/rq6_runs.csv`, `rq6_summary.csv`; độ trễ E10 đọc từ `.bench.log`.
+
+**Host guard:** 5 lượt bị loại (không ghi hàng, đã chạy lại): 02:17 raft F4 cert-fo r1 (swap 68k trang), 02:38 và 02:50 bft2 F6 plain r1 (swap 4,6k và 79k), 02:54 raft F6 cert-fo r1 (CPU ngoài Docker trung bình 299%, swap 1,45M) — ba lượt liên tiếp nên dừng tay sweep tới khi Mac rảnh (compressor ~8 GB → ~2,9 GB); 14:54 raft e12-q2f1-quorum r2 (swap 28k; lần thử 2 qua). `results/raw/e11-F6-plain.failures` còn dòng 02:50 của lần chạy bị dừng; hàng đó đã có sau khi chạy tiếp.
+
+**Sự cố: Mac ngủ giữa lượt (2026-11-11 13:43–14:09 UTC).** Gập nắp khi chạy pin (`pmset -g log`: `Clamshell Sleep` 20:43 +0700, chỉ DarkWake ngắn tới 21:09) nên `caffeinate` không giữ được. Lượt raft e12-qf1-certified r1 kéo dài 13:42–14:12: lỗi tiêm ở t = 940 s thay vì 60 s, đồng hồ Docker VM chậm ~940 s so với host, `rq6.py` ra thời gian phát hiện −940 s. Host guard vẫn báo `ok` (CPU và swap bình thường; guard không xét khoảng trống giữa các mẫu: `.host` trống 947 s và 531 s). Quét `.host` của 189 lượt E9–E12: chỉ lượt này có khoảng trống > 30 s. Dữ liệu tách ra `results/raw/mistake-sleep-e12-qf1-certified/` (kèm hàng CSV gốc), chạy lại 15:45 ở `855ee23`.
+
+### E10: chi phí không lỗi (6 lượt mỗi ô = workload a và c × 3 rep; mọi lượt tps 480, `rejected_reads` = 0, không eviction)
+
+| backend | đọc | read p50 a | read p99 a | write p50 a | write p99 a | read p50 c | read p99 c |
+|---|---|---|---|---|---|---|---|
+| raft | plain | 1,5 | 41 | 91 | 377 | 1,4 | 7,8 |
+| raft | quorum | 1,8 | 62 | 80 | 503 | 1,5 | 9,9 |
+| raft | certified | 93 | 425 | 86 | 376 | 1,6 | 7,6 |
+| raft | certified + sign-always | 101 | 450 | 91 | 406 | 1,6 | 7,9 |
+| bft2 | plain | 1,5 | 49 | 108 | 501 | 1,3 | 7,2 |
+| bft2 | quorum | 1,9 | 61 | 112 | 485 | 1,5 | 8,4 |
+| bft2 | certified | 112 | 519 | 110 | 491 | 1,6 | 7,9 |
+| bft2 | certified + sign-always | 109 | 558 | 106 | 424 | 1,7 | 9,2 |
+
+(ms, trung vị 3 rep; khoảng theo rep trong bảng tính tay, vd. raft certified read p50 87–108, bft2 certified write p99 371–872.)
+
+- Đọc certified chỉ đắt khi có ghi: ở workload a chờ height kế tiếp được attest (p50 93–112 ms, như E9 a1), ở workload c (chỉ đọc, không có block mới) 1,6 ms so với 1,3–1,4 ms đọc thường.
+- Ký mọi phản hồi (`sign-always`) không thêm chi phí tách được khỏi certified (chênh p50 −4…+8 ms, trong khoảng theo rep).
+- Đọc quorum (2 `Get` song song) thêm ~0,3–0,4 ms p50 và ~12–21 ms p99 so với đọc thường.
+- Write p50/p99 không tách được giữa các chế độ đọc (khoảng theo rep chồng nhau); bft2 certified-signall có 3 `cert_timeouts` ở 1 lượt.
+
+### E11: truy vết 1 node lỗi (f = 1, node4; 3 lượt mỗi ô; không lượt race)
+
+| lỗi | client | backend | phát hiện | detect_evidence_s | failover_s | wrong_gets | rejected_reads | evidence_sent | cert_timeouts | tps |
+|---|---|---|---|---|---|---|---|---|---|---|
+| F4 | plain | raft / bft2 | 3/3, 3/3 | 0,36 / 0,34 | – | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 440 / 441 |
+| F4 | cert-fo | raft / bft2 | 3/3, 3/3 | 0,39 / 0,36 | 0,41 / 0,36 | 0 / 0 | 0 / 0 | 0 / 0 | 351 / 353 | 478 / 478 |
+| F4 | cert-fo-sign | raft / bft2 | 3/3, 3/3 | 0,35 / 0,38 | 0,35 / 0,38 | 0 / 0 | 0 / 0 | 0 / 0 | 386 / 464 | 478 / 477 |
+| F6 | plain | raft / bft2 | 0/3, 0/3 | – | – | 7115 / 7097 | 0 / 0 | 0 / 0 | 0 / 0 | 480 / 480 |
+| F6 | cert-fo | raft / bft2 | 0/3, 0/3 | – | 0,23 / 0,19 | 0 / 0 | 64 / 64 | 0 / 0 | 0 / 5 | 480 / 480 |
+| F6 | cert-fo-sign | raft / bft2 | 3/3, 3/3 | 0,37 / 0,37 | 0,30 / 0,30 | 0 / 0 | 17 / 16 | 13 / 10 | 0 / 0 | 480 / 480 |
+| F6E | cert-fo-sign | raft / bft2 | 0/3, 0/3 | – | 0,28 / 0,31 | 0 / 0 | 64 / 64 | 0 / 0 | 3 / 0 | 480 / 480 |
+
+(trung bình 3 lượt; `evict_all_s` ≈ `detect_evidence_s` + 0–0,07 s; `evidence_failed` = 0, `honest_evicted` = 0 ở mọi lượt.)
+
+- F4: attestation loại node4 trong 0,34–0,39 s ở mọi lượt, như E9. Không failover thì 1/4 số đọc sau lỗi hỏng (tps 440); có failover thì tps 478, mọi worker chuyển trong ~0,4 s. Cái giá: sau khi loại node4 quorum vẫn 3 (spec 3.3), nên node 1–3 phải ký mọi height và mỗi lượt có 350–465 đọc certified hết giờ chờ chứng chỉ.
+- F6 (nói dối khi đọc, trạng thái đúng): đọc thường nhận ~7,1k giá trị sai mỗi lượt, attestation không thấy gì (root đúng). Đọc certified bắt được mọi phản hồi sai (64 = số worker có node chính là node4, mỗi worker bị từ chối một lần rồi chuyển); không ký thì không có bằng chứng, node4 không bị loại. Ký khi nghi ngờ (`on-failure`): 9–17 bằng chứng mỗi lượt, node4 bị cả 4 node loại (`bad_read`) trong 0,29–0,46 s, và `rejected_reads` giảm còn 14–22 vì node bị loại sớm.
+- F6E (né ký): như F6 cert-fo — client tự tránh node4 (0 giá trị sai) nhưng không có bằng chứng, node4 không bị loại. Đúng giới hạn nêu ở spec 3.2.
+
+### E12: ngưỡng quorum với f+1 = 2 node lỗi thông đồng (F5-F4, node3 + node4; 3 lượt mỗi ô)
+
+| quorum | đọc | backend | root đúng trước | root sai trước | wrong_gets | honest_evicted | cert_timeouts | tps |
+|---|---|---|---|---|---|---|---|---|
+| f+1 = 2 | certified | raft | 2 (r1, r3) | 1 (r2) | 0 / 19261 | 0 / 2 | 0–11 | 480 |
+| f+1 = 2 | certified | bft2 | 2 (r1, r3) | 1 (r2) | 0 / 19257 | 0 / 2 | 0–8 | 480 |
+| f+1 = 2 | quorum | raft | 3 | 0 | 0 | 0 | 0 | 479 |
+| f+1 = 2 | quorum | bft2 | 1 (r3) | 2 (r1, r2) | 0 / 19261–19276 | 0 / 2 | 0 | 480 |
+| 2f+1 = 3 | certified | raft / bft2 | không root nào được xác nhận | | 0 | 0 | 27,5k / 27,8k | 320 |
+| 2f+1 = 3 | quorum | raft / bft2 | không root nào được xác nhận (+1 race raft r1) | | 9658 / 9653 | 0 | 0 | 480 |
+
+(wrong_gets / honest_evicted ghi "lượt root đúng / lượt root sai"; bằng chứng đầu tiên sau 0,21–0,33 s ở mọi lượt f+1.)
+
+- Quorum f+1: kết quả do thứ tự block quyết định, đúng spec 3.1. 4/12 lượt root sai được xác nhận trước (raft 1/6, bft2 3/6): node 1 và 2 bị loại oan (`divergent_root`) sau 0,21–0,33 s, sau đó mọi đọc certified hoặc quorum đều nhận giá trị sai có chứng chỉ hợp lệ (~19,3k mỗi lượt). Các lượt còn lại loại đúng node3 + node4, 0 giá trị sai. Số lượt quá ít để so raft với bft2.
+- Quorum 2f+1: không phía nào đủ 3 chữ ký → không xác nhận, không loại ai. Đọc certified an toàn nhưng mất sẵn sàng sau lỗi (~27,5k đọc hết giờ, tps 320, như E9 F5-F4); đọc quorum (f+1 = 2 node) nhận ~9,7k giá trị sai (khi cả hai node được hỏi đều lỗi).
+- raft e12-q2f1-quorum r1 là race của việc tiêm lỗi (như E9 bft2 a1 certified r1): ở height 2992 chỉ node4 đã áp lỗi, node 1–3 xác nhận root đúng `8298a09c` (quorum 3) và node4 bị loại ở height 2996; `rq6.py` đánh dấu `injection_race` và bỏ khỏi tóm tắt.

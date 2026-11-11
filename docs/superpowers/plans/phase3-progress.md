@@ -2,7 +2,7 @@
 
 Đọc cùng: plan `docs/superpowers/plans/2026-11-09-phase3-accountability.md`, spec `docs/superpowers/specs/2026-11-09-phase3-accountability-design.md`.
 Nhánh `claude/wizardly-robinson-fdaa8d` (worktree `.claude/worktrees/wizardly-robinson-fdaa8d`), dựa trên phase 2 `claude/charming-hopper-hy6x4e`. **Chưa push.**
-Cập nhật: 2026-11-10 (Task 7 xong, smoke Task 8 đạt, E7 dừng do máy quá tải).
+Cập nhật: 2026-11-11 (E7, E9, E10, E11, E12 xong; chờ review E10–E12 và quyết định E9b).
 
 ## Task đã xong
 
@@ -35,7 +35,7 @@ Trang Notion tiến độ (memory `notion-progress-page`): id `413fc8af-e746-811
   - Làm tiếp: người dùng khởi động lại Docker Desktop, máy nguội (kiểm `uptime` load < ~4, VM Docker gần 0% khi không có cụm); chuyển `results/raw/e7.csv`, `e7.params`, `e7/` sang `e7-noisy*`; chạy lại `EXP=e7 BACKENDS="raft bft2" RATES="250 500 600 700 800 900 1000 1500 2000" caffeinate -i experiments/exp/e7_rate.sh` (54 lượt, ~1,7 giờ) trong Terminal panel; phân tích bằng `MPLCONFIGDIR=$TMPDIR/mpl ~/anaconda3/bin/python3 experiments/plot/saturation.py results/raw/e7.csv --ops-dir results/raw --out results/e7` (python hệ thống không có pandas).
   - Rồi `E9_RATE_RAFT`/`E9_RATE_BFT2` = 80% bão hòa → E9 (75 lượt, ~6 giờ); ghi NOTES; tag `p7-openloop`, `p10-attest`.
   - bft2 thỉnh thoảng lỗi khởi động (replica nối nhau trước khi peer lắng nghe; health fail, driver tự chạy lại).
-- Task 10: chạy E10, E11, E12 (`E1x_RATE_*` hoặc E9's qua `exp_rate_for`), `rq6.py`, NOTES, tag `p11-accountability`.
+- Task 10, E10–E12 xong (2026-11-11 00:44–15:48 UTC, đo ở `0f85077`, 1 lượt chạy lại ở `855ee23`): 48 + 42 + 24 hàng, `results/e1x/rq6_{runs,summary}.csv`, NOTES "E10–E12 trên M3". E11 dừng tay 02:54–11:38 sau 3 lượt liên tiếp bị host guard loại (Mac thiếu bộ nhớ); tổng 5 lượt bị loại và đã chạy lại. 1 lượt E12 (raft qf1-certified r1) hỏng vì Mac ngủ khi gập nắp và chạy pin; host guard không bắt được (không xét khoảng trống giữa các mẫu), dữ liệu tách sang `results/raw/mistake-sleep-e12-qf1-certified/`, đã chạy lại. **Chưa gắn tag** `p11-accountability` (cùng các tag giai đoạn 2, chờ quyết định E9b).
 - Task 11 (tùy chọn): Kafka approve theo quorum.
 
 ## Rà soát 10 điểm (2026-11-10, từ phiên gốc)
@@ -55,6 +55,8 @@ Làm trên nhánh `claude/wizardly-robinson-fdaa8d-p3fix` (worktree phụ `/tmp/
 
 Vòng review 1 (2026-11-10): E7 chấp nhận. Sửa: tách lại commit (commit kết quả E7 từng chứa nhầm mã mục 5–8 do `git commit -a`): `c158f65` NOTES E7, `df4f8a0` mục 5–6, `6502df3` mục 7 (test riêng `quorum_limit_test.go`), `b094671` mục 8 + `evidence_failed` (cột cuối `.ops.csv`: báo cáo bằng chứng bị node từ chối khi lượt còn chạy, vd. `ResourceExhausted`; có trong `rq6.py`), `8a328ef` gofmt, `7ea5939` exit 4 của host guard nay được thử lại, ghi `.failures` và sweep chạy tiếp (trước: dừng batch). Test: `gotest-p3fix.log` (vet + race, 16 gói ok), `bft2test-p3fix.log` (4 gói ok), `pytest-p3fix.log` 163/0, `testfaults-p3fix.log` 464/0, `testexp-p3fix.log` 285/0 (log ở gốc worktree phụ). Chưa gộp, chưa thử host guard trên cụm: chờ review vì exit 4 là thay đổi logic.
 
+Vòng review 2 (2026-11-11, E9 và xen kẽ chấp nhận): sửa trên `-p3fix`, gộp vào nhánh chính sau khi E11–E12 chạy xong (để params guard không thấy commit đổi giữa sweep): `02109bb` E10–E12 từ chối chạy khi không có tốc độ vòng mở (trừ `E1x_CLOSED_LOOP=1`), sửa vòng lặp params của `test_exp.sh`; `0dec4af` quy tắc race: chỉ khi số node lỗi bị bắt (`.diverged` ở rq5, `.evict` ở rq6) ít hơn f+1, cột `injection_race`, `race_runs`; `855ee23` NOTES E9 (khoảng queue/block theo rep, cặp ngược, cận write p50). Test sau khi gộp: `testexp.log` 305/0, `pytest.log` 170/0 (log ở gốc worktree); `test_faults.sh` không chạy lại (không có file nào nó kiểm bị đổi).
+
 ## Môi trường và cách chạy lệnh
 
 - Sandbox Bash của session **chặn Docker** (`/Users/yuji/.docker/run/docker.sock`); máy không có Go. Người dùng **cho phép chạy lệnh Docker trong Terminal panel** (`mcp__terminal__run_in_terminal`) ở session này. Mẫu: `docker run --rm -v "$PWD":/src -w /src hbdb-build sh -c 'go vet <pkgs> && go test -race <pkgs>' > taskN.log 2>&1; echo "taskN done: $?"`, rồi đọc log (Monitor chờ dòng ok/FAIL).
@@ -72,6 +74,6 @@ Vòng review 1 (2026-11-10): E7 chấp nhận. Sửa: tách lại commit (commit
 - Proto của Task 5 và 6 sinh một lần; Task 5 và 6 commit chung.
 - Node bị loại trả `PermissionDenied` trước `DataLoss`; hai test giai đoạn 2 chấp nhận cả hai.
 - `run_one.sh` truyền `--attest-quorum=<q>` cho cả `ycsbbench` (client kiểm chứng chỉ cùng quorum với node).
-- `rq6.py` chỉ dùng thư viện chuẩn (chạy được trên host không pandas); `failover_s` luôn rỗng (ycsbbench không ghi thời điểm chuyển node).
+- `rq6.py` chỉ dùng thư viện chuẩn (chạy được trên host không pandas); `failover_s` lấy từ `first_failover_unix_ms` của `.ops.csv` (mục 8 rà soát).
 - Driver E10–E12: `ATTEST_EVERY=1` cho mọi chế độ của E10; E12 dùng `FAILOVER=1`; tốc độ lấy `exp_rate_for E1x <backend>` (rơi về `E9_RATE_*`).
 - F6E (`readlie-evasive`) là kind riêng trong `faults.sh` (`F6E:node4@60`).
