@@ -35,7 +35,8 @@ if [ -z "${E11_PAIR:-}" ]; then
     case "${p%%:*}" in F4 | F6 | F6E) ;; *) die "E11_PAIRS: fault must be F4, F6 or F6E, got '$p'" ;; esac
     case "${p#*:}" in plain | cert-fo | cert-fo-sign) ;; *) die "E11_PAIRS: mode must be plain, cert-fo or cert-fo-sign, got '$p'" ;; esac
   done
-  worst=0
+  . "$HERE/interleave.sh"
+  EXP_CHILDREN=""
   for p in $E11_PAIRS; do
     k="${p%%:*}" m="${p#*:}"
     case "$m" in
@@ -43,15 +44,12 @@ if [ -z "${E11_PAIR:-}" ]; then
       cert-fo) rd=certified fo=1 sr=off ;;
       cert-fo-sign) rd=certified fo=1 sr=on-failure ;;
     esac
-    rc=0
-    E11_PAIR="$p" E11_KIND="$k" EXP="$E11_PREFIX-$k-$m" ATTEST_EVERY=1 READ_MODE="$rd" FAILOVER="$fo" SIGN_READS="$sr" "$0" "$@" || rc=$?
-    case "$rc" in
-      0) ;;
-      4) [ "$worst" -ne 0 ] || worst=4 ;;
-      *) exit "$rc" ;;
-    esac
+    EXP_CHILDREN="$EXP_CHILDREN
+E11_PAIR=$p E11_KIND=$k EXP=$E11_PREFIX-$k-$m ATTEST_EVERY=1 READ_MODE=$rd FAILOVER=$fo SIGN_READS=$sr"
   done
-  exit "$worst"
+  rc=0
+  exp_interleave "$0" "$@" || rc=$?
+  exit "$rc"
 fi
 
 . "$HERE/exp_lib.sh"

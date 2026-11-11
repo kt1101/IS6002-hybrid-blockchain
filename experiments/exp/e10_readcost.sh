@@ -33,19 +33,17 @@ if [ -z "${E10_MODE:-}" ]; then
   for m in $E10_READS; do
     case "$m" in plain | certified | certified-signall | quorum) ;; *) die "E10_READS entries must be plain, certified, certified-signall or quorum, got '$m'" ;; esac
   done
-  worst=0
+  . "$HERE/interleave.sh"
+  EXP_CHILDREN=""
   for m in $E10_READS; do
     rd="$m" sr=off
     [ "$m" != certified-signall ] || { rd=certified; sr=always; }
-    rc=0
-    E10_MODE="$m" EXP="$E10_PREFIX-$m" ATTEST_EVERY=1 READ_MODE="$rd" SIGN_READS="$sr" "$0" "$@" || rc=$?
-    case "$rc" in
-      0) ;;
-      4) [ "$worst" -ne 0 ] || worst=4 ;;
-      *) exit "$rc" ;;
-    esac
+    EXP_CHILDREN="$EXP_CHILDREN
+E10_MODE=$m EXP=$E10_PREFIX-$m ATTEST_EVERY=1 READ_MODE=$rd SIGN_READS=$sr"
   done
-  exit "$worst"
+  rc=0
+  exp_interleave "$0" "$@" || rc=$?
+  exit "$rc"
 fi
 
 . "$HERE/exp_lib.sh"

@@ -20,6 +20,9 @@
 # OUTERMOST loop: every configuration gets rep 1 before any gets rep 2, and
 # host drift during a long batch is spread over all backends instead of
 # landing on the ones planned last (the resume key is unchanged).
+# EXP_ONLY_PASS=<r>|x<k> (set by exp_interleave, interleave.sh) runs that one
+# pass only, then exp_finish (exit 4 while other passes still miss rows), so a
+# driver split over several EXPs can interleave its EXPs pass by pass.
 #
 # exp_cfg runs one configuration (the rep of the current pass) through
 # experiments/run_one.sh with COMMIT_MODE=sync, appending to
@@ -653,6 +656,19 @@ exp_main() {
   EXP_PASS=validate
   exp_plan
   EXP_VALIDATE_ONLY=0
+  if [ -n "${EXP_ONLY_PASS:-}" ]; then
+    case "$EXP_ONLY_PASS" in
+      x*) hbdb_require_uint EXP_ONLY_PASS "${EXP_ONLY_PASS#x}"
+        [ "${EXP_ONLY_PASS#x}" -ge 1 ] && [ "${EXP_ONLY_PASS#x}" -le "$EXTRA_REPS" ] ||
+          die "EXP_ONLY_PASS=$EXP_ONLY_PASS: extra passes are x1..x$EXTRA_REPS" ;;
+      *) hbdb_require_uint EXP_ONLY_PASS "$EXP_ONLY_PASS"
+        [ "$EXP_ONLY_PASS" -ge 1 ] && [ "$EXP_ONLY_PASS" -le "$REPS" ] ||
+          die "EXP_ONLY_PASS=$EXP_ONLY_PASS: passes are 1..$REPS" ;;
+    esac
+    EXP_PASS="$EXP_ONLY_PASS"
+    exp_plan
+    exp_finish
+  fi
   while [ "$r" -le "$REPS" ]; do
     EXP_PASS="$r"
     exp_plan

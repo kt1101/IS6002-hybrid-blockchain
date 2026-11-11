@@ -37,21 +37,19 @@ if [ -z "${E9_PAIR:-}" ]; then
   for f in $E9_FAULTS; do
     case "$f" in none | F4 | F5-F4) ;; *) die "E9_FAULTS entries must be none, F4 or F5-F4, got '$f'" ;; esac
   done
-  worst=0
+  . "$HERE/interleave.sh"
+  EXP_CHILDREN=""
   for k in $E9_ATTEST; do
     reads=plain
     [ "$k" = 0 ] || reads="plain certified"
     for rd in $reads; do
-      rc=0
-      E9_PAIR="$k:$rd" EXP="$E9_PREFIX-a$k-$rd" ATTEST_EVERY="$k" READ_MODE="$rd" "$0" "$@" || rc=$?
-      case "$rc" in
-        0) ;;
-        4) [ "$worst" -ne 0 ] || worst=4 ;;
-        *) exit "$rc" ;;
-      esac
+      EXP_CHILDREN="$EXP_CHILDREN
+E9_PAIR=$k:$rd EXP=$E9_PREFIX-a$k-$rd ATTEST_EVERY=$k READ_MODE=$rd"
     done
   done
-  exit "$worst"
+  rc=0
+  exp_interleave "$0" "$@" || rc=$?
+  exit "$rc"
 fi
 
 . "$HERE/exp_lib.sh"

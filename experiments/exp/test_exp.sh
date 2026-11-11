@@ -628,6 +628,27 @@ contains "e10: signall env" "$(grep e10-certified-signall "$ROOT/stub.log")" "RA
 contains "e10: quorum env" "$(grep e10-quorum "$ROOT/stub.log")" "READ_MODE=quorum ATTEST_EVERY=1"
 contains "e10: params record SIGN_READS" "$(cat "$ROOT/results/raw/e10-certified-signall.params")" "SIGN_READS=always"
 
+# Interleaved order (interleave.sh): rep is the outer loop across the EXPs,
+# and the EXP that starts a pass rotates.
+newtree e10order
+OUT="$("$ROOT/experiments/exp/e10_readcost.sh" --dry-run 2>/dev/null)"
+eq "e10 order: 48 runs still" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 48
+eq "e10 order: rep 1 runs come first" "$(printf '%s\n' "$OUT" | grep '^DRY_RUN: ' | head -n 16 | grep -c ' REP=1 ')" 16
+eq "e10 order: pass 1 starts with plain" "$(printf '%s\n' "$OUT" | grep '^DRY_RUN: ' | head -n 1 | grep -o 'EXP=[^ ]*')" "EXP=e10-plain"
+eq "e10 order: pass 2 starts with certified" "$(printf '%s\n' "$OUT" | grep '^DRY_RUN: ' | grep ' REP=2 ' | head -n 1 | grep -o 'EXP=[^ ]*')" "EXP=e10-certified"
+eq "e10 order: pass 3 starts with certified-signall" "$(printf '%s\n' "$OUT" | grep '^DRY_RUN: ' | grep ' REP=3 ' | head -n 1 | grep -o 'EXP=[^ ]*')" "EXP=e10-certified-signall"
+E10_RATE_RAFT=500 BACKENDS=raft REPS=2 EXTRA_REPS=0 E10_READS="plain quorum" E10_WORKLOADS=a drv e10_readcost.sh
+eq "e10 order real run ok" "$RC" 0
+eq "e10 order: call sequence" "$(grep -o 'EXP=[^ ]* .*REP=[0-9]' "$ROOT/stub.log" | sed 's/ BACKEND.*REP=/:/' | tr '\n' ' ')" "EXP=e10-plain:1 EXP=e10-quorum:1 EXP=e10-quorum:2 EXP=e10-plain:2 "
+E10_RATE_RAFT=500 BACKENDS=raft REPS=2 EXTRA_REPS=0 E10_READS="plain quorum" E10_WORKLOADS=a drv e10_readcost.sh
+eq "e10 order: a rerun runs nothing" "$(calls)" 4
+STUB_RC=3 E10_RATE_RAFT=500 BACKENDS=raft REPS=1 EXTRA_REPS=0 E10_READS="plain quorum" E10_WORKLOADS=c drv e10_readcost.sh
+eq "e10 order: missing rows after the last pass: exit 4" "$RC" 4
+STUB_RC=1 E10_RATE_RAFT=500 BACKENDS=raft REPS=2 EXTRA_REPS=0 E10_READS="plain quorum" E10_WORKLOADS=c drv e10_readcost.sh
+eq "e10 order: a harness error stops at once" "$RC" 1
+OUT="$(EXP_ONLY_PASS=4 REPS=3 EXP=zz-only E10_MODE=plain ATTEST_EVERY=1 READ_MODE=plain SIGN_READS=off "$ROOT/experiments/exp/e10_readcost.sh" --dry-run 2>&1 || true)"
+contains "EXP_ONLY_PASS beyond REPS refused" "$OUT" "EXP_ONLY_PASS=4: passes are 1..3"
+
 newtree e11
 OUT="$("$ROOT/experiments/exp/e11_account.sh" --dry-run 2>/dev/null)"
 eq "e11 --dry-run: 42 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 42

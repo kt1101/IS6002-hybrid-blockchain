@@ -34,20 +34,18 @@ if [ -z "${E12_PAIR:-}" ]; then
   for rd in $E12_READS; do
     case "$rd" in certified | quorum) ;; *) die "E12_READS entries must be certified or quorum, got '$rd'" ;; esac
   done
-  worst=0
+  . "$HERE/interleave.sh"
+  EXP_CHILDREN=""
   for q in $E12_QUORUMS; do
     ql="$(echo "$q" | tr -d '+')"
     for rd in $E12_READS; do
-      rc=0
-      E12_PAIR="$q:$rd" EXP="$E12_PREFIX-q$ql-$rd" ATTEST_EVERY=1 ATTEST_QUORUM="$q" READ_MODE="$rd" FAILOVER=1 "$0" "$@" || rc=$?
-      case "$rc" in
-        0) ;;
-        4) [ "$worst" -ne 0 ] || worst=4 ;;
-        *) exit "$rc" ;;
-      esac
+      EXP_CHILDREN="$EXP_CHILDREN
+E12_PAIR=$q:$rd EXP=$E12_PREFIX-q$ql-$rd ATTEST_EVERY=1 ATTEST_QUORUM=$q READ_MODE=$rd FAILOVER=1"
     done
   done
-  exit "$worst"
+  rc=0
+  exp_interleave "$0" "$@" || rc=$?
+  exit "$rc"
 fi
 
 . "$HERE/exp_lib.sh"
