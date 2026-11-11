@@ -612,6 +612,7 @@ eq "e9 real run ok" "$RC" 0
 eq "e9: 2 runs (plain, certified)" "$(calls)" 2
 contains "e9: run_one gets ATTEST_EVERY and READ_MODE" "$(cat "$ROOT/stub.log")" "READ_MODE=certified ATTEST_EVERY=1"
 eq "e9: certified rows in e9-a1-certified" "$(rows e9-a1-certified)" 1
+eq "e9: closed loop records RATE_raft=0" "$(grep '^RATE_raft=' "$ROOT/results/raw/e9-a1-plain.params")" "RATE_raft=0"
 
 # ---- phase 3 drivers: E10-E12 ----
 newtree e10
@@ -628,6 +629,22 @@ contains "e10: signall = certified + SIGN_READS=always" "$(cat "$ROOT/stub.log")
 contains "e10: signall env" "$(grep e10-certified-signall "$ROOT/stub.log")" "RATE=500 VERIFY_SIGS=none READ_MODE=certified ATTEST_EVERY=1 ATTEST_QUORUM=auto FAILOVER=0 SIGN_READS=always"
 contains "e10: quorum env" "$(grep e10-quorum "$ROOT/stub.log")" "READ_MODE=quorum ATTEST_EVERY=1"
 contains "e10: params record SIGN_READS" "$(cat "$ROOT/results/raw/e10-certified-signall.params")" "SIGN_READS=always"
+# The params guard keeps the per-backend open-loop rate (env RATE stays 0).
+eq "e10: params record RATE_raft" "$(grep -E '^RATE(_raft)?=' "$ROOT/results/raw/e10-quorum.params" | tr '\n' ' ')" "RATE=0 RATE_raft=500 "
+E10_RATE_RAFT=600 BACKENDS=raft REPS=1 EXTRA_REPS=0 E10_READS=quorum E10_WORKLOADS=a drv e10_readcost.sh
+eq "e10: other per-backend rate refused" "$RC" 1
+contains "e10: rate message" "$OUT" "RATE_raft=600 (EXP started with 500)"
+eq "e10: ... nothing ran" "$(calls)" 2
+E10_RATE_RAFT=600 BACKENDS=raft REPS=1 EXTRA_REPS=0 E10_READS=quorum E10_WORKLOADS=a drv e10_readcost.sh --dry-run
+eq "e10: other per-backend rate refused in --dry-run" "$RC" 1
+E10_RATE_RAFT=500 BACKENDS=raft REPS=1 EXTRA_REPS=0 E10_READS=quorum E10_WORKLOADS=a drv e10_readcost.sh
+eq "e10: same rate accepted" "$RC" 0
+# A .params file from before the per-backend rate: not checked, not rewritten.
+sed -i.bak '/^RATE_raft=/d' "$ROOT/results/raw/e10-quorum.params"
+E10_RATE_RAFT=600 BACKENDS=raft REPS=1 EXTRA_REPS=0 E10_READS=quorum E10_WORKLOADS=a drv e10_readcost.sh --dry-run
+eq "e10: old .params without RATE_raft accepted" "$RC" 0
+contains "e10: old .params note" "$OUT" "has no RATE_raft"
+eq "e10: old .params not rewritten" "$(grep -c '^RATE_raft=' "$ROOT/results/raw/e10-quorum.params")" 0
 
 # No rate: E10-E12 refuse to run (a closed loop slipped through once when the
 # rate variables were lost), unless E1x_CLOSED_LOOP=1.

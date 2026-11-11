@@ -35,7 +35,8 @@
 #
 # Params guard: results/raw/<EXP>.params records DURATION, WARMUP, CPUS, MEM,
 # LOAD_THREADS, BATCH_FLUSH, KAFKA_CPUS, KAFKA_MEM, TM_TIMEOUT_COMMIT, RATE,
-# MAX_INFLIGHT, VERIFY_SIGS, READ_MODE, ATTEST_EVERY (a phase-1 file without
+# MAX_INFLIGHT, VERIFY_SIGS, READ_MODE, ATTEST_EVERY, ATTEST_QUORUM, FAILOVER,
+# SIGN_READS, RATE_<backend> (E9-E12, exp_params_rates) (a phase-1 file without
 # the phase-2 keys compares them against their defaults) and the code commit (git describe --dirty, as
 # run_one.sh's commit column) of the first real invocation of an EXP; a later
 # invocation (or --dry-run) with any other value dies before running anything
@@ -211,14 +212,48 @@ exp_rate_for() {
 }
 
 # exp_params_record: write results/raw/<EXP>.params before the first run of
-# the EXP (exp_run; a plan that is refused or a --dry-run writes nothing).
+# the EXP (exp_run; a plan that is refused or a --dry-run writes nothing),
+# with the RATE_<backend> lines of exp_params_rates.
 exp_params_record() {
-  local f="$HBDB_RESULTS_RAW/$EXP.params"
+  local f="$HBDB_RESULTS_RAW/$EXP.params" kv
   [ ! -s "$f" ] || return 0
   if [ -s "$EXP_CSV" ]; then
     log "note: $EXP_CSV has rows but there is no $f: recording this invocation's settings; the earlier rows are not checked"
   fi
   exp_params_current >"$f"
+  for kv in $EXP_PARAMS_RATES; do
+    echo "RATE_$kv" >>"$f"
+  done
+}
+
+# exp_params_rates BACKEND=RATE...: the open-loop rate each backend of a
+# phase-3 driver (E9-E12) resolved (exp_rate_for, E9_RATE_<BACKEND>; empty =
+# closed loop = 0). RATE above is run_one.sh's env RATE, which these drivers
+# leave at 0 (the rate is a per-configuration argument of exp_cfg), so the
+# guard keeps one RATE_<backend> key per backend: exp_params_record writes
+# them, and an invocation (or --dry-run) with another rate dies. A .params
+# file without the key (written before this guard, 2026-11-11) is not
+# checked for that backend (a note) and is never rewritten.
+EXP_PARAMS_RATES=""
+exp_params_rates() {
+  local f="$HBDB_RESULTS_RAW/$EXP.params" kv b r had
+  EXP_PARAMS_RATES=""
+  for kv in "$@"; do
+    b="${kv%%=*}"
+    r="${kv#*=}"
+    EXP_PARAMS_RATES="$EXP_PARAMS_RATES $b=${r:-0}"
+  done
+  [ -s "$f" ] || return 0
+  for kv in $EXP_PARAMS_RATES; do
+    b="${kv%%=*}"
+    r="${kv#*=}"
+    if ! grep -q "^RATE_$b=" "$f"; then
+      log "note: $f has no RATE_$b (written before per-backend rates were recorded); the rate of $b is not checked"
+      continue
+    fi
+    had="$(sed -n "s/^RATE_$b=//p" "$f" | head -n 1)"
+    [ "$had" = "$r" ] || die "$EXP was started with other settings ($f): RATE_$b=$r (EXP started with $had). Use a new EXP, or delete $f on purpose"
+  done
 }
 
 # exp_params_check: the params guard of the header: dies when the EXP was

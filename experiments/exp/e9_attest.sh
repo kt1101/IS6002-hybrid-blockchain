@@ -78,6 +78,7 @@ for b in $EXP_BACKEND_LIST; do
     exp_rate_ok "$r" && exp_rate_on "$r" || die "E9_RATE / E9_RATE_<BACKEND> for $b must be a positive number, got '$r'"
   fi
 done
+exp_params_rates $(for b in $EXP_BACKEND_LIST; do echo "$b=$(e9_rate "$b")"; done)
 
 exp_plan() {
   local b kind fault

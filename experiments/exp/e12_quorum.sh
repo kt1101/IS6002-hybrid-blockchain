@@ -76,6 +76,7 @@ for b in $EXP_BACKEND_LIST; do
     die "no open-loop rate for $b: set E12_RATE_<BACKEND>, E12_RATE or E9_RATE_<BACKEND> / E9_RATE (480 on M3, NOTES), or E12_CLOSED_LOOP=1 for a closed loop on purpose"
   fi
 done
+exp_params_rates $(for b in $EXP_BACKEND_LIST; do echo "$b=$(exp_rate_for E12 "$b")"; done)
 
 exp_plan() {
   local b n f
