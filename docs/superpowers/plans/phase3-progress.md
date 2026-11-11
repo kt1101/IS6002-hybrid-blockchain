@@ -2,7 +2,7 @@
 
 Đọc cùng: plan `docs/superpowers/plans/2026-11-09-phase3-accountability.md`, spec `docs/superpowers/specs/2026-11-09-phase3-accountability-design.md`.
 Nhánh `claude/wizardly-robinson-fdaa8d` (worktree `.claude/worktrees/wizardly-robinson-fdaa8d`), dựa trên phase 2 `claude/charming-hopper-hy6x4e`. **Chưa push.**
-Cập nhật: 2026-11-12 (E7, E9, E9b, E10–E12 xong; Task 10 đóng ở `p11-accountability`; chờ review E9b, tag `p7-openloop`/`p10-attest`, quyết định Task 11).
+Cập nhật: 2026-11-12 (E7, E9, E9b, E10–E12 xong; Task 10 đóng ở `p11-accountability`; tag `p7-openloop`/`p10-attest` đã đặt; chờ quyết định Task 11).
 
 ## Task đã xong
 
@@ -35,8 +35,8 @@ Trang Notion tiến độ (memory `notion-progress-page`): id `413fc8af-e746-811
   - Làm tiếp: người dùng khởi động lại Docker Desktop, máy nguội (kiểm `uptime` load < ~4, VM Docker gần 0% khi không có cụm); chuyển `results/raw/e7.csv`, `e7.params`, `e7/` sang `e7-noisy*`; chạy lại `EXP=e7 BACKENDS="raft bft2" RATES="250 500 600 700 800 900 1000 1500 2000" caffeinate -i experiments/exp/e7_rate.sh` (54 lượt, ~1,7 giờ) trong Terminal panel; phân tích bằng `MPLCONFIGDIR=$TMPDIR/mpl ~/anaconda3/bin/python3 experiments/plot/saturation.py results/raw/e7.csv --ops-dir results/raw --out results/e7` (python hệ thống không có pandas).
   - Rồi `E9_RATE_RAFT`/`E9_RATE_BFT2` = 80% bão hòa → E9 (75 lượt, ~6 giờ); ghi NOTES; tag `p7-openloop`, `p10-attest`.
   - bft2 thỉnh thoảng lỗi khởi động (replica nối nhau trước khi peer lắng nghe; health fail, driver tự chạy lại).
-- Task 10, E10–E12 xong (2026-11-11 00:44–15:48 UTC, đo ở `0f85077`, 1 lượt chạy lại ở `855ee23`): 48 + 42 + 24 hàng, `results/e1x/rq6_{runs,summary}.csv`, NOTES "E10–E12 trên M3". E11 dừng tay 02:54–11:38 sau 3 lượt liên tiếp bị host guard loại (Mac thiếu bộ nhớ); tổng 5 lượt bị loại và đã chạy lại. 1 lượt E12 (raft qf1-certified r1) hỏng vì Mac ngủ khi gập nắp và chạy pin; host guard không bắt được (không xét khoảng trống giữa các mẫu), dữ liệu tách sang `results/raw/mistake-sleep-e12-qf1-certified/`, đã chạy lại. Tag `p11-accountability` đặt sau vòng review 3; `p7-openloop`, `p10-attest` chờ review E9b.
-- E9b xong (2026-11-11 16:11–19:07 UTC, người dùng chọn chạy; đo ở `e54bb11`): 50/50 hàng, 1 lượt bị loại vì swap và đã chạy lại. Không tách được ảnh hưởng của attestation lên độ trễ ghi (hiệu theo pass đổi dấu, nhỏ hơn chênh giữa các rep); mức tăng queue/block của E9 không lặp lại; chi phí đọc certified lặp lại. `results/e9b/`, NOTES "E9b", `experiments/plot/e9b_paired.py`.
+- Task 10, E10–E12 xong (2026-11-11 00:44–15:48 UTC, đo ở `0f85077`, 1 lượt chạy lại ở `855ee23`): 48 + 42 + 24 hàng, `results/e1x/rq6_{runs,summary}.csv`, NOTES "E10–E12 trên M3". E11 dừng tay 02:54–11:38 sau 3 lượt liên tiếp bị host guard loại (Mac thiếu bộ nhớ); tổng 5 lượt bị loại và đã chạy lại. 1 lượt E12 (raft qf1-certified r1) hỏng vì Mac ngủ khi gập nắp và chạy pin; host guard không bắt được (không xét khoảng trống giữa các mẫu), dữ liệu tách sang `results/raw/mistake-sleep-e12-qf1-certified/`, đã chạy lại. Tag `p11-accountability` đặt sau vòng review 3; `p7-openloop`, `p10-attest` đặt sau review E9b (sau `p11-accountability` vì chờ đối chứng E9b).
+- E9b xong (2026-11-11 16:11–19:07 UTC, người dùng chọn chạy; đo ở `e54bb11`): 50/50 hàng, 1 lượt bị loại vì swap và đã chạy lại. Không tách được ảnh hưởng của attestation lên độ trễ ghi (hiệu theo pass đổi dấu, nhỏ hơn chênh giữa các rep); mức tăng queue/block của E9 không lặp lại; chi phí đọc certified lặp lại. Câu hỏi chi phí ghi của attestation đóng: không tách được ở 480 req/s, 180 s. Lượt ngoại lệ raft a0-plain r1 trùng tải ngoài (~125% CPU) của phiên review, không dùng làm bằng chứng về nguồn điện; bỏ pass 1 kết luận không đổi. `results/e9b/`, NOTES "E9b", `experiments/plot/e9b_paired.py`.
 - Task 11 (tùy chọn): Kafka approve theo quorum.
 
 ## Rà soát 10 điểm (2026-11-10, từ phiên gốc)
