@@ -19,7 +19,7 @@
   <nav class="pages" aria-label="Trang">
     <a href="../">Live demo</a>
     <a href="../overview">Results overview</a>
-    <a href="index.html" aria-current="page">Trình bày</a>
+    <a href="./" aria-current="page">Trình bày</a>
   </nav>
   <div class="deck-nav" id="deck-nav"></div>
 </header>
@@ -88,7 +88,7 @@
   </ul>
   <details>
     <summary class="muted">Bảng đầy đủ E10 (e10_latency.csv)</summary>
-    <div data-csv="e10_latency" data-cols="backend,read_mode,workload,op,reps,p50_ms,p50_min_ms,p50_max_ms,p99_ms,p99_min_ms,p99_max_ms,mean_ms,tps"></div>
+    <div data-csv="e10_latency" data-digits="1" data-cols="backend,read_mode,workload,op,reps,p50_ms,p50_min_ms,p50_max_ms,p99_ms,p99_min_ms,p99_max_ms,mean_ms,tps"></div>
   </details>
   <p class="src">Các câu trên: experiments/NOTES.md · mục “E10: chi phí không lỗi” · commit e54bb11</p>
 </section>
@@ -99,7 +99,7 @@
   <div data-notes="e11"></div>
   <div class="grid3">
     <div class="callout ok"><p><strong>F4:</strong> attestation loại node4 trong 0,34–0,39 s ở mọi lượt. Có failover thì tps 478, mọi worker chuyển trong ~0,4 s; không failover thì 1/4 số đọc sau lỗi hỏng (tps 440).</p></div>
-    <div class="callout ok"><p><strong>F6:</strong> đọc thường nhận ~7,1k giá trị sai mỗi lượt. Ký khi nghi ngờ: 9–17 bằng chứng mỗi lượt, node4 bị cả 4 node loại (<code>bad_read</code>) trong 0,29–0,46 s.</p></div>
+    <div class="callout ok"><p><strong>F6:</strong> đọc thường nhận ~7,1k giá trị sai mỗi lượt. Ký khi nghi ngờ: 9–17 bằng chứng mỗi lượt, node đầu tiên loại node4 (<code>bad_read</code>) sau 0,29–0,46 s, cả 4 node đã loại sau 0,33–0,46 s (<code>detect_evidence_s</code> và <code>evict_all_s</code> của 6 lượt trong <code>rq6_runs.csv</code>).</p></div>
     <div class="callout warn"><p><strong>F6E (né ký):</strong> client tự tránh node4 (0 giá trị sai) nhưng không có bằng chứng, node4 không bị loại.</p></div>
   </div>
   <p class="muted">Ở mọi lượt E11: <code>evidence_failed</code> = 0, <code>honest_evicted</code> = 0. Cái giá: sau khi loại node4 quorum vẫn 3, nên mỗi lượt có 350–465 đọc certified hết giờ chờ chứng chỉ.</p>

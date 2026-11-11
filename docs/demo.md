@@ -111,6 +111,32 @@ Muốn làm lại kịch bản trong docker mode: `experiments/cluster/down.sh`,
 - crash, silent, slow gỡ được bằng Heal (với crash, bấm Heal sẽ thấy node catch-up các block bị lỡ).
 - corrupt chỉ xoá được bằng nút "Reset cluster" (khởi động lại cụm rỗng).
 
+### Trang trình bày (`/present/`)
+
+Cùng server demo phục vụ 7 trang tĩnh tiếng Việt để trình bày đồ án, ở http://127.0.0.1:8080/present/ (nút "Trình bày" trên Live demo và Results overview). Không cần Docker hay mạng; chạy được ở cả sim lẫn docker mode.
+
+Thứ tự (phím ← / → hoặc Page Up / Page Down chuyển trang):
+
+0. Mục lục (`/present/`)
+1. Bài toán và bài gốc (`1-bai-toan.html`)
+2. Kiến trúc (`2-kien-truc.html`)
+3. Cơ chế giai đoạn 2–3 (`3-co-che.html`)
+4. Kết quả E7, E9–E12, E1–E6 (`4-ket-qua.html`)
+5. Giới hạn và việc còn mở (`5-gioi-han.html`)
+6. Kịch bản trình bày (`6-kich-ban.html`): thứ tự cả buổi, câu nói cho 5 bước demo ở mục 3
+
+Bảng và biểu đồ đọc từ `demo/web/static/present/data.js`, sinh từ NOTES và các CSV của một tag kết quả (hiện là `p11-accountability`). Chạy từ gốc repo, rồi build lại demo (file được nhúng bằng `go:embed`):
+
+```bash
+python3 experiments/plot/build_present_data.py --ref p11-accountability --out demo/web/static/present/data.js
+```
+
+`--check` chỉ so sánh, không ghi (exit 1 khi `data.js` cũ so với tag):
+
+```bash
+python3 experiments/plot/build_present_data.py --ref p11-accountability --out demo/web/static/present/data.js --check
+```
+
 ## 3. Kịch bản 5 bước
 
 Thanh kịch bản trên UI có 5 nút. Mỗi nút gọi đúng các API mà thao tác tay cũng dùng (không có đường tắt riêng), nên có thể vừa bấm nút vừa thao tác tay. Lời nói dưới đây chỉ là gợi ý.

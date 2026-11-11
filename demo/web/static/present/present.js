@@ -6,7 +6,7 @@
   'use strict';
 
   var PAGES = [
-    ['index.html', 'Mục lục'],
+    ['./', 'Mục lục'],
     ['1-bai-toan.html', 'Bài toán và bài gốc'],
     ['2-kien-truc.html', 'Kiến trúc'],
     ['3-co-che.html', 'Cơ chế giai đoạn 2–3'],
@@ -19,8 +19,10 @@
   var D = window.PRESENT_DATA;
 
   function current() {
-    var name = location.pathname.split('/').pop() || 'index.html';
-    for (var i = 0; i < PAGES.length; i++) if (PAGES[i][0] === name) return i;
+    // The table of contents is "./" (/present/); http.FileServer redirects
+    // /present/index.html there, so the pages never link to index.html.
+    var name = location.pathname.split('/').pop();
+    for (var i = 1; i < PAGES.length; i++) if (PAGES[i][0] === name) return i;
     return 0;
   }
 
@@ -89,8 +91,13 @@
     table.appendChild(el('thead')).appendChild(tr);
     var tb = el('tbody');
     t.rows.forEach(function (r) {
-      var row = el('tr');
-      r.forEach(function (c) { var td = el('td'); cell(td, c); row.appendChild(td); });
+      var row = el('tr'), prev = null;
+      r.forEach(function (c) {
+        // An empty cell continues the one before it (E12: "không root nào
+        // được xác nhận" spans two columns in NOTES).
+        if (c === '' && prev) { prev.setAttribute('colspan', String((+prev.getAttribute('colspan') || 1) + 1)); return; }
+        var td = el('td'); cell(td, c); row.appendChild(td); prev = td;
+      });
       tb.appendChild(row);
     });
     table.appendChild(tb);
@@ -107,13 +114,22 @@
     return function (r) { return conds.every(function (c) { return r[c[0]] === c[1]; }); };
   }
 
+  // CSV decimal as printed in the NOTES tables: data-digits decimals, comma
+  // separator ("112.374" -> "112,4" with 1). Integers and text stay as is.
+  function decimal(v, digits) {
+    if (digits == null || !/^-?\d+\.\d+$/.test(v)) return v;
+    return (+v).toFixed(+digits).replace('.', ',');
+  }
+
   // Rows of a CSV dataset as a table: data-csv="key", data-cols="a,b,c",
-  // data-prefix filters the "exp" column (e.g. "e12-"), data-where as above.
+  // data-prefix filters the "exp" column (e.g. "e12-"), data-where as above,
+  // data-digits rounds decimals for display (the title keeps the CSV value).
   function csvTable(host) {
     var ds = D.csv[host.getAttribute('data-csv')];
     var cols = host.getAttribute('data-cols').split(',');
     var prefix = host.getAttribute('data-prefix') || '';
     var keep = whereFilter(host);
+    var digits = host.getAttribute('data-digits');
     var rows = ds.rows.filter(function (r) { return keep(r) && (!prefix || (r.exp || '').indexOf(prefix) === 0); });
     var wrap = el('div', { 'class': 'table-wrap' });
     var table = el('table', { 'class': 'data' });
@@ -123,14 +139,20 @@
     var tb = el('tbody');
     rows.forEach(function (r) {
       var row = el('tr');
-      cols.forEach(function (c) { var td = el('td'); cell(td, r[c] == null ? '' : r[c]); row.appendChild(td); });
+      cols.forEach(function (c) {
+        var raw = r[c] == null ? '' : r[c], shown = decimal(raw, digits);
+        var td = el('td'); cell(td, shown);
+        if (shown !== raw) td.setAttribute('title', raw);
+        row.appendChild(td);
+      });
       tb.appendChild(row);
     });
     table.appendChild(tb);
     wrap.appendChild(table);
     host.appendChild(wrap);
     var w = host.getAttribute('data-where');
-    host.appendChild(source(ds.source + ' · commit ' + ds.commit + (prefix ? ' · các hàng exp = ' + prefix + '*' : '') + (w ? ' · các hàng ' + w.replace(/;/g, ', ') : '')));
+    host.appendChild(source(ds.source + ' · commit ' + ds.commit + (prefix ? ' · các hàng exp = ' + prefix + '*' : '') + (w ? ' · các hàng ' + w.replace(/;/g, ', ') : '') +
+      (digits != null ? ' · làm tròn ' + digits + ' chữ số thập phân (rê chuột để xem giá trị gốc)' : '')));
   }
 
   // Horizontal bars from a CSV dataset, with the min–max range of the reps:
@@ -284,7 +306,7 @@
       var ds = D.csv[n.getAttribute('data-csv-val')];
       var conds = n.getAttribute('data-where').split(';').map(function (c) { return c.split('='); });
       var row = ds.rows.filter(function (r) { return conds.every(function (c) { return r[c[0]] === c[1]; }); })[0];
-      n.textContent = row ? row[n.getAttribute('data-field')] : 'chưa đo';
+      n.textContent = row ? decimal(row[n.getAttribute('data-field')], n.getAttribute('data-digits')) : 'chưa đo';
     });
   }
 

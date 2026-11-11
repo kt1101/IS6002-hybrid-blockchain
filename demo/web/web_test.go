@@ -60,8 +60,10 @@ func TestIndexAssetsExist(t *testing.T) {
 }
 
 // presentPages are the presentation pages (static/present/), in deck order.
+// The table of contents is the directory URL /present/: http.FileServer
+// redirects /present/index.html there (301), so it is listed as "".
 var presentPages = []string{
-	"index.html", "1-bai-toan.html", "2-kien-truc.html", "3-co-che.html",
+	"", "1-bai-toan.html", "2-kien-truc.html", "3-co-che.html",
 	"4-ket-qua.html", "5-gioi-han.html", "6-kich-ban.html",
 }
 
@@ -82,10 +84,14 @@ func TestPresentPagesServed(t *testing.T) {
 		if !strings.Contains(body, `<html lang="vi">`) {
 			t.Errorf("GET %s is not marked lang=vi", path)
 		}
-		for _, ref := range []string{`href="../css/app.css"`, `href="present.css"`, `src="data.js"`, `src="present.js"`, `href="../"`, `href="../overview"`} {
+		for _, ref := range []string{`href="../css/app.css"`, `href="present.css"`, `src="data.js"`, `src="present.js"`, `href="../"`, `href="../overview"`, `href="./"`} {
 			if !strings.Contains(body, ref) {
 				t.Errorf("%s does not reference %s", path, ref)
 			}
+		}
+		// A link to index.html would cost a 301 to ./ on every click.
+		if strings.Contains(body, `href="index.html"`) {
+			t.Errorf("%s links to index.html; link the table of contents as ./", path)
 		}
 	}
 	for _, path := range []string{"/present/present.css", "/present/present.js", "/present/data.js"} {
@@ -94,9 +100,11 @@ func TestPresentPagesServed(t *testing.T) {
 		}
 	}
 	// The directory URL serves the table of contents.
-	res, body := get(t, h, "/present/")
-	if res.StatusCode != http.StatusOK || !strings.Contains(body, "Trình bày đồ án") {
-		t.Errorf("GET /present/ = %d, want 200 with the table of contents", res.StatusCode)
+	if _, body := get(t, h, "/present/"); !strings.Contains(body, "Trình bày đồ án") {
+		t.Errorf("GET /present/ does not serve the table of contents")
+	}
+	if _, js := get(t, h, "/present/present.js"); strings.Contains(js, "'index.html'") {
+		t.Errorf("present.js still lists index.html as a page")
 	}
 	// data.js is generated from the results commit; the pages read it.
 	if _, body := get(t, h, "/present/data.js"); !strings.Contains(body, "window.PRESENT_DATA = ") {

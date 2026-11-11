@@ -104,9 +104,12 @@ def test_pages_link_the_same_assets_and_each_other():
         assert '<html lang="vi">' in s, p
         for asset in ('href="../css/app.css"', 'href="present.css"', 'src="data.js"', 'src="present.js"'):
             assert asset in s, (p, asset)
-        assert 'href="../"' in s and 'href="../overview"' in s, p
+        assert 'href="../"' in s and 'href="../overview"' in s and 'href="./"' in s, p
+        # http.FileServer redirects index.html to ./ (301): link ./ instead.
+        assert 'href="index.html"' not in s, p
     js = (PRESENT / "present.js").read_text(encoding="utf-8")
-    for p in PAGES:
+    assert "'./'" in js and "'index.html'" not in js
+    for p in PAGES[1:]:
         assert "'%s'" % p in js, p
 
 

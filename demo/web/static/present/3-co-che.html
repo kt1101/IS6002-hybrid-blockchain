@@ -19,7 +19,7 @@
   <nav class="pages" aria-label="Trang">
     <a href="../">Live demo</a>
     <a href="../overview">Results overview</a>
-    <a href="index.html" aria-current="page">Trình bày</a>
+    <a href="./" aria-current="page">Trình bày</a>
   </nav>
   <div class="deck-nav" id="deck-nav"></div>
 </header>
@@ -51,14 +51,14 @@
     <table class="data">
       <thead><tr><th scope="col">Chế độ</th><th scope="col">Client làm gì</th><th scope="col">Đảm bảo</th><th scope="col">Chi phí đo được (E10, workload a, read p50, trung vị 3 rep)</th></tr></thead>
       <tbody>
-        <tr><td><code>plain</code></td><td><code>Get</code> từ node chính</td><td>Tin node: node lỗi trả gì client nhận nấy</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=plain;workload=a;op=read" data-field="p50_ms">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=plain;workload=a;op=read" data-field="p50_ms">chưa đo</span> ms</td></tr>
-        <tr><td><code>quorum</code></td><td><code>Get</code> song song từ f+1 node, chấp nhận khi mọi giá trị bằng nhau</td><td>Đúng khi trong f+1 node có ít nhất một node trung thực; không proof, không bằng chứng</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=quorum;workload=a;op=read" data-field="p50_ms">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=quorum;workload=a;op=read" data-field="p50_ms">chưa đo</span> ms</td></tr>
-        <tr><td><code>certified</code></td><td><code>GetVerified</code>: kiểm proof Merkle và ≥ Q attestation của <code>(h, root)</code></td><td>Giá trị khớp trạng thái tại một height đã được quorum xác nhận (không chứng minh đó là giá trị mới nhất)</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=certified;workload=a;op=read" data-field="p50_ms">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=certified;workload=a;op=read" data-field="p50_ms">chưa đo</span> ms</td></tr>
-        <tr><td><code>certified</code> + <code>sign-always</code></td><td>Như trên, node ký mọi phản hồi</td><td>Thêm: mọi phản hồi sai đều là bằng chứng</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=certified-signall;workload=a;op=read" data-field="p50_ms">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=certified-signall;workload=a;op=read" data-field="p50_ms">chưa đo</span> ms</td></tr>
+        <tr><td><code>plain</code></td><td><code>Get</code> từ node chính</td><td>Tin node: node lỗi trả gì client nhận nấy</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=plain;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=plain;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms</td></tr>
+        <tr><td><code>quorum</code></td><td><code>Get</code> song song từ f+1 node, chấp nhận khi mọi giá trị bằng nhau</td><td>Đúng khi trong f+1 node có ít nhất một node trung thực; không proof, không bằng chứng</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=quorum;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=quorum;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms</td></tr>
+        <tr><td><code>certified</code></td><td><code>GetVerified</code>: kiểm proof Merkle và ≥ Q attestation của <code>(h, root)</code></td><td>Giá trị khớp trạng thái tại một height đã được quorum xác nhận (không chứng minh đó là giá trị mới nhất)</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=certified;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=certified;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms</td></tr>
+        <tr><td><code>certified</code> + <code>sign-always</code></td><td>Như trên, node ký mọi phản hồi</td><td>Thêm: mọi phản hồi sai đều là bằng chứng</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=certified-signall;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=certified-signall;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms</td></tr>
       </tbody>
     </table>
   </div>
-  <p class="src">results/e1x/e10_latency.csv (cột p50_ms; workload=a, op=read) · commit e54bb11</p>
+  <p class="src">results/e1x/e10_latency.csv (cột p50_ms, làm tròn 1 chữ số; workload=a, op=read) · commit e54bb11</p>
 </section>
 
 <div class="grid2">
