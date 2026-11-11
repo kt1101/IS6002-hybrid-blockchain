@@ -21,13 +21,17 @@ experiments/exp/e9_attest.sh). For every CSV row, from its run sidecars
   read_p50_ms, read_p99_ms (the ops read line). p99 over 3 reps is noisy:
   the summary reports p50 and mean as the main latency figures, the p99 mean
   with its min and max over the reps.
-* injection_race: 1 for an F5 run (f+1 faulty nodes) with a .diverged line.
-  With quorum 2f+1 a height is certified only if at most f nodes were faulty
-  when it was attested, so a detection means the injections took effect at
-  different heights (e.g. node3 corrupt before height h, node4 after: nodes
-  1, 2, 4 certify h and node3 diverges). Such runs keep their
-  detect_protocol_s but are left out of detected_runs and of the summary's
-  detect_protocol_s (race_runs counts them; a note names each).
+* injection_race: 1 for an F5 run (f+1 faulty nodes) in which fewer than
+  all f+1 faulty nodes logged a .diverged line. With quorum 2f+1 a height is
+  certified only if at most f nodes were faulty when it was attested, so such
+  a detection means the injections took effect at different heights (e.g.
+  node3 corrupt before height h, node4 after: nodes 1, 2, 4 certify h and
+  node3 diverges). Such runs keep their detect_protocol_s but are left out of
+  detected_runs and of the summary's detect_protocol_s (race_runs counts
+  them; a note names each). An F5 run in which ALL f+1 faulty nodes diverged
+  is not a race: it means a height was certified against f+1 faulty nodes,
+  which quorum 2f+1 must prevent; it stays in detected_runs and gets a
+  WARNING note (check the Certifier).
 
 Writes <out>/rq5_runs.csv (one line per run) and <out>/rq5_summary.csv
 (means per backend, attest_every, read_mode and fault kind), prints both
@@ -46,6 +50,8 @@ import rq3
 E9_EXP = re.compile(r"^(?P<prefix>.+)-a(?P<k>[0-9]+)-(?P<read>plain|verified|certified)$")
 DOCKER_TS = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z")
 DIVERGED = "core: diverged at height"
+DIVERGED_NODE = re.compile(r"core: diverged at height \d+ \(node (\d+):")
+FAULT_NODES = re.compile(r"^[A-Z0-9-]+:([^@]+)@")
 
 RUN_COLUMNS = ["exp", "backend", "attest_every", "read_mode", "fault", "rep", "fault_kind",
                "detect_protocol_s", "detect_auditor_s", "wrong_gets", "rejected_gets", "tps", "write_p99_ms",
@@ -82,6 +88,21 @@ def first_diverged(path):
     ts = [docker_epoch(l) for l in lines if DIVERGED in l]
     ts = [t for t in ts if t is not None]
     return min(ts) if ts else None
+
+
+def diverged_nodes(path):
+    """The nodes ("node<i>") that logged a diverged line in a .diverged file."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError, TypeError):
+        return set()
+    return {"node" + m.group(1) for m in (DIVERGED_NODE.search(l) for l in lines) if m}
+
+
+def faulty_nodes(fault):
+    """Nodes named by a FAULT value ("F5-F4:node4+node3@60")."""
+    m = FAULT_NODES.match(fault)
+    return [x for x in re.split(r"[+,]", m.group(1)) if x] if m else []
 
 
 def injection_epoch(path, fault):
@@ -143,10 +164,19 @@ def analyse(csv_paths, raw_dir):
                 else:
                     out["detect_protocol_s"] = _round(div - inj)
                     if kind.startswith("F5"):
-                        out["injection_race"] = 1
-                        res.notes.append("%s: in-protocol detection under f+1 faulty nodes: the injections "
-                                         "took effect at different heights (injection race); left out of "
-                                         "detected_runs" % label)
+                        faulty = set(faulty_nodes(fault))
+                        caught = diverged_nodes(plot.run_sidecar(raw_dir, row, ".diverged")) & faulty
+                        if faulty and caught == faulty:
+                            res.notes.append("WARNING: %s: all f+1 faulty nodes (%s) diverged: a height was "
+                                             "certified against f+1 faulty nodes, which quorum 2f+1 must "
+                                             "prevent; check the Certifier (kept in detected_runs)"
+                                             % (label, "+".join(sorted(faulty))))
+                        else:
+                            out["injection_race"] = 1
+                            res.notes.append("%s: in-protocol detection of %s only, under f+1 faulty nodes: "
+                                             "the injections took effect at different heights (injection "
+                                             "race); left out of detected_runs"
+                                             % (label, "+".join(sorted(caught)) or "no faulty node"))
                 audit = plot.run_sidecar(raw_dir, row, ".audit")
                 if audit is not None:
                     try:

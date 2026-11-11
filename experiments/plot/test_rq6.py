@@ -126,9 +126,9 @@ def test_summary_and_main(tmp_path, capsys):
     out = tmp_path / "out"
     assert rq6.main([str(p), "--raw-dir", str(raw), "--out", str(out)]) == 0
     runs = (out / "rq6_runs.csv").read_text().splitlines()
-    assert runs[0].startswith("exp,backend,n,fault,rep,fault_kind,detect_evidence_s,evict_all_s,")
+    assert runs[0].startswith("exp,backend,n,fault,rep,fault_kind,injection_race,detect_evidence_s,evict_all_s,")
     summ = (out / "rq6_summary.csv").read_text().splitlines()
-    assert len(summ) == 2 and summ[1].startswith("e11-F6-cert-fo-sign,raft,F6,1,1,1,0.8,1.0,")
+    assert len(summ) == 2 and summ[1].startswith("e11-F6-cert-fo-sign,raft,F6,1,0,1,1,0.8,1.0,")
     assert "e11-F6-cert-fo-sign" in capsys.readouterr().out
 
 
@@ -183,3 +183,30 @@ def test_evidence_failed_column(tmp_path):
 def test_evidence_failed_missing_column_empty(tmp_path):
     p, raw = _run(tmp_path, evictions=ALL_EVICT_NODE4)
     assert rq6.analyse([p], raw).runs[0]["evidence_failed"] == ""
+
+
+def test_f5_partial_eviction_at_2f1_is_an_injection_race(tmp_path):
+    ev = (("node1", 60.8, 3, 900, "divergent_root"), ("node2", 60.8, 3, 900, "divergent_root"))
+    p, raw = _run(tmp_path, exp="e12-q2f1-certified", fault="F5-F4:node4+node3@60", inject_action="corrupt_on",
+                  evictions=ev)
+    res = rq6.analyse([p], raw)
+    assert res.runs[0]["injection_race"] == 1
+    assert res.summary[0]["runs"] == 0 and res.summary[0]["race_runs"] == 1
+    assert any("injection race" in n for n in res.notes)
+
+
+def test_f5_all_faulty_evicted_at_2f1_warns(tmp_path):
+    ev = (("node1", 60.8, 3, 900, "divergent_root"), ("node1", 60.9, 4, 901, "divergent_root"))
+    p, raw = _run(tmp_path, exp="e12-q2f1-certified", fault="F5-F4:node4+node3@60", inject_action="corrupt_on",
+                  evictions=ev)
+    res = rq6.analyse([p], raw)
+    assert res.runs[0]["injection_race"] == 0 and res.summary[0]["runs"] == 1
+    assert any(n.startswith("WARNING") for n in res.notes)
+
+
+def test_f5_at_qf1_is_never_a_race(tmp_path):
+    ev = (("node1", 60.8, 3, 900, "divergent_root"),)
+    p, raw = _run(tmp_path, exp="e12-qf1-certified", fault="F5-F4:node4+node3@60", inject_action="corrupt_on",
+                  evictions=ev)
+    res = rq6.analyse([p], raw)
+    assert res.runs[0]["injection_race"] == 0 and res.summary[0]["race_runs"] == 0

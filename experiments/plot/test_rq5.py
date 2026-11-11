@@ -9,7 +9,7 @@ OPS_HEADER = ("op,count,tps,lat_mean_ms,lat_p50_ms,lat_p99_ms,errors,aborted,dro
 
 
 def _run(tmp_path, exp="e9-a1-certified", fault="F4:node4@60", backend="bft2", wrong=0,
-         diverged_ms=1450, audit=None, rejected=(0, 2, 5), rate=800):
+         diverged_ms=1450, audit=None, rejected=(0, 2, 5), rate=800, diverged_nodes=("node4",)):
     raw = tmp_path / "raw"
     (raw / exp).mkdir(parents=True, exist_ok=True)
     row = {c: "" for c in plot.EXPECTED_COLUMNS}
@@ -32,8 +32,9 @@ def _run(tmp_path, exp="e9-a1-certified", fault="F4:node4@60", backend="bft2", w
             "1970-01-01T00:00:01Z,1000,1,70,%s,corrupt_on,node4,\n" % (fault, fault))
     if diverged_ms is not None:
         s, ms = divmod(diverged_ms, 1000)
-        (d / (tag + ".diverged")).write_text(
-            "node4 node4  | 1970-01-01T00:00:%02d.%03d000000Z 2026/11/07 core: diverged at height 7 (x)\n" % (s, ms))
+        (d / (tag + ".diverged")).write_text("".join(
+            "%s %s  | 1970-01-01T00:00:%02d.%03d000000Z 2026/11/07 core: diverged at height 7 (node %s: x)\n"
+            % (n, n, s, ms, n[4:]) for n in diverged_nodes))
     if audit is not None:
         (d / (tag + ".audit")).write_text(audit)
     return p, raw
@@ -103,3 +104,12 @@ def test_f5_detection_is_an_injection_race(tmp_path):
     assert r["injection_race"] == 1 and r["detect_protocol_s"] == 0.45
     assert s["detected_runs"] == 0 and s["detect_protocol_s"] == "" and s["race_runs"] == 1
     assert any("injection race" in n for n in res.notes)
+
+
+def test_f5_all_faulty_diverged_is_not_a_race(tmp_path):
+    p, raw = _run(tmp_path, fault="F5-F4:node4+node3@60", diverged_nodes=("node3", "node4"))
+    res = rq5.analyse([p], raw)
+    r, s = res.runs[0], res.summary[0]
+    assert r["injection_race"] == 0
+    assert s["detected_runs"] == 1 and s["race_runs"] == 0
+    assert any(n.startswith("WARNING") and "check the Certifier" in n for n in res.notes)

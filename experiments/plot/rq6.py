@@ -26,6 +26,14 @@ by EXP, backend and fault kind. For every CSV row, from its run sidecars
 * rejected_reads, evidence_sent, evidence_failed, cert_timeouts: the read line of
   <tag>.ops.csv (rejected_reads falls back to proof_errors + cert_errors +
   dataloss_errors of phase 2; a missing column is left empty).
+* injection_race: 1 for an F5 run at quorum 2f+1 (EXP with "-q2f1-", or
+  an EXP of E11 at the default quorum) in which some but not all of the f+1
+  faulty nodes were evicted: quorum 2f+1 certifies a height only if at most
+  f nodes were faulty when it was attested, so this means the injections
+  took effect at different heights (SIGUSR1 is not synchronised by height).
+  Such runs are listed with a note and left out of the summary (race_runs
+  counts them). All f+1 faulty nodes evicted at quorum 2f+1 is not a race:
+  it gets a WARNING note (check the Certifier) and stays in the summary.
 * honest_evicted: distinct nodes outside FAULT that some node evicted.
 * wrong_root_heights: distinct heights at which an honest node was evicted
   for divergent_root, i.e. heights whose certified root was a faulty one
@@ -60,10 +68,10 @@ EVICT = re.compile(r"core: evicted node (\d+) at height (\d+) \(([a-z_]+)\)")
 CERT = re.compile(r"core: certified height (\d+) root ([0-9a-f]+)")
 FAULT_NODES = re.compile(r"^[A-Z0-9-]+:([^@]+)@")
 
-RUN_COLUMNS = ["exp", "backend", "n", "fault", "rep", "fault_kind", "detect_evidence_s", "evict_all_s",
+RUN_COLUMNS = ["exp", "backend", "n", "fault", "rep", "fault_kind", "injection_race", "detect_evidence_s", "evict_all_s",
                "same_height", "failover_s", "wrong_gets", "rejected_reads", "evidence_sent", "evidence_failed",
                "cert_timeouts", "honest_evicted", "wrong_root_heights", "certs_heights", "tps"]
-SUMMARY_COLUMNS = ["exp", "backend", "fault_kind", "runs", "detected_runs", "evicted_all_runs",
+SUMMARY_COLUMNS = ["exp", "backend", "fault_kind", "runs", "race_runs", "detected_runs", "evicted_all_runs",
                    "detect_evidence_s", "evict_all_s", "failover_s", "wrong_gets", "rejected_reads",
                    "evidence_sent", "evidence_failed", "cert_timeouts", "honest_evicted", "wrong_root_heights",
                    "tps"]
@@ -300,6 +308,18 @@ def analyse(csv_paths, raw_dir):
         detect, evict_all, same, honest_ev, wrong_h = eviction_metrics(evictions, n, culprits, inj)
         if kind != "none" and not evictions:
             res.notes.append("%s: no .evict line (no node was evicted)" % label)
+        race = 0
+        if kind.startswith("F5") and "-qf1-" not in str(row["exp"]):
+            caught = {cul for _, _, cul, _, _ in evictions if cul in culprits}
+            if caught and caught == set(culprits):
+                res.notes.append("WARNING: %s: all f+1 faulty nodes (%s) evicted at quorum 2f+1: a height was "
+                                 "certified against f+1 faulty nodes, which quorum 2f+1 must prevent; check the "
+                                 "Certifier (kept in the summary)" % (label, "+".join(sorted(caught))))
+            elif caught:
+                race = 1
+                res.notes.append("%s: only %s of the f+1 faulty nodes evicted at quorum 2f+1: the injections took "
+                                 "effect at different heights (injection race); left out of the summary"
+                                 % (label, "+".join(sorted(caught))))
         failover = None
         first_fo = _int_or_empty(rd, "first_failover_unix_ms")
         if first_fo and inj is not None:
@@ -312,7 +332,7 @@ def analyse(csv_paths, raw_dir):
             res.notes.append("%s: failover_s not recorded (ops sidecar without first_failover_unix_ms)" % label)
         res.runs.append({
             "exp": row["exp"], "backend": row["backend"], "n": n, "fault": fault, "rep": row["rep"],
-            "fault_kind": kind, "detect_evidence_s": _round(detect), "evict_all_s": _round(evict_all),
+            "fault_kind": kind, "injection_race": race, "detect_evidence_s": _round(detect), "evict_all_s": _round(evict_all),
             "same_height": same, "failover_s": _round(failover), "wrong_gets": int(float(row["wrong_gets"] or 0)),
             "rejected_reads": rejected, "evidence_sent": _int_or_empty(rd, "evidence_sent"),
             "evidence_failed": _int_or_empty(rd, "evidence_failed"),
@@ -336,9 +356,10 @@ def analyse(csv_paths, raw_dir):
                 vals.append(v)
         return round(sum(vals) / len(vals), 3) if vals else ""
 
-    for (exp, b, kind), rs in sorted(groups.items()):
+    for (exp, b, kind), all_rs in sorted(groups.items()):
+        rs = [r for r in all_rs if not r["injection_race"]]
         res.summary.append({
-            "exp": exp, "backend": b, "fault_kind": kind, "runs": len(rs),
+            "exp": exp, "backend": b, "fault_kind": kind, "runs": len(rs), "race_runs": len(all_rs) - len(rs),
             "detected_runs": sum(r["detect_evidence_s"] != "" for r in rs),
             "evicted_all_runs": sum(r["evict_all_s"] != "" for r in rs),
             **{c: mean(rs, c) for c in ("detect_evidence_s", "evict_all_s", "failover_s", "wrong_gets", "rejected_reads",
