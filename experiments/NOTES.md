@@ -466,11 +466,17 @@ Lần khởi chạy đầu E10–E12 mất biến `E9_RATE_*` (lời nhắc cậ
 
 ## Giai đoạn 3: E10–E12 trên M3 (Task 8–9, 2026-11-11)
 
-Lệnh: `E9_RATE_RAFT=480 E9_RATE_BFT2=480 experiments/exp/e1{0,1,2}_*.sh` (N=4, 256 client, MEM=1g, flush 100 ms, 180 s + 10 s warmup, lỗi ở giây 60, 3 rep, thứ tự xen kẽ theo rep). Commit đo `0f85077` (113 hàng) và `855ee23` (1 hàng chạy lại, `EXP_ALLOW_COMMIT_CHANGE=1`; giữa hai commit chỉ đổi driver, plot, NOTES, không đổi `veritas/`, cluster hay `run_one.sh`). E10 00:44–02:08 UTC, E11 02:06–13:43 (dừng 02:54–11:38), E12 13:42–15:48. 48 + 42 + 24 hàng, `failures in this run: none` ở lần chạy cuối. Phân tích: `experiments/plot/rq6.py results/raw/e1[012]-*.csv --raw-dir results/raw --out results/e1x` → `results/e1x/rq6_runs.csv`, `rq6_summary.csv`; độ trễ E10 đọc từ `.bench.log`.
+Lệnh: `E9_RATE_RAFT=480 E9_RATE_BFT2=480 experiments/exp/e1{0,1,2}_*.sh` (N=4, 256 client, MEM=1g, flush 100 ms, attestation K=1, 3 rep, thứ tự xen kẽ theo rep). E10: 60 s + 10 s warmup, không lỗi, workload a và c. E11, E12: 180 s + 10 s warmup, lỗi ở giây 60 của cửa sổ đo, workload a. Commit đo `0f85077` (113 hàng) và `855ee23` (1 hàng chạy lại, `EXP_ALLOW_COMMIT_CHANGE=1`; giữa hai commit chỉ đổi driver, plot, NOTES, không đổi `veritas/`, cluster hay `run_one.sh`). E10 00:44–02:08 UTC, E11 02:06–13:43 (dừng 02:54–11:38), E12 13:42–15:48. 48 + 42 + 24 hàng, `failures in this run: none` ở lần chạy cuối. Phân tích: `experiments/plot/rq6.py results/raw/e1[012]-*.csv --raw-dir results/raw --out results/e1x` → `results/e1x/rq6_runs.csv`, `rq6_summary.csv`; độ trễ E10: `experiments/plot/e10_latency.py results/raw/e10-*.csv --raw-dir results/raw --out results/e1x` → `results/e1x/e10_latency.csv` (từ `.ops.csv`).
+
+**Kiểm tra nhất quán với mã giai đoạn 3 (Task 10 bước 1, chạy sau E10–E12, 2026-11-11 15:56–16:01 UTC):** `ATTEST_EVERY=1 MEM=1g BATCH_FLUSH=100ms KEEP_LOGS=1 experiments/check_consistency.sh <b>` ở commit `446b625` (ảnh `hbdb-node` build 2026-11-10 16:47 UTC sau `9560921`; từ đó tới nay không đổi `veritas/`, `consensus/`, `cmd/`, `bft2node/`): kafka, raft, tendermint, bft2 đều **CONSISTENT**, compose có `--attest-every=1`, log container (`results/consistency/*_20261111T15*.logs`) không có dòng `core: evicted` hay `core: diverged`. Đây là lần đầu kafka và tendermint chạy với mã giai đoạn 3 (Task 1 chạy trước Task 3–7).
+
+**Lưu trữ:** `results/raw/` bị gitignore nên toàn bộ dữ liệu thô của E7–E12 (36 MB, 7037 mục, kể cả `e7-noisy*`, `hg-trial*`, `smoke-p3*` và `mistake-*`: **không dùng**, chỉ để truy vết) được nén vào `results/archive/raw-e7-e12-2026-11-11.tar.gz` (3,9 MB, SHA-256 `75a2f1e8…62d5`, có trong git). Giải nén: `tar -xzf results/archive/raw-e7-e12-2026-11-11.tar.gz -C results`.
 
 **Host guard:** 5 lượt bị loại (không ghi hàng, đã chạy lại): 02:17 raft F4 cert-fo r1 (swap 68k trang), 02:38 và 02:50 bft2 F6 plain r1 (swap 4,6k và 79k), 02:54 raft F6 cert-fo r1 (CPU ngoài Docker trung bình 299%, swap 1,45M) — ba lượt liên tiếp nên dừng tay sweep tới khi Mac rảnh (compressor ~8 GB → ~2,9 GB); 14:54 raft e12-q2f1-quorum r2 (swap 28k; lần thử 2 qua). `results/raw/e11-F6-plain.failures` còn dòng 02:50 của lần chạy bị dừng; hàng đó đã có sau khi chạy tiếp.
 
-**Sự cố: Mac ngủ giữa lượt (2026-11-11 13:43–14:09 UTC).** Gập nắp khi chạy pin (`pmset -g log`: `Clamshell Sleep` 20:43 +0700, chỉ DarkWake ngắn tới 21:09) nên `caffeinate` không giữ được. Lượt raft e12-qf1-certified r1 kéo dài 13:42–14:12: lỗi tiêm ở t = 940 s thay vì 60 s, đồng hồ Docker VM chậm ~940 s so với host, `rq6.py` ra thời gian phát hiện −940 s. Host guard vẫn báo `ok` (CPU và swap bình thường; guard không xét khoảng trống giữa các mẫu: `.host` trống 947 s và 531 s). Quét `.host` của 189 lượt E9–E12: chỉ lượt này có khoảng trống > 30 s. Dữ liệu tách ra `results/raw/mistake-sleep-e12-qf1-certified/` (kèm hàng CSV gốc), chạy lại 15:45 ở `855ee23`.
+**Sự cố: Mac ngủ giữa lượt (2026-11-11 13:43–14:09 UTC).** Gập nắp khi chạy pin (`pmset -g log`: `Clamshell Sleep` 20:43 +0700, chỉ DarkWake ngắn tới 21:09) nên `caffeinate` không giữ được. Lượt raft e12-qf1-certified r1 kéo dài 13:42–14:12: lỗi tiêm ở t = 940 s thay vì 60 s, đồng hồ Docker VM chậm ~940 s so với host, `rq6.py` ra thời gian phát hiện −940 s. Host guard vẫn báo `ok` (CPU và swap bình thường; guard không xét khoảng trống giữa các mẫu: `.host` trống 947 s và 531 s). Quét `.host` của 189 lượt E9–E12: chỉ lượt này có khoảng trống > 30 s. Dữ liệu tách ra `results/raw/mistake-sleep-e12-qf1-certified/` (kèm hàng CSV gốc), chạy lại 15:45 ở `855ee23`. Sau sự cố (`run_one.sh`, sau E9–E12): host guard trả `noisy` khi hai mẫu `.host` trong pha chạy cách nhau quá `HOST_GAP_MAX_SECS` (mặc định 3 × `HOST_SAMPLE_SECS` = 15 s; khoảng cách bình thường giữa các mẫu trong pha chạy 6,0–7,1 s ở 189 lượt E9–E12; mẫu cuối, lấy sau bench và sidecar, cách mẫu trước 0,8–15,8 s nên không xét). E9–E12 chạy trước guard này; bằng chứng cho các lượt đó là lần quét `.host` ở trên.
+
+**Hạn chế của params guard ở E9–E12:** `.params` của các EXP này ghi `RATE=0` (biến môi trường `RATE` của `run_one.sh`; tốc độ thật 480 req/s là tham số theo cấu hình của `exp_cfg`), nên guard không bắt được việc đổi `E9_RATE_*` giữa chừng (các hàng ở tốc độ khác sẽ thành cấu hình mới, không bị trộn vào hàng cũ vì `exp_has_row` khớp theo `offered_rps`). Từ nay driver E9–E12 ghi thêm `RATE_<backend>=<tốc độ>` khi tạo `.params` và dừng nếu tốc độ khác; các file `.params` cũ không có khóa này, không được sửa và không được kiểm (driver in một dòng note). Mọi hàng E9–E12 đều có `offered_rps` = 480.
 
 ### E10: chi phí không lỗi (6 lượt mỗi ô = workload a và c × 3 rep; mọi lượt tps 480, `rejected_reads` = 0, không eviction)
 
@@ -485,12 +491,13 @@ Lệnh: `E9_RATE_RAFT=480 E9_RATE_BFT2=480 experiments/exp/e1{0,1,2}_*.sh` (N=4,
 | bft2 | certified | 112 | 519 | 110 | 491 | 1,6 | 7,9 |
 | bft2 | certified + sign-always | 109 | 558 | 106 | 424 | 1,7 | 9,2 |
 
-(ms, trung vị 3 rep; khoảng theo rep trong bảng tính tay, vd. raft certified read p50 87–108, bft2 certified write p99 371–872.)
+(ms, trung vị 3 rep; min–max theo rep trong `results/e1x/e10_latency.csv`, vd. raft certified read p50 87–108, bft2 certified write p99 371–872.)
 
 - Đọc certified chỉ đắt khi có ghi: ở workload a chờ height kế tiếp được attest (p50 93–112 ms, như E9 a1), ở workload c (chỉ đọc, không có block mới) 1,6 ms so với 1,3–1,4 ms đọc thường.
 - Ký mọi phản hồi (`sign-always`) không thêm chi phí tách được khỏi certified (chênh p50 −4…+8 ms, trong khoảng theo rep).
 - Đọc quorum (2 `Get` song song) thêm ~0,3–0,4 ms p50 và ~12–21 ms p99 so với đọc thường.
 - Write p50/p99 không tách được giữa các chế độ đọc (khoảng theo rep chồng nhau); bft2 certified-signall có 3 `cert_timeouts` ở 1 lượt.
+- Đuôi độ trễ E10 (lượt 60 s) không so trực tiếp được với lượt không lỗi của E9 (180 s, độ trễ xấu dần trong lượt, xem E9): cùng cấu hình certified, workload a, p99 gộp (cột `lat_p99_ms`, trung vị 3 rep) của E10 là 401 / 505 ms (raft / bft2), của E9 a1 là 1436 / 1965 ms. Chỉ p50 so được: 91 / 113 so với 82 / 99 ms.
 
 ### E11: truy vết 1 node lỗi (f = 1, node4; 3 lượt mỗi ô; không lượt race)
 
@@ -523,6 +530,7 @@ Lệnh: `E9_RATE_RAFT=480 E9_RATE_BFT2=480 experiments/exp/e1{0,1,2}_*.sh` (N=4,
 
 (wrong_gets / honest_evicted ghi "lượt root đúng / lượt root sai"; bằng chứng đầu tiên sau 0,21–0,33 s ở mọi lượt f+1.)
 
+- Cách đọc bảng `rq6_summary.csv` ở quorum f+1: `detected_runs` = 3 gồm cả lượt root sai thắng (khi đó người bị loại là node trung thực); loại đúng hay sai phải xem `evicted_all_runs` (mọi node lỗi bị loại) và `honest_evicted`.
 - Quorum f+1: kết quả do thứ tự block quyết định, đúng spec 3.1. 4/12 lượt root sai được xác nhận trước (raft 1/6, bft2 3/6): node 1 và 2 bị loại oan (`divergent_root`) sau 0,21–0,33 s, sau đó mọi đọc certified hoặc quorum đều nhận giá trị sai có chứng chỉ hợp lệ (~19,3k mỗi lượt). Các lượt còn lại loại đúng node3 + node4, 0 giá trị sai. Số lượt quá ít để so raft với bft2.
 - Quorum 2f+1: không phía nào đủ 3 chữ ký → không xác nhận, không loại ai. Đọc certified an toàn nhưng mất sẵn sàng sau lỗi (~27,5k đọc hết giờ, tps 320, như E9 F5-F4); đọc quorum (f+1 = 2 node) nhận ~9,7k giá trị sai (khi cả hai node được hỏi đều lỗi).
 - raft e12-q2f1-quorum r1 là race của việc tiêm lỗi (như E9 bft2 a1 certified r1): ở height 2992 chỉ node4 đã áp lỗi, node 1–3 xác nhận root đúng `8298a09c` (quorum 3) và node4 bị loại ở height 2996; `rq6.py` đánh dấu `injection_race` và bỏ khỏi tóm tắt.
