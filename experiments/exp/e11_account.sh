@@ -16,7 +16,8 @@
 #   cert-fo-sign  READ_MODE=certified FAILOVER=1 SIGN_READS=on-failure
 # One EXP per pair, <E11_PREFIX>-<fault>-<mode> (e11-F6-cert-fo-sign, ...);
 # this script runs itself once per pair (E11_PAIR, internal). Load: open loop
-# at exp_rate_for E11 <backend>; unset = closed loop. run_one.sh keeps the
+# at exp_rate_for E11 <backend>; unset = refused
+# unless E11_CLOSED_LOOP=1 (closed loop on purpose). run_one.sh keeps the
 # .evict / .certs / .diverged lines; experiments/plot/rq6.py reads them.
 #
 # Exit: the worst exit of the pairs (0, 4 = missing rows, 1 = aborted).
@@ -70,6 +71,8 @@ for b in $EXP_BACKEND_LIST; do
   r="$(exp_rate_for E11 "$b")"
   if [ -n "$r" ]; then
     exp_rate_ok "$r" && exp_rate_on "$r" || die "E11_RATE / E11_RATE_<BACKEND> for $b must be a positive number, got '$r'"
+  elif [ "${E11_CLOSED_LOOP:-0}" != 1 ]; then
+    die "no open-loop rate for $b: set E11_RATE_<BACKEND>, E11_RATE or E9_RATE_<BACKEND> / E9_RATE (480 on M3, NOTES), or E11_CLOSED_LOOP=1 for a closed loop on purpose"
   fi
 done
 

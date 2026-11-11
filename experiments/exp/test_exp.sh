@@ -435,7 +435,8 @@ eq "params: KAFKA_CPUS refused" "$RC" 1
 contains "params: KAFKA_CPUS message names the setting" "$OUT" "KAFKA_CPUS=0.5 (EXP started with 2)"
 contains "params: KAFKA_CPUS message names .params" "$OUT" "e1.params"
 for kv in KAFKA_MEM=768m TM_TIMEOUT_COMMIT=0s RATE=500 MAX_INFLIGHT=10 VERIFY_SIGS=all READ_MODE=verified ATTEST_EVERY=1; do
-  env EXP_ALLOW_COMMIT_CHANGE=1 "$kv" BACKENDS=raft REPS=2 drv e1_clients.sh --dry-run
+  # drv is a shell function (env cannot run it): set the variables in a subshell.
+  RC="$(export EXP_ALLOW_COMMIT_CHANGE=1 "$kv" BACKENDS=raft REPS=2; drv e1_clients.sh --dry-run; echo "$RC")"
   eq "params: $kv refused" "$RC" 1
 done
 # A .params file of phase 1 (without the new keys) accepts their defaults.
@@ -614,7 +615,7 @@ eq "e9: certified rows in e9-a1-certified" "$(rows e9-a1-certified)" 1
 
 # ---- phase 3 drivers: E10-E12 ----
 newtree e10
-OUT="$("$ROOT/experiments/exp/e10_readcost.sh" --dry-run 2>/dev/null)"
+OUT="$(E9_RATE=480 "$ROOT/experiments/exp/e10_readcost.sh" --dry-run 2>/dev/null)"
 eq "e10 --dry-run: 48 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 48
 eq "e10: 4 EXPs" "$(printf '%s\n' "$OUT" | grep -o 'EXP=[^ ]*' | sort -u | tr '\n' ' ')" "EXP=e10-certified EXP=e10-certified-signall EXP=e10-plain EXP=e10-quorum "
 eq "e10: workload a runs" "$(printf '%s\n' "$OUT" | grep -c ' WORKLOAD=a ')" 24
@@ -628,10 +629,24 @@ contains "e10: signall env" "$(grep e10-certified-signall "$ROOT/stub.log")" "RA
 contains "e10: quorum env" "$(grep e10-quorum "$ROOT/stub.log")" "READ_MODE=quorum ATTEST_EVERY=1"
 contains "e10: params record SIGN_READS" "$(cat "$ROOT/results/raw/e10-certified-signall.params")" "SIGN_READS=always"
 
+# No rate: E10-E12 refuse to run (a closed loop slipped through once when the
+# rate variables were lost), unless E1x_CLOSED_LOOP=1.
+newtree norate
+for d in e10_readcost e11_account e12_quorum; do
+  OUT="$(BACKENDS=raft REPS=1 EXTRA_REPS=0 "$ROOT/experiments/exp/$d.sh" --dry-run 2>&1)"
+  RC=$?
+  eq "$d without a rate: exit 1" "$RC" 1
+  contains "$d without a rate: message" "$OUT" "no open-loop rate for raft"
+done
+eq "no rate: nothing ran" "$(calls)" 0
+E10_CLOSED_LOOP=1 BACKENDS=raft REPS=1 EXTRA_REPS=0 E10_READS=plain E10_WORKLOADS=a drv e10_readcost.sh
+eq "E10_CLOSED_LOOP=1 runs" "$RC" 0
+contains "E10_CLOSED_LOOP=1: RATE=0" "$(cat "$ROOT/stub.log")" "RATE=0 "
+
 # Interleaved order (interleave.sh): rep is the outer loop across the EXPs,
 # and the EXP that starts a pass rotates.
 newtree e10order
-OUT="$("$ROOT/experiments/exp/e10_readcost.sh" --dry-run 2>/dev/null)"
+OUT="$(E9_RATE=480 "$ROOT/experiments/exp/e10_readcost.sh" --dry-run 2>/dev/null)"
 eq "e10 order: 48 runs still" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 48
 eq "e10 order: rep 1 runs come first" "$(printf '%s\n' "$OUT" | grep '^DRY_RUN: ' | head -n 16 | grep -c ' REP=1 ')" 16
 eq "e10 order: pass 1 starts with plain" "$(printf '%s\n' "$OUT" | grep '^DRY_RUN: ' | head -n 1 | grep -o 'EXP=[^ ]*')" "EXP=e10-plain"
@@ -646,15 +661,15 @@ STUB_RC=3 E10_RATE_RAFT=500 BACKENDS=raft REPS=1 EXTRA_REPS=0 E10_READS="plain q
 eq "e10 order: missing rows after the last pass: exit 4" "$RC" 4
 STUB_RC=1 E10_RATE_RAFT=500 BACKENDS=raft REPS=2 EXTRA_REPS=0 E10_READS="plain quorum" E10_WORKLOADS=c drv e10_readcost.sh
 eq "e10 order: a harness error stops at once" "$RC" 1
-OUT="$(EXP_ONLY_PASS=4 REPS=3 EXP=zz-only E10_MODE=plain ATTEST_EVERY=1 READ_MODE=plain SIGN_READS=off "$ROOT/experiments/exp/e10_readcost.sh" --dry-run 2>&1 || true)"
+OUT="$(E9_RATE=480 EXP_ONLY_PASS=4 REPS=3 EXP=zz-only E10_MODE=plain ATTEST_EVERY=1 READ_MODE=plain SIGN_READS=off "$ROOT/experiments/exp/e10_readcost.sh" --dry-run 2>&1 || true)"
 contains "EXP_ONLY_PASS beyond REPS refused" "$OUT" "EXP_ONLY_PASS=4: passes are 1..3"
 
 newtree e11
-OUT="$("$ROOT/experiments/exp/e11_account.sh" --dry-run 2>/dev/null)"
+OUT="$(E9_RATE=480 "$ROOT/experiments/exp/e11_account.sh" --dry-run 2>/dev/null)"
 eq "e11 --dry-run: 42 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 42
 eq "e11: 7 EXPs" "$(printf '%s\n' "$OUT" | grep -o 'EXP=[^ ]*' | sort -u | wc -l | tr -d ' ')" 7
 eq "e11: faults on node4 at 60" "$(printf '%s\n' "$OUT" | grep '^DRY_RUN: ' | grep -o 'FAULT=[^ ]*' | sort -u | tr '\n' ' ')" "FAULT=F4:node4@60 FAULT=F6:node4@60 FAULT=F6E:node4@60 "
-BACKENDS=bft2 REPS=1 EXTRA_REPS=0 E11_PAIRS="F6:cert-fo-sign F4:plain" drv e11_account.sh
+E11_CLOSED_LOOP=1 BACKENDS=bft2 REPS=1 EXTRA_REPS=0 E11_PAIRS="F6:cert-fo-sign F4:plain" drv e11_account.sh
 eq "e11 real run ok" "$RC" 0
 eq "e11: 2 runs" "$(calls)" 2
 contains "e11: cert-fo-sign env" "$(grep e11-F6-cert-fo-sign "$ROOT/stub.log")" "FAULT=F6:node4@60 REP=1 COMMIT_MODE=sync DURATION=180s RATE=0 VERIFY_SIGS=none READ_MODE=certified ATTEST_EVERY=1 ATTEST_QUORUM=auto FAILOVER=1 SIGN_READS=on-failure"
@@ -663,14 +678,14 @@ OUT="$(E11_PAIRS="F5:plain" "$ROOT/experiments/exp/e11_account.sh" --dry-run 2>&
 contains "e11: bad pair" "$OUT" "E11_PAIRS: fault must be F4, F6 or F6E"
 
 newtree e12
-OUT="$("$ROOT/experiments/exp/e12_quorum.sh" --dry-run 2>/dev/null)"
+OUT="$(E9_RATE=480 "$ROOT/experiments/exp/e12_quorum.sh" --dry-run 2>/dev/null)"
 eq "e12 --dry-run: 24 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 24
 eq "e12: 4 EXPs" "$(printf '%s\n' "$OUT" | grep -o 'EXP=[^ ]*' | sort -u | tr '\n' ' ')" "EXP=e12-q2f1-certified EXP=e12-q2f1-quorum EXP=e12-qf1-certified EXP=e12-qf1-quorum "
 eq "e12: F5-F4 on raft too" "$(printf '%s\n' "$OUT" | grep '^DRY_RUN: ' | grep -c 'BACKEND=raft .*FAULT=F5-F4:node4,node3@60')" 12
-OUT="$(NS="4 7" "$ROOT/experiments/exp/e12_quorum.sh" --dry-run 2>/dev/null)"
+OUT="$(E9_RATE=480 NS="4 7" "$ROOT/experiments/exp/e12_quorum.sh" --dry-run 2>/dev/null)"
 eq "e12 NS=4 7: 48 runs" "$(printf '%s\n' "$OUT" | grep -c '^DRY_RUN: ')" 48
 contains "e12 N=7 hits f+1=3 nodes" "$OUT" "N=7 F=2 CLIENTS=256 BLOCK_SIZE=100 WORKLOAD=a RTT_MS=0 FAULT=F5-F4:node7,node6,node5@60"
-BACKENDS=raft REPS=1 EXTRA_REPS=0 E12_QUORUMS="f+1" E12_READS="certified" drv e12_quorum.sh
+E12_CLOSED_LOOP=1 BACKENDS=raft REPS=1 EXTRA_REPS=0 E12_QUORUMS="f+1" E12_READS="certified" drv e12_quorum.sh
 eq "e12 real run ok" "$RC" 0
 contains "e12: env" "$(cat "$ROOT/stub.log")" "EXP=e12-qf1-certified BACKEND=raft N=4 F=1"
 contains "e12: quorum env" "$(cat "$ROOT/stub.log")" "READ_MODE=certified ATTEST_EVERY=1 ATTEST_QUORUM=f+1 FAILOVER=1 SIGN_READS=off"

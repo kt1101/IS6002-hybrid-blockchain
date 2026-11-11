@@ -13,7 +13,8 @@
 # E12_AT (60), REPS=3: 2 x 2 x 2 x 1 x 3 = 24 runs (48 with NS="4 7").
 # One EXP per (quorum, read), <E12_PREFIX>-q<f1|2f1>-<read> (e12-qf1-certified,
 # ...); this script runs itself once per pair (E12_PAIR, internal). Load:
-# open loop at exp_rate_for E12 <backend>; unset = closed loop.
+# open loop at exp_rate_for E12 <backend>; unset = refused
+# unless E12_CLOSED_LOOP=1 (closed loop on purpose).
 #
 # Exit: the worst exit of the pairs (0, 4 = missing rows, 1 = aborted).
 set -euo pipefail
@@ -71,6 +72,8 @@ for b in $EXP_BACKEND_LIST; do
   r="$(exp_rate_for E12 "$b")"
   if [ -n "$r" ]; then
     exp_rate_ok "$r" && exp_rate_on "$r" || die "E12_RATE / E12_RATE_<BACKEND> for $b must be a positive number, got '$r'"
+  elif [ "${E12_CLOSED_LOOP:-0}" != 1 ]; then
+    die "no open-loop rate for $b: set E12_RATE_<BACKEND>, E12_RATE or E9_RATE_<BACKEND> / E9_RATE (480 on M3, NOTES), or E12_CLOSED_LOOP=1 for a closed loop on purpose"
   fi
 done
 

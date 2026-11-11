@@ -16,7 +16,8 @@
 # One EXP per mode, <E10_PREFIX>-<mode> (e10-plain, ...), since the CSV has
 # no column for it; this script runs itself once per mode (E10_MODE,
 # internal). Load: open loop at exp_rate_for E10 <backend> (E10_RATE_<B>,
-# E10_RATE, else E9's); unset = closed loop.
+# E10_RATE, else E9's); unset = refused
+# unless E10_CLOSED_LOOP=1 (closed loop on purpose).
 #
 # Exit: the worst exit of the modes (0, 4 = missing rows, 1 = aborted).
 set -euo pipefail
@@ -59,6 +60,8 @@ for b in $EXP_BACKEND_LIST; do
   r="$(exp_rate_for E10 "$b")"
   if [ -n "$r" ]; then
     exp_rate_ok "$r" && exp_rate_on "$r" || die "E10_RATE / E10_RATE_<BACKEND> for $b must be a positive number, got '$r'"
+  elif [ "${E10_CLOSED_LOOP:-0}" != 1 ]; then
+    die "no open-loop rate for $b: set E10_RATE_<BACKEND>, E10_RATE or E9_RATE_<BACKEND> / E9_RATE (480 on M3, NOTES), or E10_CLOSED_LOOP=1 for a closed loop on purpose"
   fi
 done
 
