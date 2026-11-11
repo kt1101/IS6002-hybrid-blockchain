@@ -534,3 +534,40 @@ Lệnh: `E9_RATE_RAFT=480 E9_RATE_BFT2=480 experiments/exp/e1{0,1,2}_*.sh` (N=4,
 - Quorum f+1: kết quả do thứ tự block quyết định, đúng spec 3.1. 4/12 lượt root sai được xác nhận trước (raft 1/6, bft2 3/6): node 1 và 2 bị loại oan (`divergent_root`) sau 0,21–0,33 s, sau đó mọi đọc certified hoặc quorum đều nhận giá trị sai có chứng chỉ hợp lệ (~19,3k mỗi lượt). Các lượt còn lại loại đúng node3 + node4, 0 giá trị sai. Số lượt quá ít để so raft với bft2.
 - Quorum 2f+1: không phía nào đủ 3 chữ ký → không xác nhận, không loại ai. Đọc certified an toàn nhưng mất sẵn sàng sau lỗi (~27,5k đọc hết giờ, tps 320, như E9 F5-F4); đọc quorum (f+1 = 2 node) nhận ~9,7k giá trị sai (khi cả hai node được hỏi đều lỗi).
 - raft e12-q2f1-quorum r1 là race của việc tiêm lỗi (như E9 bft2 a1 certified r1): ở height 2992 chỉ node4 đã áp lỗi, node 1–3 xác nhận root đúng `8298a09c` (quorum 3) và node4 bị loại ở height 2996; `rq6.py` đánh dấu `injection_race` và bỏ khỏi tóm tắt.
+
+## Giai đoạn 2/3: E9b đối chứng độ trễ của attestation (2026-11-11/12)
+
+Lệnh: `E9_PREFIX=e9b E9_FAULTS=none REPS=5 E9_RATE_RAFT=480 E9_RATE_BFT2=480 experiments/exp/e9_attest.sh` (như E9 nhưng chỉ lượt không lỗi, 5 rep, thứ tự xen kẽ: mỗi pass chạy đủ 10 cấu hình, EXP đầu pass xoay vòng). Commit đo `e54bb11` (host guard có kiểm khoảng trống mẫu; `.params` có `RATE_raft=480`, `RATE_bft2=480`). 16:11–19:07 UTC, 50/50 hàng, `failures in this run: none`; host guard: 1 lượt bị loại (16:25 bft2 a1-plain r1, swap 119k trang; lần thử 2 qua), 0 lượt có khoảng trống mẫu. Nguồn điện: lúc bắt đầu chạy pin (80%); `pmset` ghi đã dùng AC lúc 17:00:55 UTC (pin 70%) và không ghi thời điểm cắm, nên pass 1 (16:11–16:45) và đầu pass 2 có thể đã chạy pin một phần hoặc toàn bộ. Phân tích: `experiments/plot/rq5.py results/raw/e9b-*.csv --raw-dir results/raw --out results/e9b` rồi `experiments/plot/e9b_paired.py results/e9b/rq5_runs.csv --raw-dir results/raw --out results/e9b` → `results/e9b/rq5_{runs,summary}.csv`, `e9b_runs.csv` (thêm queue/block mỗi lượt), `e9b_paired.csv` (hiệu theo pass).
+
+| backend | attest | đọc | write p50 | write mean | write p99 (min–max) | read p50 | read p99 | queue/block (min–max) |
+|---|---|---|---|---|---|---|---|---|
+| raft | 0 | plain | 80 | 97 | 721 (417–1657) | 1,1 | 43 | 2,4 (1,4–16,5) |
+| raft | 1 | plain | 88 | 99 | 609 (485–913) | 1,1 | 40 | 2,7 (1,4–3,4) |
+| raft | 1 | certified | 81 | 92 | 558 (343–693) | 86 | 516 | 2,6 (1,2–3,3) |
+| raft | 10 | plain | 81 | 92 | 543 (435–676) | 1,1 | 37 | 1,9 (1,7–2,6) |
+| raft | 10 | certified | 82 | 100 | 821 (462–1863) | 211 | 899 | 3,0 (2,3–10,2) |
+| bft2 | 0 | plain | 95 | 108 | 696 (519–885) | 1,2 | 45 | 1,0 (0,5–2,1) |
+| bft2 | 1 | plain | 100 | 114 | 725 (554–936) | 1,2 | 47 | 1,3 (0,5–1,9) |
+| bft2 | 1 | certified | 100 | 113 | 688 (630–848) | 105 | 680 | 1,1 (0,7–2,4) |
+| bft2 | 10 | plain | 97 | 114 | 766 (563–1159) | 1,2 | 45 | 0,6 (0,4–3,5) |
+| bft2 | 10 | certified | 98 | 112 | 678 (475–846) | 221 | 885 | 1,9 (0,9–2,8) |
+
+(ms; write/read: trung bình 5 rep như `rq5_summary.csv`; queue/block: trung vị 5 rep, mỗi rep trung bình 4 node, từ breakdown snapshot đầu/cuối cửa sổ.)
+
+Hiệu theo pass (cùng pass, cách nhau vài phút; `e9b_paired.csv`, trung vị của 5 hiệu và số pass có hiệu > 0):
+
+| backend | so sánh | write p50 | write mean | write p99 | queue/block |
+|---|---|---|---|---|---|
+| raft | a1-plain − a0 | +1,7 (4/5) | −0,8 (1/5) | +39 (3/5) | −0,2 (2/5) |
+| raft | a10-plain − a0 | −0,9 (1/5) | +0,5 (4/5) | +55 (3/5) | −0,3 (1/5) |
+| raft | a1-certified − a1-plain | −8,8 (2/5) | −11,4 (1/5) | +36 (3/5) | −0,2 (1/5) |
+| raft | a10-certified − a10-plain | −4,4 (2/5) | −2,1 (2/5) | +136 (4/5) | +1,3 (3/5) |
+| bft2 | a1-plain − a0 | +6,1 (4/5) | +11,2 (3/5) | −56 (2/5) | −0,3 (2/5) |
+| bft2 | a10-plain − a0 | +2,6 (3/5) | +2,9 (3/5) | −17 (2/5) | −0,4 (2/5) |
+| bft2 | a1-certified − a1-plain | +2,2 (3/5) | +1,4 (3/5) | −62 (2/5) | −0,2 (1/5) |
+| bft2 | a10-certified − a10-plain | +4,3 (3/5) | −3,3 (2/5) | −113 (2/5) | +0,5 (4/5) |
+
+- **Kết luận cho câu hỏi còn mở của E9:** ở 480 req/s, lượt 180 s, không tách được ảnh hưởng của attestation (K = 1 hay 10) lên độ trễ ghi, kể cả đuôi. Hiệu theo pass đổi dấu giữa các pass ở mọi cặp; độ lớn (write p99 ±40–140 ms, p50 ≤ ~10 ms) nhỏ hơn nhiều so với chênh giữa các rep của chính một cấu hình (vd. raft a0 p99 417–1657 ms, a10-certified 462–1863 ms). Không cặp nào (độ trễ ghi hay queue/block) có hiệu cùng dấu ở cả 5 pass.
+- **Không lặp lại được** mức tăng queue/block của E9 (raft 6,6 → 11,0 ms khi bật attestation; certified 14,6 / 23,6 ms): ở E9b queue/block của raft là 1,9–3,0 ms ở mọi cấu hình, của bft2 0,6–1,9 ms. Chỉ còn dấu hiệu nhỏ ở attest 10 + certified (raft +1,3 ms 3/5, bft2 +0,5 ms 4/5), phù hợp với việc proof chạy trong apply loop nhưng không đủ để làm đuôi ghi xấu đi đo được.
+- **Lặp lại được:** chi phí đọc certified (read p50 86 / 105 ms ở attest 1, 211 / 221 ms ở attest 10 cho raft / bft2, so với 1,1–1,2 ms đọc thường; read p99 0,5–0,9 s) và write p50 như nhau giữa các mức (raft 80–88, bft2 95–100 ms).
+- **E9 khác E9b:** cùng cấu hình, write p99 của E9 là 1,2–2,3 s, E9b 0,5–0,8 s; queue/block của E9 gấp ~3–8 lần. Độ trễ vẫn xấu dần trong lượt nhưng ít hơn (`.wtimeline` sd ở 1/3 cuối: E9b 16–96, E9 49–106; số giây < 120 Set ở 3 phần ba: E9b 2 / 19 / 41 trên 50 lượt, E9 3 / 34 / 74 trên 30 lượt). Một lượt E9b giống E9: raft a0 rep 1 (lượt đầu tiên của sweep, lúc máy còn chạy pin, trong cùng pass với lượt bị loại vì swap) có p99 1657 ms và queue/block 16,5 ms. Vậy đuôi ghi của E9 phụ thuộc trạng thái host (bộ nhớ, nguồn điện) nhiều hơn phụ thuộc attestation; nguyên nhân cụ thể chưa xác định. Hệ quả: các con số đuôi độ trễ ghi tuyệt đối của E9 và E11–E12 chỉ nên đọc trong cùng một sweep; so sánh có ý nghĩa là so trong cùng pass.
