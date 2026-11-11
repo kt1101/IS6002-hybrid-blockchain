@@ -99,13 +99,22 @@
     host.appendChild(source(t.source + ' · mục “' + t.section + '” · commit ' + t.commit));
   }
 
+  // data-where="col=val;col=val" -> row filter (all must match).
+  function whereFilter(host) {
+    var w = host.getAttribute('data-where');
+    if (!w) return function () { return true; };
+    var conds = w.split(';').map(function (c) { return c.split('='); });
+    return function (r) { return conds.every(function (c) { return r[c[0]] === c[1]; }); };
+  }
+
   // Rows of a CSV dataset as a table: data-csv="key", data-cols="a,b,c",
-  // data-prefix filters the "exp" column (e.g. "e12-").
+  // data-prefix filters the "exp" column (e.g. "e12-"), data-where as above.
   function csvTable(host) {
     var ds = D.csv[host.getAttribute('data-csv')];
     var cols = host.getAttribute('data-cols').split(',');
     var prefix = host.getAttribute('data-prefix') || '';
-    var rows = ds.rows.filter(function (r) { return !prefix || (r.exp || '').indexOf(prefix) === 0; });
+    var keep = whereFilter(host);
+    var rows = ds.rows.filter(function (r) { return keep(r) && (!prefix || (r.exp || '').indexOf(prefix) === 0); });
     var wrap = el('div', { 'class': 'table-wrap' });
     var table = el('table', { 'class': 'data' });
     var tr = el('tr');
@@ -120,7 +129,48 @@
     table.appendChild(tb);
     wrap.appendChild(table);
     host.appendChild(wrap);
-    host.appendChild(source(ds.source + ' · commit ' + ds.commit + (prefix ? ' · các hàng exp = ' + prefix + '*' : '')));
+    var w = host.getAttribute('data-where');
+    host.appendChild(source(ds.source + ' · commit ' + ds.commit + (prefix ? ' · các hàng exp = ' + prefix + '*' : '') + (w ? ' · các hàng ' + w.replace(/;/g, ', ') : '')));
+  }
+
+  // Horizontal bars from a CSV dataset, with the min–max range of the reps:
+  // data-csv-chart="key", data-where (rows), data-label="col,col" (bar
+  // label), data-y (bar), data-lo / data-hi (range), data-unit.
+  function chartCsvBars(host) {
+    var ds = D.csv[host.getAttribute('data-csv-chart')];
+    var rows = ds.rows.filter(whereFilter(host));
+    var lab = host.getAttribute('data-label').split(',');
+    var y = host.getAttribute('data-y'), lo = host.getAttribute('data-lo'), hi = host.getAttribute('data-hi');
+    var unit = host.getAttribute('data-unit') || '';
+    var vmax = Math.max.apply(null, rows.map(function (r) { return num(hi ? r[hi] : r[y]); }));
+    var W = 760, rowH = 26, L = 230, R = 90, T = 8;
+    var H = T + rows.length * rowH + 30;
+    var xt = ticks(vmax, 5);
+    var xmax = xt[xt.length - 1];
+    function X(v) { return L + (W - L - R) * v / xmax; }
+    var s = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'class': 'chart', 'aria-label': y + ' theo ' + lab.join(', ') });
+    var g = s.appendChild(svg('g', { 'class': 'grid' }));
+    xt.forEach(function (v) {
+      g.appendChild(svg('line', { x1: X(v), x2: X(v), y1: T, y2: H - 30 }));
+      s.appendChild(svg('text', { x: X(v), y: H - 12, 'text-anchor': 'middle' }, String(v)));
+    });
+    rows.forEach(function (r, j) {
+      var top = T + j * rowH, mid = top + rowH / 2;
+      var name = lab.map(function (c) { return r[c]; }).join(' · ');
+      s.appendChild(svg('text', { x: L - 10, y: mid + 4, 'text-anchor': 'end' }, name));
+      var rect = svg('rect', { x: L, y: top + 5, width: Math.max(1, X(num(r[y])) - L), height: rowH - 10, rx: 3, fill: COLORS[r.backend] || 'var(--accent)' });
+      rect.appendChild(svg('title', null, name + ': ' + y + ' = ' + r[y] + (lo ? ' (' + lo + ' ' + r[lo] + ', ' + hi + ' ' + r[hi] + ')' : '') + ' ' + unit + ', ' + r.reps + ' rep'));
+      s.appendChild(rect);
+      var end = X(num(r[y]));
+      if (lo && hi) {
+        s.appendChild(svg('line', { x1: X(num(r[lo])), x2: X(num(r[hi])), y1: mid, y2: mid, stroke: 'var(--ink)', 'stroke-width': 1.5 }));
+        [lo, hi].forEach(function (k) { s.appendChild(svg('line', { x1: X(num(r[k])), x2: X(num(r[k])), y1: mid - 5, y2: mid + 5, stroke: 'var(--ink)', 'stroke-width': 1.5 })); });
+        end = Math.max(end, X(num(r[hi])));
+      }
+      s.appendChild(svg('text', { x: end + 6, y: mid + 4, 'class': 'val' }, r[y] + (unit ? ' ' + unit : '')));
+    });
+    host.appendChild(s);
+    host.appendChild(source(ds.source + ' (cột ' + y + (lo ? ', vạch: ' + lo + '–' + hi : '') + '; ' + host.getAttribute('data-where').replace(/;/g, ', ') + ') · commit ' + ds.commit));
   }
 
   // ---- charts ----
@@ -247,6 +297,7 @@
     document.querySelectorAll('[data-csv]').forEach(csvTable);
     document.querySelectorAll('[data-chart="e7"]').forEach(chartE7);
     document.querySelectorAll('[data-notes-chart]').forEach(chartBars);
+    document.querySelectorAll('[data-csv-chart]').forEach(chartCsvBars);
     csvValues();
   }
 

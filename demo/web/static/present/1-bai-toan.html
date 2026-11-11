@@ -68,7 +68,7 @@
       <li>Nguyên nhân chính: kafka-orig trả lời ngay khi tx vào Kafka (async), còn tm-orig chờ khối chứa tx (sync). So sánh trong bài gốc lẫn ngữ nghĩa trả lời với chi phí đồng thuận.</li>
       <li>Ở chế độ sync với bộ hẹn giờ flush 1 s, kafka, raft, bft2 trùng nhau (c256: 478–488), vì thông lượng bị bộ hẹn giờ chặn. Vì vậy giai đoạn 2 chuyển sang flush 100 ms và tải vòng hở.</li>
     </ul>
-    <p class="src">experiments/NOTES.md · mục “Kết quả P0” và “Kết quả chính (tps trung bình, dữ liệu cuối)” · commit 446b625</p>
+    <p class="src">experiments/NOTES.md · mục “Kết quả P0” và “Kết quả chính (tps trung bình, dữ liệu cuối)” · commit e54bb11</p>
   </section>
   <section class="card">
     <h2>Phần cứng hạn chế</h2>
@@ -78,7 +78,7 @@
       <li>N=4, 256 client, block 100, flush 100 ms, workload A; backend raft (CFT) và bft2 (BFT) cho E7, E9–E12.</li>
       <li>Có host guard: lượt nào máy bị swap hoặc CPU ngoài Docker cao thì bị loại và chạy lại.</li>
     </ul>
-    <p class="src">experiments/NOTES.md · mục “Cấu hình máy”, “Giai đoạn 2: chạy trên M3”, “Giai đoạn 3: E10–E12 trên M3” · commit 446b625</p>
+    <p class="src">experiments/NOTES.md · mục “Cấu hình máy”, “Giai đoạn 2: chạy trên M3”, “Giai đoạn 3: E10–E12 trên M3” · commit e54bb11</p>
   </section>
 </div>
 
@@ -99,7 +99,7 @@
 </section>
 
 <footer class="foot">
-  <span>Nguồn: <code>README.md</code> (bài gốc), <code>docs/superpowers/specs/</code> (câu hỏi nghiên cứu), <code>experiments/NOTES.md</code> @ <span class="mono" data-commit>446b625</span></span>
+  <span>Nguồn: <code>README.md</code> (bài gốc), <code>docs/superpowers/specs/</code> (câu hỏi nghiên cứu), <code>experiments/NOTES.md</code> @ <span class="mono" data-commit>e54bb11</span></span>
   <a href="2-kien-truc.html">Kiến trúc →</a>
 </footer>
 
