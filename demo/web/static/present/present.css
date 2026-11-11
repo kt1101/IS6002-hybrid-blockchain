@@ -1,0 +1,115 @@
+/* Presentation pages (demo/web/static/present/). Builds on ../css/app.css:
+   same fonts, colours, header and cards; adds reading width, tables,
+   charts and the page footer. */
+
+:root {
+  --raft: #0F766E;
+  --bft2: #7C3AED;
+  --kafka: #1D4ED8;
+  --tendermint: #B45309;
+}
+
+.present .page { max-width: 1280px; gap: 22px; }
+.present .brand h1 { font-size: 26px; }
+
+.deck-nav { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.deck-nav a, .deck-nav span {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px;
+  border-radius: 10px; font-weight: 600; font-size: 15px; text-decoration: none;
+}
+.deck-nav a { color: var(--accent-ink); background: var(--accent-bg); }
+.deck-nav a:hover { background: #DCE3F6; }
+.deck-nav .pos { color: var(--muted); font-weight: 500; }
+.deck-nav .off { color: var(--down); background: var(--down-bg); }
+
+.toc { display: flex; flex-wrap: wrap; gap: 6px; }
+.toc a {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 12px 4px 6px;
+  border-radius: 10px; color: var(--ink-2); text-decoration: none; font-size: 15px; font-weight: 500;
+  background: var(--card); border: 1px solid var(--line);
+}
+.toc a .num {
+  display: inline-flex; width: 26px; height: 26px; border-radius: 50%; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 700; background: #ECEDEF; color: var(--muted);
+}
+.toc a[aria-current="page"] { background: var(--accent-bg); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+.toc a[aria-current="page"] .num { background: var(--accent); color: #FFFFFF; }
+
+.lead { font-size: 19px; line-height: 1.55; color: var(--ink-2); margin: 0; max-width: 72ch; }
+.card h2 { font-size: 21px; }
+.card h3 { margin: 6px 0 0; font-size: 17px; font-weight: 600; color: var(--ink-2); }
+.card p, .card li { font-size: 16px; line-height: 1.55; color: var(--ink-2); }
+.card p { margin: 0; max-width: 80ch; }
+.card ul, .card ol { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; }
+code { font-family: var(--mono); font-size: 0.92em; background: #F1F2F4; border-radius: 5px; padding: 1px 5px; }
+
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+@media (max-width: 980px) { .grid2, .grid3 { grid-template-columns: minmax(0, 1fr); } }
+
+.kpi { display: flex; flex-direction: column; gap: 4px; }
+.kpi .v { font: 700 30px var(--sans); color: var(--ink); letter-spacing: -0.01em; }
+.kpi .l { font-size: 15px; color: var(--muted); line-height: 1.4; }
+
+.callout { border-left: 4px solid var(--accent); background: var(--accent-bg); color: var(--accent-ink); border-radius: 10px; padding: 12px 16px; }
+.callout.warn { border-color: var(--div); background: var(--div-bg); color: var(--div-ink); }
+.callout.ok { border-color: var(--ok); background: var(--ok-bg); color: var(--ok-ink); }
+.callout p, .callout li { color: inherit; }
+
+.table-wrap { overflow-x: auto; }
+table.data { border-collapse: collapse; width: 100%; font-size: 15px; }
+table.data th, table.data td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+table.data th { font-weight: 600; color: var(--ink-2); background: #F7F7F5; border-bottom: 1px solid var(--line); }
+table.data td.n { font-family: var(--mono); font-size: 14px; white-space: nowrap; }
+table.data tr:hover td { background: #FAFAF8; }
+table.data .yes { color: var(--ok-ink); font-weight: 600; }
+table.data .no { color: var(--div-ink); font-weight: 600; }
+
+.src { font-size: 13px; color: var(--muted); font-family: var(--mono); margin: 0; overflow-wrap: anywhere; }
+.src::before { content: "Nguồn: "; font-family: var(--sans); font-weight: 600; }
+
+figure.chart { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+figure.chart svg { width: 100%; height: auto; display: block; }
+figure.chart figcaption { font-size: 15px; color: var(--ink-2); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 14px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+.chart text { font-family: var(--sans); fill: var(--muted); font-size: 12px; }
+.chart .axis line, .chart .axis path { stroke: var(--line-strong); }
+.chart .grid line { stroke: var(--line-soft); }
+.chart .val { fill: var(--ink-2); font-size: 12px; font-family: var(--mono); }
+
+.diagram { width: 100%; height: auto; }
+.diagram .box { fill: var(--card); stroke: var(--line-strong); stroke-width: 1.5; }
+.diagram .box.core { fill: #F3F6FD; stroke: var(--accent); }
+.diagram .box.cons { fill: #F4F1FD; stroke: var(--bft2); }
+.diagram .box.client { fill: #EFF7F5; stroke: var(--raft); }
+.diagram .box.new { fill: var(--ok-bg); stroke: var(--ok); }
+.diagram .group { fill: none; stroke: var(--line-strong); stroke-dasharray: 5 4; }
+.diagram text { font-family: var(--sans); font-size: 14px; fill: var(--ink); }
+.diagram text.t { font-weight: 600; font-size: 15px; }
+.diagram text.s { font-size: 12.5px; fill: var(--muted); }
+.diagram text.m { font-family: var(--mono); font-size: 12px; fill: var(--ink-2); }
+.diagram .arr { stroke: var(--ink-2); stroke-width: 1.6; fill: none; marker-end: url(#ah); }
+.diagram .arr.read { stroke: var(--raft); marker-end: url(#ahr); }
+.diagram .arr.ev { stroke: var(--div); stroke-dasharray: 6 4; marker-end: url(#ahe); }
+
+.steps { counter-reset: s; list-style: none; padding: 0 !important; }
+.steps > li { counter-increment: s; position: relative; padding-left: 40px !important; }
+.steps > li::before {
+  content: counter(s); position: absolute; left: 0; top: 0; width: 28px; height: 28px; border-radius: 50%;
+  background: var(--accent); color: #FFFFFF; font-weight: 700; font-size: 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.say { font-style: italic; color: var(--accent-ink) !important; }
+
+.foot { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 14px; font-size: 14px; color: var(--muted); }
+.foot a { color: var(--accent-ink); font-weight: 600; }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 13px; font-weight: 600; background: #ECEDEF; color: var(--ink-2); }
+.pill.raft { background: #E2F2EF; color: var(--raft); }
+.pill.bft2 { background: #EFEAFB; color: var(--bft2); }
+
+@media print {
+  .deck-nav, .pages { display: none !important; }
+  .card { break-inside: avoid; }
+}

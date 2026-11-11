@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1 · Bài toán và bài gốc · Veritas</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="present.css">
+</head>
+<body class="present">
+<div class="page">
+
+<header class="top">
+  <div class="brand">
+    <h1>1 · Bài toán và bài gốc</h1>
+    <span class="subtitle">Hybrid blockchain database là gì, bài gốc làm gì, bản tái hiện có gì mới</span>
+  </div>
+  <nav class="pages" aria-label="Trang">
+    <a href="../">Live demo</a>
+    <a href="../overview">Results overview</a>
+    <a href="index.html" aria-current="page">Trình bày</a>
+  </nav>
+  <div class="deck-nav" id="deck-nav"></div>
+</header>
+<nav class="toc" id="toc" aria-label="Các phần trình bày"></nav>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Hybrid blockchain database</h2>
+    <p>Nhiều bên không tin nhau cùng giữ một cơ sở dữ liệu. Mỗi bên chạy một node gồm một kho key-value nhanh (Redis) và một sổ cái kiểm chứng được (Sparse Merkle Tree, SMT). Một lớp đồng thuận xếp mọi giao dịch ghi thành một dãy block duy nhất, mọi node áp dụng cùng dãy đó nên có cùng trạng thái và cùng <strong>root digest</strong> sau mỗi block.</p>
+    <p>Đọc đi thẳng vào kho của một node (nhanh, không qua đồng thuận). Câu hỏi của đồ án: khi một node sai hoặc nói dối, client và các node còn lại biết được bằng cách nào, nhanh tới đâu, và phải trả giá bao nhiêu.</p>
+  </section>
+  <section class="card">
+    <h2>Veritas trong bài gốc</h2>
+    <p>Ge, Loghin, Wang, Ruan, Ooi, <em>Hybrid Blockchain Database Systems: Design and Performance</em>, PVLDB 15(5), 2022.</p>
+    <ul>
+      <li>So bốn hệ: Veritas (Kafka), Veritas (Tendermint), BlockchainDB, BigchainDB (kèm BigchainDB Parallel Validation).</li>
+      <li>Chỉ đo hiệu năng: số client, số node, phân phối khóa, workload YCSB A/B/C, block size, kích thước bản ghi, thời gian xử lý, mạng, CSDL nền.</li>
+      <li>Kết luận chính: giao thức đồng thuận là nút cổ chai của hệ hybrid.</li>
+      <li>Không có thí nghiệm lỗi hay node Byzantine; <code>Verify</code> của Veritas (Tendermint) chưa được cài.</li>
+    </ul>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Bản tái hiện này có gì mới</h2>
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th scope="col">Khía cạnh</th><th scope="col">Bài gốc</th><th scope="col">Đồ án</th></tr></thead>
+      <tbody>
+        <tr><td>Đồng thuận</td><td>Kafka và Tendermint, hai mã nguồn server khác nhau (bản Tendermint gửi mỗi Set thành một tx)</td><td>Một lõi <code>veritas/core</code> sau interface <code>consensus.Consensus</code>; 4 backend: <span class="pill">kafka</span> approve-all, <span class="pill raft">raft</span>, <span class="pill">tendermint</span> theo block, <span class="pill bft2">bft2</span> (HotStuff, <code>relab/hotstuff</code>). Chỉ tầng đồng thuận thay đổi.</td></tr>
+        <tr><td>Cách tải</td><td>Vòng kín, thông lượng phụ thuộc bộ hẹn giờ gom block và cách trả lời client (async ở Kafka, sync ở Tendermint)</td><td>Thêm tải <strong>vòng hở</strong> (<code>--rate</code>): độ trễ tính từ thời điểm lên lịch; tìm điểm bão hòa (E7) rồi chạy E9–E12 ở 480 req/s</td></tr>
+        <tr><td>Ghi</td><td>Không ký</td><td>Set ký Ed25519 (<code>--verify-sigs=none|ingress|all</code>)</td></tr>
+        <tr><td>Đọc</td><td>Tin node được hỏi</td><td>Ba chế độ: <code>plain</code>, <code>quorum</code> (so f+1 node), <code>certified</code> (proof Merkle + chứng chỉ quorum của root)</td></tr>
+        <tr><td>Sổ cái</td><td>Root digest không ai xác nhận</td><td><strong>Attestation root</strong> theo height đi qua đồng thuận; <code>Certifier</code> xác nhận khi đủ quorum; node lệch tự chuyển <code>diverged</code></td></tr>
+        <tr><td>Lỗi</td><td>Không đo</td><td>F1–F5 (giai đoạn 1), F6 / F6E (nói dối khi đọc); bằng chứng, loại node <code>divergent_root</code> / <code>bad_read</code>, client failover</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Phát hiện của giai đoạn 1 về bài gốc</h2>
+    <ul>
+      <li>kafka-orig cao hơn tm-orig khoảng <strong>40 lần</strong> tại N=4, c256 (12.790 / 322,5), lớn hơn mức ~10 lần dự kiến.</li>
+      <li>Nguyên nhân chính: kafka-orig trả lời ngay khi tx vào Kafka (async), còn tm-orig chờ khối chứa tx (sync). So sánh trong bài gốc lẫn ngữ nghĩa trả lời với chi phí đồng thuận.</li>
+      <li>Ở chế độ sync với bộ hẹn giờ flush 1 s, kafka, raft, bft2 trùng nhau (c256: 478–488), vì thông lượng bị bộ hẹn giờ chặn. Vì vậy giai đoạn 2 chuyển sang flush 100 ms và tải vòng hở.</li>
+    </ul>
+    <p class="src">experiments/NOTES.md · mục “Kết quả P0” và “Kết quả chính (tps trung bình, dữ liệu cuối)” · commit 446b625</p>
+  </section>
+  <section class="card">
+    <h2>Phần cứng hạn chế</h2>
+    <ul>
+      <li>MacBook M3 Pro (arm64), 18 GB RAM. Mọi node là một container Docker trên cùng máy.</li>
+      <li>Docker VM: 11 CPU, 7,65 GiB. Với <code>MEM=1g</code> mỗi node, N=7 không vừa VM nên <strong>giai đoạn 3 chỉ chạy N=4</strong> (f = 1).</li>
+      <li>N=4, 256 client, block 100, flush 100 ms, workload A; backend raft (CFT) và bft2 (BFT) cho E7, E9–E12.</li>
+      <li>Có host guard: lượt nào máy bị swap hoặc CPU ngoài Docker cao thì bị loại và chạy lại.</li>
+    </ul>
+    <p class="src">experiments/NOTES.md · mục “Cấu hình máy”, “Giai đoạn 2: chạy trên M3”, “Giai đoạn 3: E10–E12 trên M3” · commit 446b625</p>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Câu hỏi nghiên cứu</h2>
+  <div class="grid2">
+    <ul>
+      <li><strong>RQ1/RQ2:</strong> HotStuff so với Tendermint, Raft so với Kafka approve-all, về thông lượng, độ trễ, khả năng mở rộng (E1–E5, E7).</li>
+      <li><strong>RQ3:</strong> mất bao nhiêu hiệu năng khi có node lỗi, auditor phát hiện nhanh tới đâu (E6).</li>
+      <li><strong>RQ4:</strong> chi phí của đọc kiểm chứng và chữ ký thật (E8: chưa đo trên M3).</li>
+    </ul>
+    <ul>
+      <li><strong>RQ5:</strong> attestation root rút ngắn thời gian phát hiện và số đọc sai được chấp nhận bao nhiêu (E9).</li>
+      <li><strong>RQ6:</strong> truy vết trong giao thức chỉ ra và loại node lỗi nhanh tới đâu dưới F4, F6 (E10, E11).</li>
+      <li><strong>RQ7:</strong> với f+1 node thông đồng, quorum f+1 và 2f+1 đánh đổi an toàn và sẵn sàng ra sao (E12).</li>
+    </ul>
+  </div>
+</section>
+
+<footer class="foot">
+  <span>Nguồn: <code>README.md</code> (bài gốc), <code>docs/superpowers/specs/</code> (câu hỏi nghiên cứu), <code>experiments/NOTES.md</code> @ <span class="mono" data-commit>446b625</span></span>
+  <a href="2-kien-truc.html">Kiến trúc →</a>
+</footer>
+
+</div>
+<script src="data.js"></script>
+<script src="present.js"></script>
+</body>
+</html>

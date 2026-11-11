@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5 · Giới hạn và việc còn mở · Veritas</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="present.css">
+</head>
+<body class="present">
+<div class="page">
+
+<header class="top">
+  <div class="brand">
+    <h1>5 · Giới hạn và việc còn mở</h1>
+    <span class="subtitle">Những gì kết quả chưa chứng minh, và phần chưa đo</span>
+  </div>
+  <nav class="pages" aria-label="Trang">
+    <a href="../">Live demo</a>
+    <a href="../overview">Results overview</a>
+    <a href="index.html" aria-current="page">Trình bày</a>
+  </nav>
+  <div class="deck-nav" id="deck-nav"></div>
+</header>
+<nav class="toc" id="toc" aria-label="Các phần trình bày"></nav>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Giới hạn của cơ chế</h2>
+    <ul>
+      <li><strong>Quorum f+1 có thể xác nhận root sai.</strong> Với f+1 node thông đồng, kết quả do thứ tự block quyết định: 4/12 lượt E12 root sai được xác nhận trước, node 1 và 2 bị loại oan và client nhận ~19,3k giá trị sai có chứng chỉ hợp lệ mỗi lượt.</li>
+      <li><strong>Quorum 2f+1 an toàn nhưng mất sẵn sàng đọc</strong> khi có f+1 node lỗi: không root nào được xác nhận, ~27,5k đọc certified hết giờ, tps 320 (E12).</li>
+      <li><strong>F6E không để lại bằng chứng</strong> (trừ khi ký mọi phản hồi): client tự tránh node lỗi, nhưng node đó không bị loại (E11).</li>
+      <li><strong>Quorum không giảm sau khi loại node.</strong> N=4, quorum 3, loại node4 thì node 1–3 đều phải ký mọi height: mỗi lượt E11 có 350–465 đọc certified hết giờ chờ chứng chỉ. Thêm một node chậm là đọc certified dừng; chưa có cấu hình đo trường hợp này.</li>
+      <li>Loại node chỉ có tác dụng ở tầng đọc và attestation; node bị loại vẫn bỏ phiếu và đề xuất block.</li>
+      <li>Bằng chứng đọc chỉ kiểm được trong cửa sổ 1024 height đã xác nhận. Đọc certified chứng minh giá trị khớp một height đã xác nhận, không chứng minh đó là giá trị mới nhất.</li>
+      <li>Khóa sinh từ seed chung: đủ để đo chi phí, không phải quản lý khóa thật. Client, TSO, broker Kafka được coi là trung thực; không thử equivocation.</li>
+    </ul>
+  </section>
+  <section class="card">
+    <h2>Giới hạn của phép đo</h2>
+    <ul>
+      <li><strong>Thời lượng khác nhau.</strong> E10 chạy 60 s không lỗi, còn E9, E11, E12 chạy 180 s. Ở lượt 180 s độ trễ xấu dần trong lượt (write p99 đã 1–2,7 s), nên đuôi độ trễ của E10 không so trực tiếp với E9/E11/E12.</li>
+      <li><strong>Số lượt ít:</strong> 3 rep mỗi ô; ở E12 số lượt quá ít để so raft với bft2. Hai lượt bị bỏ khỏi tóm tắt vì race khi tiêm lỗi (E9 bft2 a1 certified r1, E12 raft q2f1 quorum r1).</li>
+      <li><strong>480 req/s nằm dưới điểm bão hòa:</strong> E9–E12 đo chi phí độ trễ, không đo mất thông lượng.</li>
+      <li><strong>Thứ tự chạy:</strong> E9 chạy a0 → a1 → a10 nên mean/p99 của ghi còn lẫn với thứ tự; E10–E12 đã chạy xen kẽ theo rep.</li>
+      <li><strong>Phiên bản:</strong> raft (TSO) có abort, bft2 (phiên bản theo thứ tự block) không bao giờ abort: biến gây nhiễu đã biết.</li>
+      <li><strong>Một máy:</strong> M3 Pro, Docker VM 11 CPU / 7,65 GiB, N=4. N=7 cần Docker VM ≥ 10 GiB. Host guard loại 5 lượt E10–E12 (swap, CPU ngoài Docker); một lượt E12 chạy lại vì Mac ngủ giữa lượt.</li>
+    </ul>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Việc còn mở</h2>
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th scope="col">Việc</th><th scope="col">Mục đích</th><th scope="col">Trạng thái</th></tr></thead>
+      <tbody>
+        <tr><td>E9b</td><td>Chỉ lượt không lỗi, xen kẽ, 5 rep: tách ảnh hưởng của attestation lên đường ghi khỏi thứ tự chạy</td><td class="no">chưa đo</td></tr>
+        <tr><td>E13</td><td>Kafka approve theo quorum (<code>--kafka-quorum</code> {all, 2f+1}) dưới F1, F2</td><td class="no">chưa đo</td></tr>
+        <tr><td>E8</td><td>Chi phí chữ ký Set (<code>--verify-sigs</code> none / ingress / all) × đọc plain / verified</td><td class="no">chưa đo trên M3</td></tr>
+        <tr><td>E7f</td><td>E7 với tài nguyên cân bằng (broker Kafka 0,5 CPU, tendermint <code>timeout-commit</code> 100 ms / 0 s)</td><td class="no">chưa đo</td></tr>
+        <tr><td>N=7</td><td>F5-F4 và E10–E12 với f = 2</td><td class="no">chưa đo (Docker VM nhỏ)</td></tr>
+        <tr><td>Hạ quorum sau khi loại</td><td>q − e khi e node bị loại đều chắc chắn lỗi; cần mọi node và client đổi ở cùng vị trí block</td><td class="no">chưa làm</td></tr>
+        <tr><td>Demo so sánh trên UI</td><td>Hai cụm sim chạy song song: baseline (giai đoạn 1) | attestation + certified</td><td class="no">chưa làm</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src">experiments/NOTES.md (mục E9, E10–E12, Sự cố) · docs/superpowers/specs/2026-11-09-phase3-accountability-design.md mục 3.1–3.3, 11 · commit 446b625</p>
+</section>
+
+<footer class="foot">
+  <span>Nguồn: <code>experiments/NOTES.md</code>, spec giai đoạn 3 @ <span class="mono" data-commit>446b625</span></span>
+  <a href="6-kich-ban.html">Kịch bản →</a>
+</footer>
+
+</div>
+<script src="data.js"></script>
+<script src="present.js"></script>
+</body>
+</html>

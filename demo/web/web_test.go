@@ -59,6 +59,61 @@ func TestIndexAssetsExist(t *testing.T) {
 	}
 }
 
+// presentPages are the presentation pages (static/present/), in deck order.
+var presentPages = []string{
+	"index.html", "1-bai-toan.html", "2-kien-truc.html", "3-co-che.html",
+	"4-ket-qua.html", "5-gioi-han.html", "6-kich-ban.html",
+}
+
+// Every presentation page is served as HTML, is in Vietnamese, and loads
+// the shared stylesheet plus its own CSS, data and script, all embedded.
+func TestPresentPagesServed(t *testing.T) {
+	h := Handler()
+	for _, p := range presentPages {
+		path := "/present/" + p
+		res, body := get(t, h, path)
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200", path, res.StatusCode)
+			continue
+		}
+		if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+			t.Errorf("GET %s Content-Type = %q, want text/html", path, ct)
+		}
+		if !strings.Contains(body, `<html lang="vi">`) {
+			t.Errorf("GET %s is not marked lang=vi", path)
+		}
+		for _, ref := range []string{`href="../css/app.css"`, `href="present.css"`, `src="data.js"`, `src="present.js"`, `href="../"`, `href="../overview"`} {
+			if !strings.Contains(body, ref) {
+				t.Errorf("%s does not reference %s", path, ref)
+			}
+		}
+	}
+	for _, path := range []string{"/present/present.css", "/present/present.js", "/present/data.js"} {
+		if res, _ := get(t, h, path); res.StatusCode != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200", path, res.StatusCode)
+		}
+	}
+	// The directory URL serves the table of contents.
+	res, body := get(t, h, "/present/")
+	if res.StatusCode != http.StatusOK || !strings.Contains(body, "Trình bày đồ án") {
+		t.Errorf("GET /present/ = %d, want 200 with the table of contents", res.StatusCode)
+	}
+	// data.js is generated from the results commit; the pages read it.
+	if _, body := get(t, h, "/present/data.js"); !strings.Contains(body, "window.PRESENT_DATA = ") {
+		t.Errorf("/present/data.js does not define window.PRESENT_DATA")
+	}
+}
+
+// The live demo and the results overview link to the presentation.
+func TestPagesLinkPresentation(t *testing.T) {
+	h := Handler()
+	for _, path := range []string{"/", "/overview"} {
+		if _, body := get(t, h, path); !strings.Contains(body, `<a href="/present/">`) {
+			t.Errorf("GET %s has no link to /present/", path)
+		}
+	}
+}
+
 func TestOverviewServed(t *testing.T) {
 	res, body := get(t, Handler(), "/overview")
 	if res.StatusCode != http.StatusOK {

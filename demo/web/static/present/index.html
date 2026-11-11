@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trình bày đồ án · Veritas</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="present.css">
+</head>
+<body class="present">
+<div class="page">
+
+<header class="top">
+  <div class="brand">
+    <h1>Veritas · Trình bày đồ án</h1>
+    <span class="subtitle">Hybrid blockchain database · đồng thuận cắm-rút · đọc kiểm chứng · truy vết node lỗi</span>
+  </div>
+  <nav class="pages" aria-label="Trang">
+    <a href="../">Live demo</a>
+    <a href="../overview">Results overview</a>
+    <a href="index.html" aria-current="page">Trình bày</a>
+  </nav>
+  <div class="deck-nav" id="deck-nav"></div>
+</header>
+<nav class="toc" id="toc" aria-label="Các phần trình bày"></nav>
+
+<section class="card">
+  <h2>Tái hiện và mở rộng Veritas trên phần cứng hạn chế</h2>
+  <p class="lead">Đồ án tái hiện hệ Veritas trong bài <em>Hybrid Blockchain Database Systems: Design and Performance</em> (Ge et al., PVLDB 15(5), 2022), rồi đi tiếp theo ba bước: tách lớp đồng thuận để so bốn giao thức trên cùng một lõi, thêm đọc kiểm chứng và xác nhận root sổ cái, và cuối cùng là truy vết, loại node lỗi.</p>
+  <div class="grid3">
+    <div class="kpi"><span class="v">4 backend</span><span class="l">kafka, raft, tendermint, bft2 (HotStuff) dùng chung batcher, executor và sổ cái Sparse Merkle Tree</span></div>
+    <div class="kpi"><span class="v">0 giá trị sai</span><span class="l">client chấp nhận khi bật attestation dưới F4 (E9); không attestation thì ~4,7k giá trị sai mỗi lượt</span></div>
+    <div class="kpi"><span class="v">0,29–0,46 s</span><span class="l">để cả 4 node loại một node nói dối khi đọc (F6), khi client ký khi nghi ngờ và gửi bằng chứng (E11)</span></div>
+  </div>
+</section>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Ba giai đoạn</h2>
+    <ol>
+      <li><strong>Giai đoạn 1: đồng thuận cắm-rút.</strong> Tách <code>veritas/core</code> khỏi Kafka, thêm raft, tendermint theo block và bft2 (HotStuff). Đo E1–E6 (số client, số node, block size, workload, RTT, lỗi F1–F5).</li>
+      <li><strong>Giai đoạn 2: so sánh công bằng và kiểm chứng.</strong> Tải vòng hở (E7), Set có chữ ký Ed25519, đọc kèm proof Merkle (<code>GetVerified</code>), attestation root theo height và đọc certified (E9).</li>
+      <li><strong>Giai đoạn 3: truy vết.</strong> Bằng chứng đi qua đồng thuận, loại node <code>divergent_root</code> / <code>bad_read</code>, client tự chuyển node, lỗi chỉ ở đường đọc F6 / F6E và ngưỡng quorum f+1 so với 2f+1 (E10–E12).</li>
+    </ol>
+  </section>
+  <section class="card">
+    <h2>Thứ tự trình bày</h2>
+    <ol>
+      <li>Bài toán và khác biệt so với bài gốc.</li>
+      <li>Kiến trúc: lõi chung, lớp đồng thuận, Certifier, Accountant.</li>
+      <li>Cơ chế giai đoạn 2–3 và các mô hình lỗi.</li>
+      <li>Demo trực tiếp (trang <a href="../">Live demo</a>), theo kịch bản ở mục 6.</li>
+      <li>Kết quả E7, E9, E10, E11, E12 (và E1–E6 ở <a href="../overview">Results overview</a>).</li>
+      <li>Giới hạn và việc còn mở.</li>
+    </ol>
+    <p class="muted">Phím ← / → (hoặc Page Up / Page Down) chuyển trang.</p>
+  </section>
+</div>
+
+<section class="callout">
+  <p>Mọi con số trên các trang này lấy nguyên văn từ <code>experiments/NOTES.md</code> và các CSV trong <code>results/e7</code>, <code>results/e9</code>, <code>results/e1x</code> của nhánh <code>claude/wizardly-robinson-fdaa8d</code>, commit <span class="mono" data-commit>446b625</span>. Mỗi bảng và biểu đồ ghi file nguồn ngay bên dưới. Chỗ chưa có số liệu ghi “chưa đo”.</p>
+</section>
+
+<footer class="foot">
+  <span>Dữ liệu: <code>demo/web/static/present/data.js</code>, sinh bằng <code>experiments/plot/build_present_data.py --ref 446b625</code></span>
+  <a href="1-bai-toan.html">Bắt đầu →</a>
+</footer>
+
+</div>
+<script src="data.js"></script>
+<script src="present.js"></script>
+</body>
+</html>
