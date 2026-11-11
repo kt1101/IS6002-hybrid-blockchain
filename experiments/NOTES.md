@@ -514,7 +514,7 @@ Lệnh: `E9_RATE_RAFT=480 E9_RATE_BFT2=480 experiments/exp/e1{0,1,2}_*.sh` (N=4,
 (trung bình 3 lượt; `evict_all_s` ≈ `detect_evidence_s` + 0–0,07 s; `evidence_failed` = 0, `honest_evicted` = 0 ở mọi lượt.)
 
 - F4: attestation loại node4 trong 0,34–0,39 s ở mọi lượt, như E9. Không failover thì 1/4 số đọc sau lỗi hỏng (tps 440); có failover thì tps 478, mọi worker chuyển trong ~0,4 s. Cái giá: sau khi loại node4 quorum vẫn 3 (spec 3.3), nên node 1–3 phải ký mọi height và mỗi lượt có 350–465 đọc certified hết giờ chờ chứng chỉ.
-- F6 (nói dối khi đọc, trạng thái đúng): đọc thường nhận ~7,1k giá trị sai mỗi lượt, attestation không thấy gì (root đúng). Đọc certified bắt được mọi phản hồi sai (64 = số worker có node chính là node4, mỗi worker bị từ chối một lần rồi chuyển); không ký thì không có bằng chứng, node4 không bị loại. Ký khi nghi ngờ (`on-failure`): 9–17 bằng chứng mỗi lượt, node4 bị cả 4 node loại (`bad_read`) trong 0,29–0,46 s, và `rejected_reads` giảm còn 14–22 vì node bị loại sớm.
+- F6 (nói dối khi đọc, trạng thái đúng): đọc thường nhận ~7,1k giá trị sai mỗi lượt, attestation không thấy gì (root đúng). Đọc certified bắt được mọi phản hồi sai (64 = số worker có node chính là node4, mỗi worker bị từ chối một lần rồi chuyển); không ký thì không có bằng chứng, node4 không bị loại. Ký khi nghi ngờ (`on-failure`): 9–17 bằng chứng mỗi lượt, node4 bị loại (`bad_read`): node đầu tiên sau 0,29–0,46 s, cả 4 node sau 0,33–0,46 s, và `rejected_reads` giảm còn 14–22 vì node bị loại sớm.
 - F6E (né ký): như F6 cert-fo — client tự tránh node4 (0 giá trị sai) nhưng không có bằng chứng, node4 không bị loại. Đúng giới hạn nêu ở spec 3.2.
 
 ### E12: ngưỡng quorum với f+1 = 2 node lỗi thông đồng (F5-F4, node3 + node4; 3 lượt mỗi ô)
