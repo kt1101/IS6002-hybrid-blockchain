@@ -577,3 +577,7 @@ Hiệu theo pass (cùng pass, cách nhau vài phút; `e9b_paired.csv`, trung v�
 - **Giới hạn của host guard:** ngưỡng là 200% (tức 2 lõi) trên CPU trung bình ngoài Docker, nên một lượt có 125% tải ngoài vẫn `ok`; `verdict ok` không có nghĩa là host yên.
 - **Hệ quả:** các con số đuôi độ trễ ghi tuyệt đối của E9 và E11–E12 chỉ nên đọc trong cùng một sweep; so sánh có ý nghĩa là so trong cùng pass. Câu hỏi chi phí ghi của attestation (E9) đóng lại: **không tách được ở 480 req/s, lượt 180 s**.
 - **Tag:** `p7-openloop` và `p10-attest` đặt trên commit sửa NOTES này, sau `p11-accountability`, vì hai tag chờ đối chứng E9b.
+
+## Giai đoạn 3 đóng (2026-11-12)
+
+Task 11 (Kafka approve theo quorum, `--kafka-quorum`, và E13: kafka F1/F2 × quorum {all, 2f+1}) **bị cắt** theo quyết định của người dùng: không cài, không đo, không có số liệu. Kafka và tendermint ở giai đoạn 3 chỉ có `check_consistency.sh` với attestation bật (CONSISTENT, mục E10–E12). Danh sách việc đã làm, tag và việc còn mở: `docs/superpowers/plans/phase3-progress.md`, mục "Đóng giai đoạn 3".

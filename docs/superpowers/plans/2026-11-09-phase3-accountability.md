@@ -15,7 +15,7 @@
 - Nhánh dựa trên `claude/charming-hopper-hy6x4e` (giai đoạn 2, `0cc4828`). Không sửa file đã commit trong `results/final/` và `results/cloud-bf100ms/`.
 - Module chính giữ `go 1.20`; `bft2node/` giữ golang:1.23. Sinh proto chỉ bằng `scripts/genproto_docker.sh`.
 - Test Go chạy trong container (sandbox host không mở được cổng): `docker run --rm -v $PWD:/src -w /src hbdb-build go test -race <pkg>`.
-- Mặc định của mọi cờ mới giữ hành vi giai đoạn 2: `--failover=false`, `--sign-reads=off`, `--read-mode=plain`, `--kafka-quorum=all`, không fault đọc.
+- Mặc định của mọi cờ mới giữ hành vi giai đoạn 2: `--failover=false`, `--sign-reads=off`, `--read-mode=plain`, không fault đọc. (`--kafka-quorum` của Task 11 không được cài: Task 11 bị cắt ngày 2026-11-12.)
 - Thí nghiệm giai đoạn 3: `COMMIT_MODE=sync`, `BATCH_FLUSH=100ms`, `MEM=1g`, `CPUS=0.5`, `ATTEST_EVERY=1`, vòng mở ở 80% thông lượng bão hòa E7 của **M3** (`E*_RATE_<BACKEND>`), 3 rep, quy tắc CV > 10% → tối đa 2 rep thêm; backend raft và bft2.
 - N=7 chỉ khi Docker VM ≥ 10 GiB; ngược lại chỉ N=4 (ghi NOTES).
 - Cửa sổ `Certifier`/bằng chứng: 1024 height (`DefaultAttestKeep`). Bằng chứng chờ gửi đi kèm block kế tiếp, hoặc block rỗng sau `AttestIdle` (100 ms), như attestation.
@@ -273,6 +273,8 @@
 ## Tùy chọn (tuần 10, cắt đầu tiên)
 
 ### Task 11: Kafka approve theo quorum và E13
+
+> **Trạng thái: ĐÃ CẮT** theo quyết định của người dùng ngày 2026-11-12. Không cài `--kafka-quorum` / `KAFKA_QUORUM`, không chạy E13; các bước dưới giữ nguyên để tham khảo, không đánh dấu.
 
 **Files:**
 - Modify: `consensus/kafka/tracker.go`, `consensus/kafka/tracker_test.go`, `consensus/kafka/kafka.go` (`Config.Quorum`), `cmd/veritas/main.go` (`--kafka-quorum`), `experiments/cluster/gen_compose.py`, `experiments/run_one.sh` (`KAFKA_QUORUM`)

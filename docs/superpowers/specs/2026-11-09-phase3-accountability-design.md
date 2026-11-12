@@ -24,7 +24,7 @@ Còn thiếu ba điều mà giai đoạn 3 bổ sung:
 1. **Chạy giai đoạn 2 trên cụm** (điều kiện tiên quyết: mọi số liệu của giai đoạn 3 so với E9 của giai đoạn 2).
 2. **Truy vết + F6 + chuyển node phía client** (lõi, không cắt).
 3. Ngưỡng f+1/2f+1 và đọc từ quorum.
-4. Kafka approve theo quorum (tùy chọn, cắt đầu tiên).
+4. Kafka approve theo quorum (tùy chọn, cắt đầu tiên). **Đã cắt** theo quyết định của người dùng ngày 2026-11-12: không cài, không đo (mục 6, E13).
 
 ### Bỏ so với bản thiết kế trước
 
@@ -75,7 +75,7 @@ Nguyên tắc: **mọi quyết định loại node đều tất định**, đư�
 | `veritas/core/fault.go` | Hook `OnRead(key, val string) string`; `--fault=readlie` (F6). |
 | `veritas/sigs` | `SignRead`/`VerifyRead` trên bytes chuẩn hóa của phản hồi đọc. |
 | `veritas/benchmark/ycsbbench` | Chuyển node (`--failover`), đọc có chữ ký (`--sign-reads=off|on-failure|always`), báo cáo bằng chứng, `--read-mode=quorum`. |
-| `consensus/kafka` (tùy chọn) | `--kafka-quorum=all|2f+1`. |
+| `consensus/kafka` (tùy chọn, **đã cắt**) | `--kafka-quorum=all|2f+1`: không được cài, cờ không tồn tại. |
 | `experiments/exp/e10_*.sh`, `e11_*.sh`, `rq6.py` | Driver và phân tích (mục 6). |
 
 ### Proto (tương thích ngược)
@@ -131,6 +131,8 @@ Nguyên tắc: **mọi quyết định loại node đều tất định**, đư�
 
 ## 6. Kafka approve theo quorum (tùy chọn)
 
+> **Đã cắt** (người dùng, 2026-11-12): không cài, không có số liệu. Phần dưới chỉ là thiết kế đã đề xuất.
+
 `--kafka-quorum=2f+1`: block commit khi đủ 2f+1 phiếu approve (đếm khi đọc lại từ topic, nên vẫn tất định); phiếu đến sau khi đã commit thì bỏ. Abort khi số Abort vượt N − (2f+1). Chạy lại F1, F2 của kafka.
 
 ## 7. Thí nghiệm
@@ -143,9 +145,9 @@ Phương pháp như giai đoạn 2: vòng mở ở 80% thông lượng bão hòa
 | **E10** chi phí | RQ6/RQ7 không lỗi | read_mode {plain, certified, certified + sign-always, quorum} × workload {a, c} × backend {raft, bft2}, N=4 | 16 × 3 = 48 |
 | **E11** truy vết | RQ6 | {F4, F6} (f=1) × {plain, certified + failover, certified + failover + sign on-failure} × backend {raft, bft2}, N=4; thêm F6-evasive × sign on-failure × 2 backend | (12 + 2) × 3 = 42 |
 | **E12** ngưỡng | RQ7 | F5-F4 (f+1 node) × quorum {f+1, 2f+1} × read_mode {certified, quorum} × backend {raft, bft2}, N=4 (và N=7 nếu Docker VM ≥ 10 GiB) | 8 × 3 = 24 (48 với N=7) |
-| **E13** (tùy chọn) | liveness kafka | kafka F1, F2 × `--kafka-quorum` {all, 2f+1}, N=4 | 4 × 3 = 12 |
+| **E13** (tùy chọn, **đã cắt**, không chạy) | liveness kafka | kafka F1, F2 × `--kafka-quorum` {all, 2f+1}, N=4 | 4 × 3 = 12 |
 
-Tổng giai đoạn 3 (không kể P2): 126–150 lượt, mỗi lượt 2,5–4 phút: ~8 giờ.
+Tổng giai đoạn 3 (không kể P2): 126–150 lượt (gồm 12 lượt E13 đã cắt; thực chạy 114 lượt E10–E12 và 50 lượt E9b), mỗi lượt 2,5–4 phút: ~8 giờ.
 
 ### Chỉ số và định dạng
 
@@ -171,7 +173,7 @@ Tổng giai đoạn 3 (không kể P2): 126–150 lượt, mỗi lượt 2,5–4
 | 5–6 | Certifier mâu thuẫn, `Accountant`, `Block.evidence`, `SignedRead`, `ReportEvidence`, `Evicted`, sign-reads | test tích hợp qua; tag `p11-accountability` |
 | 7 | Harness: `.evict`, `.certs`, `rq6.py`, driver E10–E12, smoke | smoke mỗi backend |
 | 8–9 | Chạy E10, E11, E12 | **Mốc lõi**: RQ6, RQ7 có số liệu |
-| 10 | E13 (tùy chọn) hoặc chạy lại điểm CV > 10% | |
+| 10 | E13 (tùy chọn; đã cắt 2026-11-12) hoặc chạy lại điểm CV > 10% | |
 | 11–12 | Phân tích, hình, viết chương | bản nháp chương |
 
 ## 10. Rủi ro

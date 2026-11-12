@@ -2,7 +2,23 @@
 
 Đọc cùng: plan `docs/superpowers/plans/2026-11-09-phase3-accountability.md`, spec `docs/superpowers/specs/2026-11-09-phase3-accountability-design.md`.
 Nhánh `claude/wizardly-robinson-fdaa8d` (worktree `.claude/worktrees/wizardly-robinson-fdaa8d`), dựa trên phase 2 `claude/charming-hopper-hy6x4e`. **Chưa push.**
-Cập nhật: 2026-11-12 (E7, E9, E9b, E10–E12 xong; Task 10 đóng ở `p11-accountability`; tag `p7-openloop`/`p10-attest` đã đặt; chờ quyết định Task 11).
+Cập nhật: 2026-11-12. **Giai đoạn 3 đã đóng**: Task 1–10 và E9b xong; Task 11 cắt theo quyết định của người dùng.
+
+## Đóng giai đoạn 3 (2026-11-12)
+
+- **Xong:** Task 1–10 (build/test/consistency, F6, Certifier, Accountant + eviction + signed reads + evidence, client, harness, driver E10–E12 + `rq6.py`, chạy E7, E9, E10–E12) và E9b (đối chứng độ trễ của attestation, thêm theo rà soát).
+- **Tag (cục bộ, chưa push):** `p11-accountability` → `e54bb11` (Task 10 + sửa rà soát), `p7-openloop` và `p10-attest` → `88944d0` (đặt sau E9b). Sau tag: `e6d0d48` (sửa câu thời gian loại node F6 ở E11) và commit đóng giai đoạn này. Plan không định nghĩa tag đóng giai đoạn.
+- **Commit kết quả chính:** E7 `51a4c72` + NOTES `c158f65` (đo ở `7461028`; `0d17ae6` đã bị tách lại ở vòng review 1, không còn trên nhánh), E9 `c81ce78` (đo ở `9560921`) + phân tích lại `0f85077`, E10–E12 `446b625` (đo ở `0f85077`, 1 lượt ở `855ee23`), sửa rà soát `4337185`…`e54bb11`, E9b `e4ed42d` (đo ở `e54bb11`) + `88944d0`. Dữ liệu thô: `results/archive/raw-e7-e12-2026-11-11.tar.gz`, `raw-e9b-2026-11-12.tar.gz`.
+- **Cố ý không làm:**
+  - Task 11 / E13: Kafka approve theo quorum (`--kafka-quorum`, `KAFKA_QUORUM`) không được cài, không đo (người dùng cắt ngày 2026-11-12). Plan và spec đã ghi.
+  - N=7: Docker VM 7,65 GiB < 10 GiB, giai đoạn 3 chỉ N=4.
+  - Hạ quorum của Certifier sau khi loại node (spec 3.3): ngoài phạm vi; ghi là giới hạn, có test `TestQuorumFixedAfterEviction`.
+- **Còn mở (không chặn việc viết):**
+  - Mục 9 rà soát: race khởi động bft2 (`log.Fatalf` khi `Connect` lỗi) chưa sửa; đề xuất thoát mã riêng và khởi động lại có giới hạn.
+  - Cấu hình E11 kết hợp (F6 rồi một node chậm) cần harness gắn nhiều loại lỗi mỗi lượt: chưa làm.
+  - Nguyên nhân đuôi độ trễ ghi cao ở E9 (so với E9b) chưa xác định; đuôi tuyệt đối chỉ so trong cùng sweep/pass.
+  - Host guard: ngưỡng 200% CPU ngoài Docker cho qua tải ngoài ~125% (`verdict ok` ≠ máy yên).
+  - Chưa push nhánh, chưa mở PR (cần người dùng đồng ý).
 
 ## Task đã xong
 
@@ -37,7 +53,7 @@ Trang Notion tiến độ (memory `notion-progress-page`): id `413fc8af-e746-811
   - bft2 thỉnh thoảng lỗi khởi động (replica nối nhau trước khi peer lắng nghe; health fail, driver tự chạy lại).
 - Task 10, E10–E12 xong (2026-11-11 00:44–15:48 UTC, đo ở `0f85077`, 1 lượt chạy lại ở `855ee23`): 48 + 42 + 24 hàng, `results/e1x/rq6_{runs,summary}.csv`, NOTES "E10–E12 trên M3". E11 dừng tay 02:54–11:38 sau 3 lượt liên tiếp bị host guard loại (Mac thiếu bộ nhớ); tổng 5 lượt bị loại và đã chạy lại. 1 lượt E12 (raft qf1-certified r1) hỏng vì Mac ngủ khi gập nắp và chạy pin; host guard không bắt được (không xét khoảng trống giữa các mẫu), dữ liệu tách sang `results/raw/mistake-sleep-e12-qf1-certified/`, đã chạy lại. Tag `p11-accountability` đặt sau vòng review 3; `p7-openloop`, `p10-attest` đặt sau review E9b (sau `p11-accountability` vì chờ đối chứng E9b).
 - E9b xong (2026-11-11 16:11–19:07 UTC, người dùng chọn chạy; đo ở `e54bb11`): 50/50 hàng, 1 lượt bị loại vì swap và đã chạy lại. Không tách được ảnh hưởng của attestation lên độ trễ ghi (hiệu theo pass đổi dấu, nhỏ hơn chênh giữa các rep); mức tăng queue/block của E9 không lặp lại; chi phí đọc certified lặp lại. Câu hỏi chi phí ghi của attestation đóng: không tách được ở 480 req/s, 180 s. Lượt ngoại lệ raft a0-plain r1 trùng tải ngoài (~125% CPU) của phiên review, không dùng làm bằng chứng về nguồn điện; bỏ pass 1 kết luận không đổi. `results/e9b/`, NOTES "E9b", `experiments/plot/e9b_paired.py`.
-- Task 11 (tùy chọn): Kafka approve theo quorum.
+- ~~Task 11 (tùy chọn): Kafka approve theo quorum.~~ Cắt theo quyết định của người dùng, 2026-11-12.
 
 ## Rà soát 10 điểm (2026-11-10, từ phiên gốc)
 
