@@ -109,6 +109,21 @@ type ServerConfig struct {
 	CertifiedWait time.Duration
 	NodeKey       ed25519.PrivateKey
 	NodeKeys      func(nodeID int32) (ed25519.PublicKey, bool)
+
+	// OnApplied, if non-nil, is called synchronously from the apply loop
+	// after every successfully applied block (empty blocks included) and
+	// before the block's waiters are resolved. It MUST NOT block. nil = off.
+	OnApplied func(AppliedEvent)
+}
+
+// AppliedEvent describes one block applied by a Server; see
+// ServerConfig.OnApplied.
+type AppliedEvent struct {
+	Height   int64
+	Proposer string // blk.GetSignature()
+	Txs      int    // number of SetRequests in the block (sum over SharedLogs)
+	Aborted  int    // number of aborted SharedLogs
+	Root     []byte // copy of ex.RootDigest() after Apply
 }
 
 // SetVerifier is the executor check of --verify-sigs=all: the Set carries a
@@ -773,6 +788,9 @@ func (s *Server) applyLoop() {
 			continue
 		}
 		s.metrics.applied(time.Since(start)-ledgerTime, ledgerTime)
+		if s.cfg.OnApplied != nil {
+			s.notifyApplied(height, &blk, aborted)
+		}
 		if s.att != nil {
 			s.att.afterApply(height, s.ex.RootDigest(), &blk, s.cfg.NodeID, s.proveResp)
 		}
@@ -781,6 +799,21 @@ func (s *Server) applyLoop() {
 		}
 	}
 	s.stop(errors.New("consensus delivery channel closed"))
+}
+
+// notifyApplied reports an applied block to cfg.OnApplied.
+func (s *Server) notifyApplied(height int64, blk *pbv.Block, aborted []int64) {
+	txs := 0
+	for _, sl := range blk.GetTxs() {
+		txs += len(sl.GetSets())
+	}
+	s.cfg.OnApplied(AppliedEvent{
+		Height:   height,
+		Proposer: blk.GetSignature(),
+		Txs:      txs,
+		Aborted:  len(aborted),
+		Root:     s.ex.RootDigest(),
+	})
 }
 
 // resolveBlock wakes the waiters of an applied own block. Waking a seq with

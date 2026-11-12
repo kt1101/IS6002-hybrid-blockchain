@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4 · Kết quả · Veritas</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="present.css">
+</head>
+<body class="present">
+<div class="page">
+
+<header class="top">
+  <div class="brand">
+    <h1>4 · Kết quả</h1>
+    <span class="subtitle">E7 điểm bão hòa · E9 attestation · E9b đối chứng · E10 chi phí không lỗi · E11 truy vết · E12 ngưỡng quorum · E1–E6</span>
+  </div>
+  <nav class="pages" aria-label="Trang">
+    <a href="../">Live demo</a>
+    <a href="../overview">Results overview</a>
+    <a href="./" aria-current="page">Trình bày</a>
+  </nav>
+  <div class="deck-nav" id="deck-nav"></div>
+</header>
+<nav class="toc" id="toc" aria-label="Các phần trình bày"></nav>
+
+<section class="callout">
+  <p><strong>Cấu hình chung của E7, E9–E12:</strong> MacBook M3 Pro, N=4, 256 client, block 100, flush 100 ms, <code>MEM=1g</code>, attestation K=1 (E10–E12), tải vòng hở; backend <span class="pill raft">raft</span> và <span class="pill bft2">bft2</span>; 3 rep mỗi ô. E10: 60 s + 10 s warmup, không lỗi, workload a và c. E9, E11, E12: 180 s + 10 s warmup, lỗi ở giây 60 của cửa sổ đo.</p>
+  <p><strong>Kiểm tra nhất quán với mã giai đoạn 3</strong> (<code>ATTEST_EVERY=1</code>, sau E10–E12): kafka, raft, tendermint, bft2 đều <strong>CONSISTENT</strong>, log không có dòng <code>core: evicted</code> hay <code>core: diverged</code>.</p>
+  <p class="src">experiments/NOTES.md · mục “Giai đoạn 3: E10–E12 trên M3” · commit 88944d0 (tag p10-attest)</p>
+</section>
+
+<!-- E7 -->
+<section class="card" id="e7">
+  <div class="card-head"><h2>E7 · Điểm bão hòa và tốc độ 480 req/s</h2><span class="muted">RQ1/RQ2 · quét tốc độ gửi 250–2000 req/s</span></div>
+  <div class="grid2">
+    <figure class="chart" data-chart="e7"><figcaption>Write p99 (trung bình các rep) theo tốc độ gửi. Rê chuột lên điểm để xem tps và số thao tác bị bỏ.</figcaption></figure>
+    <div class="stack">
+      <div data-notes="e7"></div>
+      <ul>
+        <li>Thông lượng bám tốc độ đặt tới 1000 (CV ≤ 0,005); 1500: raft 1498 tps (p99 3,5 s), bft2 1498 tps nhưng drop 1076 op; 2000: raft 1961, bft2 1862 tps (drop 33,9k).</li>
+        <li><strong>Tốc độ E9–E12</strong> = 80% của rate cao nhất mà nó và mọi rate thấp hơn đều có tps ≥ 0,95R, write p99 ≤ 1 s và không drop: 600 → <strong>480 req/s</strong> cho cả hai backend.</li>
+        <li>Hệ quả: ở 480 req/s thông lượng bằng tốc độ nạp, nên E9–E12 đo được chi phí <strong>độ trễ</strong>, không đo được mất thông lượng.</li>
+        <li>raft có abort (tối đa ~0,2% số ghi, do phiên bản TSO), bft2 = 0 ở mọi rate.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- E9 -->
+<section class="card" id="e9">
+  <div class="card-head"><h2>E9 · Attestation root (RQ5)</h2><span class="muted">attest 0 / 1 / 10 × đọc plain / certified × lỗi F4, F5-F4</span></div>
+  <div data-notes="e9_detect"></div>
+  <div class="grid2">
+    <div class="callout ok">
+      <p><strong>F4 (1 node sai, quorum 3):</strong> attestation phát hiện ở mọi lượt trong 0,3–0,47 s; node lệch tự từ chối đọc (<code>DataLoss</code>), nên <code>wrong_gets</code> = 0 kể cả đọc thường. Không attestation: client nhận ~4,7k giá trị sai mỗi lượt, auditor thấy trong 0,17–0,88 s.</p>
+    </div>
+    <div class="callout warn">
+      <p><strong>F5-F4 (2 node thông đồng, bft2):</strong> không phía nào đủ 3 chữ ký nên không height nào được xác nhận. Đọc thường vẫn nhận ~9,5k giá trị sai; đọc certified không nhận giá trị sai nhưng mọi đọc sau lỗi hết hạn chờ chứng chỉ → tps 320.</p>
+    </div>
+  </div>
+  <details>
+    <summary class="muted">Độ trễ E9 (lượt không lỗi, trung bình 3 rep)</summary>
+    <div data-notes="e9_latency"></div>
+    <ul>
+      <li>Đọc certified đắt: read p50 ~92–102 ms ở attest 1 và ~223–225 ms ở attest 10, so với 1,1 ms đọc thường; read p99 1,5–2,6 s.</li>
+      <li>Không tách được chênh lệch write p50 dưới ~10 ms giữa các mức attestation. Ở E9 các cặp chạy theo thứ tự a0 → a1 → a10 nên đuôi độ trễ ghi không đọc được; <a href="#e9b">E9b</a> (xen kẽ, 5 pass) kết luận không tách được ảnh hưởng của attestation lên độ trễ ghi.</li>
+    </ul>
+  </details>
+</section>
+
+<!-- E9b -->
+<section class="card" id="e9b">
+  <div class="card-head"><h2>E9b · Đối chứng độ trễ ghi của attestation (RQ5)</h2><span class="muted">chỉ lượt không lỗi · 5 pass xen kẽ · 480 req/s · lượt 180 s · đo ở commit e54bb11</span></div>
+  <div class="callout ok">
+    <p><strong>Kết luận cho câu hỏi còn mở của E9:</strong> ở 480 req/s, lượt 180 s, không tách được ảnh hưởng của attestation (K = 1 hay 10) lên độ trễ ghi, kể cả đuôi. Hiệu theo pass đổi dấu giữa các pass ở mọi cặp; không cặp nào (độ trễ ghi hay queue/block) có hiệu cùng dấu ở cả 5 pass.</p>
+  </div>
+  <div class="grid2">
+    <figure class="chart" data-csv-chart="e9b_summary" data-where="fault_kind=none" data-label="backend,attest_every,read_mode" data-y="write_p99_ms" data-lo="write_p99_min_ms" data-hi="write_p99_max_ms" data-unit="ms"><figcaption>Write p99 (trung bình 5 rep, vạch min–max) theo backend · attest_every · chế độ đọc: các khoảng chồng nhau</figcaption></figure>
+    <figure class="chart" data-csv-chart="e9b_summary" data-where="fault_kind=none" data-label="backend,attest_every,read_mode" data-y="read_p50_ms" data-unit="ms"><figcaption>Read p50 (trung bình 5 rep): chi phí của đọc certified lặp lại</figcaption></figure>
+  </div>
+  <ul>
+    <li><strong>Không lặp lại được</strong> mức tăng queue/block của E9: ở E9b queue/block của raft là 1,9–3,0 ms ở mọi cấu hình, của bft2 0,6–1,9 ms.</li>
+    <li><strong>Lặp lại được:</strong> chi phí đọc certified (read p50 86 / 105 ms ở attest 1, 211 / 221 ms ở attest 10 cho raft / bft2, so với 1,1–1,2 ms đọc thường) và write p50 như nhau giữa các mức (raft 80–88, bft2 95–100 ms).</li>
+  </ul>
+  <div class="callout warn">
+    <p><strong>Lưu ý:</strong> lượt raft a0-plain rep 1 (p99 1657 ms, queue/block 16,5 ms) trùng với tải ngoài trên host và kéo dòng raft a0 của bảng tóm tắt lên. Các con số đuôi độ trễ ghi tuyệt đối của E9 và E11–E12 chỉ nên đọc trong cùng một sweep; so sánh có ý nghĩa là so trong cùng pass.</p>
+  </div>
+  <div data-notes="e9b"></div>
+  <details>
+    <summary class="muted">Hiệu theo pass (e9b_paired.csv: trung vị của 5 hiệu và số pass có hiệu &gt; 0)</summary>
+    <div data-notes="e9b_paired"></div>
+  </details>
+</section>
+
+<!-- E10 -->
+<section class="card" id="e10">
+  <div class="card-head"><h2>E10 · Chi phí khi không lỗi (RQ6/RQ7)</h2><span class="muted">plain / quorum / certified / certified-signall × workload a, c · 60 s, không lỗi</span></div>
+  <div class="grid2">
+    <figure class="chart" data-csv-chart="e10_latency" data-where="workload=a;op=read" data-label="backend,read_mode" data-y="p50_ms" data-lo="p50_min_ms" data-hi="p50_max_ms" data-unit="ms"><figcaption>Read p50, workload a (ms): cột là trung vị 3 rep, vạch là min–max theo rep</figcaption></figure>
+    <figure class="chart" data-csv-chart="e10_latency" data-where="workload=a;op=read" data-label="backend,read_mode" data-y="p99_ms" data-lo="p99_min_ms" data-hi="p99_max_ms" data-unit="ms"><figcaption>Read p99, workload a (ms)</figcaption></figure>
+    <figure class="chart" data-csv-chart="e10_latency" data-where="workload=c;op=read" data-label="backend,read_mode" data-y="p50_ms" data-lo="p50_min_ms" data-hi="p50_max_ms" data-unit="ms"><figcaption>Read p50, workload c (chỉ đọc, ms)</figcaption></figure>
+    <figure class="chart" data-csv-chart="e10_latency" data-where="workload=a;op=write" data-label="backend,read_mode" data-y="p50_ms" data-lo="p50_min_ms" data-hi="p50_max_ms" data-unit="ms"><figcaption>Write p50, workload a (ms)</figcaption></figure>
+  </div>
+  <ul>
+    <li>Đọc certified chỉ đắt khi có ghi: ở workload a chờ height kế tiếp được attest (p50 93–112 ms); ở workload c (chỉ đọc, không có block mới) 1,6 ms so với 1,3–1,4 ms đọc thường.</li>
+    <li>Ký mọi phản hồi (<code>sign-always</code>, <code>certified-signall</code>) không thêm chi phí tách được khỏi certified (chênh p50 −4…+8 ms, trong khoảng theo rep).</li>
+    <li>Đọc quorum thêm ~0,3–0,4 ms p50 và ~12–21 ms p99 so với đọc thường. Write p50/p99 không tách được giữa các chế độ đọc (khoảng theo rep chồng nhau).</li>
+    <li>Mọi lượt tps 480, <code>rejected_reads</code> = 0, không eviction.</li>
+    <li><strong>Đuôi độ trễ không so trực tiếp với E9:</strong> cùng cấu hình certified, workload a, p99 gộp của E10 (60 s) là 401 / 505 ms (raft / bft2), của E9 a1 (180 s) là 1436 / 1965 ms. Chỉ p50 so được: 91 / 113 so với 82 / 99 ms.</li>
+  </ul>
+  <details>
+    <summary class="muted">Bảng đầy đủ E10 (e10_latency.csv)</summary>
+    <div data-csv="e10_latency" data-digits="1" data-cols="backend,read_mode,workload,op,reps,p50_ms,p50_min_ms,p50_max_ms,p99_ms,p99_min_ms,p99_max_ms,mean_ms,tps"></div>
+  </details>
+  <p class="src">Các câu trên: experiments/NOTES.md · mục “E10: chi phí không lỗi” · commit 88944d0</p>
+</section>
+
+<!-- E11 -->
+<section class="card" id="e11">
+  <div class="card-head"><h2>E11 · Truy vết 1 node lỗi (RQ6)</h2><span class="muted">f = 1, node4 · F4, F6, F6E × plain / cert-fo / cert-fo-sign</span></div>
+  <div data-notes="e11"></div>
+  <div class="grid3">
+    <div class="callout ok"><p><strong>F4:</strong> attestation loại node4 trong 0,34–0,39 s ở mọi lượt. Có failover thì tps 478, mọi worker chuyển trong ~0,4 s; không failover thì 1/4 số đọc sau lỗi hỏng (tps 440).</p></div>
+    <div class="callout ok"><p><strong>F6:</strong> đọc thường nhận ~7,1k giá trị sai mỗi lượt. Ký khi nghi ngờ: 9–17 bằng chứng mỗi lượt, node đầu tiên loại node4 (<code>bad_read</code>) sau 0,29–0,46 s, cả 4 node đã loại sau 0,33–0,46 s (<code>detect_evidence_s</code> và <code>evict_all_s</code> của 6 lượt trong <code>rq6_runs.csv</code>).</p></div>
+    <div class="callout warn"><p><strong>F6E (né ký):</strong> client tự tránh node4 (0 giá trị sai) nhưng không có bằng chứng, node4 không bị loại.</p></div>
+  </div>
+  <p class="muted">Ở mọi lượt E11: <code>evidence_failed</code> = 0, <code>honest_evicted</code> = 0. Cái giá: sau khi loại node4 quorum vẫn 3, nên mỗi lượt có 350–465 đọc certified hết giờ chờ chứng chỉ.</p>
+</section>
+
+<!-- E12 -->
+<section class="card" id="e12">
+  <div class="card-head"><h2>E12 · Ngưỡng quorum khi 2 node thông đồng (RQ7)</h2><span class="muted">F5-F4 trên node3 + node4 · quorum f+1 = 2 và 2f+1 = 3 × đọc certified / quorum</span></div>
+  <div data-notes="e12"></div>
+  <div class="grid2">
+    <div class="callout warn"><p><strong>Quorum f+1:</strong> kết quả do thứ tự block quyết định. 4/12 lượt root sai được xác nhận trước (raft 1/6, bft2 3/6): node 1 và 2 bị loại oan (<code>divergent_root</code>) sau 0,21–0,33 s, sau đó mọi đọc certified hoặc quorum nhận giá trị sai có chứng chỉ hợp lệ (~19,3k mỗi lượt). Các lượt còn lại loại đúng node3 + node4, 0 giá trị sai.</p></div>
+    <div class="callout"><p><strong>Quorum 2f+1:</strong> không phía nào đủ 3 chữ ký, không xác nhận, không loại ai. Đọc certified an toàn nhưng mất sẵn sàng (~27,5k đọc hết giờ, tps 320); đọc quorum nhận ~9,7k giá trị sai (khi cả hai node được hỏi đều lỗi).</p></div>
+  </div>
+  <p class="muted">Cách đọc <code>rq6_summary.csv</code> ở quorum f+1: <code>detected_runs</code> = 3 gồm cả lượt root sai thắng (khi đó người bị loại là node trung thực); loại đúng hay sai phải xem <code>evicted_all_runs</code> và <code>honest_evicted</code>.</p>
+  <details>
+    <summary class="muted">Từng lượt E12 (rq6_runs.csv)</summary>
+    <div data-csv="e1x_runs" data-prefix="e12-" data-cols="exp,backend,rep,injection_race,detect_evidence_s,evict_all_s,wrong_gets,honest_evicted,wrong_root_heights,cert_timeouts,tps"></div>
+  </details>
+</section>
+
+<!-- E1-E6 -->
+<section class="card" id="e1-e6">
+  <div class="card-head"><h2>E1–E6 · Giai đoạn 1 (đồng thuận cắm-rút)</h2><a href="../overview">Mở Results overview (biểu đồ tương tác) →</a></div>
+  <div class="grid2">
+    <ul>
+      <li><strong>E1 flush 100 ms</strong>, c256: kafka 1115, raft 1150, bft2 1170, tendermint 247 tps. Ở tải thấp kafka ≈ raft &gt; bft2 (~20%); ở c64–c256 ba backend chồng lấn, node gần trần 0,5 CPU. Tendermint thấp hơn một bậc do <code>timeout-commit = 1s</code>.</li>
+      <li><strong>E2</strong> (c256, N 4 → 7): kafka 460 → 451, raft 498 → 449, bft2 481 → 501, tendermint 298 → 244.</li>
+      <li><strong>E4</strong>: đọc không đi qua đồng thuận nên workload c giống nhau (~11400–11700 với kafka, raft, bft2; tendermint 11490).</li>
+    </ul>
+    <p class="muted">Bảng dưới đối chiếu giả thuyết F1–F5 với E6 (flush 1 s, M3). Hình PNG của E1–E6 nằm trong <code>results/figs/</code>.</p>
+  </div>
+  <details open>
+    <summary class="muted">E6: giả thuyết và kết quả</summary>
+    <div data-notes="e6"></div>
+  </details>
+</section>
+
+<footer class="foot">
+  <span>Nguồn: <code>experiments/NOTES.md</code>, <code>results/e7</code>, <code>results/e9b</code>, <code>results/e1x</code> @ <span class="mono" data-commit>88944d0</span> (nhánh <code>claude/wizardly-robinson-fdaa8d</code>)</span>
+  <a href="5-gioi-han.html">Giới hạn →</a>
+</footer>
+
+</div>
+<script src="data.js"></script>
+<script src="present.js"></script>
+</body>
+</html>

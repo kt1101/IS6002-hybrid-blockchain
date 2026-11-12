@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3 · Cơ chế giai đoạn 2–3 · Veritas</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="present.css">
+</head>
+<body class="present">
+<div class="page">
+
+<header class="top">
+  <div class="brand">
+    <h1>3 · Cơ chế giai đoạn 2–3</h1>
+    <span class="subtitle">Attestation root, chứng chỉ quorum, ba chế độ đọc, bằng chứng, loại node, failover · các mô hình lỗi</span>
+  </div>
+  <nav class="pages" aria-label="Trang">
+    <a href="../">Live demo</a>
+    <a href="../overview">Results overview</a>
+    <a href="./" aria-current="page">Trình bày</a>
+  </nav>
+  <div class="deck-nav" id="deck-nav"></div>
+</header>
+<nav class="toc" id="toc" aria-label="Các phần trình bày"></nav>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Attestation root theo height</h2>
+    <ul>
+      <li>Sau khi áp dụng block ở height h, node ký <code>(h, root_h)</code> bằng khóa Ed25519 của nó thành <code>RootAttestation{height, root, node_id, sig}</code>.</li>
+      <li><code>--attest-every=K</code>: chỉ ký các block có tx ở height chia hết cho K, cộng với block không có tx khi root đã đổi từ lần ký trước. Node rảnh có root chưa được ký gửi một block rỗng (“tick”) sau 100 ms.</li>
+      <li>Attestation đi cùng block dữ liệu kế tiếp của chính node, qua <code>Consensus.Submit</code>: cơ chế như nhau cho mọi backend.</li>
+    </ul>
+  </section>
+  <section class="card">
+    <h2>Chứng chỉ quorum và <code>diverged</code></h2>
+    <ul>
+      <li>Height h được <strong>xác nhận</strong> khi có Q chữ ký hợp lệ từ Q node khác nhau trên cùng một root.</li>
+      <li>Mặc định Q = 2f+1 với f = floor((N−1)/3): N=4 cho Q=3. Giai đoạn 3 thêm lựa chọn Q = f+1 (<code>ATTEST_QUORUM=f+1|2f+1</code>) để đo ngưỡng (E12).</li>
+      <li>Root đã xác nhận của h khác root của chính node → node chuyển <code>diverged</code>: <code>Get</code>/<code>GetVerified</code> trả <code>codes.DataLoss</code>. Đây là F4 chuyển thành fail-stop.</li>
+      <li>Certifier giữ attestation của 1024 height gần nhất.</li>
+    </ul>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Ba chế độ đọc</h2>
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th scope="col">Chế độ</th><th scope="col">Client làm gì</th><th scope="col">Đảm bảo</th><th scope="col">Chi phí đo được (E10, workload a, read p50, trung vị 3 rep)</th></tr></thead>
+      <tbody>
+        <tr><td><code>plain</code></td><td><code>Get</code> từ node chính</td><td>Tin node: node lỗi trả gì client nhận nấy</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=plain;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=plain;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms</td></tr>
+        <tr><td><code>quorum</code></td><td><code>Get</code> song song từ f+1 node, chấp nhận khi mọi giá trị bằng nhau</td><td>Đúng khi trong f+1 node có ít nhất một node trung thực; không proof, không bằng chứng</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=quorum;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=quorum;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms</td></tr>
+        <tr><td><code>certified</code></td><td><code>GetVerified</code>: kiểm proof Merkle và ≥ Q attestation của <code>(h, root)</code></td><td>Giá trị khớp trạng thái tại một height đã được quorum xác nhận (không chứng minh đó là giá trị mới nhất)</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=certified;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=certified;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms</td></tr>
+        <tr><td><code>certified</code> + <code>sign-always</code></td><td>Như trên, node ký mọi phản hồi</td><td>Thêm: mọi phản hồi sai đều là bằng chứng</td><td class="n">raft <span data-csv-val="e10_latency" data-where="backend=raft;read_mode=certified-signall;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms · bft2 <span data-csv-val="e10_latency" data-where="backend=bft2;read_mode=certified-signall;workload=a;op=read" data-field="p50_ms" data-digits="1">chưa đo</span> ms</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src">results/e1x/e10_latency.csv (cột p50_ms, làm tròn 1 chữ số; workload=a, op=read) · commit 88944d0</p>
+</section>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Ký phản hồi đọc và bằng chứng</h2>
+    <ul>
+      <li><code>--sign-reads=off|on-failure|always</code>. Ở <code>on-failure</code>, khi một <code>GetVerified</code> không qua kiểm tra, client đọc lại cùng key từ cùng node với <code>signed=true</code>.</li>
+      <li>Chữ ký trên bytes chuẩn hóa: <code>"veritas-read" 0x00 key 0x00 value 0x00 version height root sha256(side_nodes ‖ non_membership_leaf_data)</code>.</li>
+      <li>Phản hồi có chữ ký mà proof không khớp root đã xác nhận → client gửi <code>ReportEvidence(Evidence{culprit, height, read})</code> tới node kế tiếp.</li>
+      <li>Node nhận kiểm sơ bộ chữ ký rồi đưa vào <code>Block.evidence</code>. Trong vòng apply, <strong>mọi node kiểm lại</strong>; bằng chứng giả, height quá cũ hoặc chưa xác nhận bị bỏ và đếm (height chưa xác nhận thì giữ tới khi xác nhận hoặc ra khỏi cửa sổ).</li>
+    </ul>
+  </section>
+  <section class="card">
+    <h2>Loại node và failover</h2>
+    <ul>
+      <li><code>divergent_root</code>: attestation hợp lệ cho h với root ≠ root đã xác nhận của h làm người ký bị loại, tại height của block chứa nó.</li>
+      <li><code>bad_read</code>: bằng chứng đọc sai hợp lệ làm <code>culprit</code> bị loại.</li>
+      <li>Node bị loại: attestation của nó không còn được đếm; đọc trả <code>codes.PermissionDenied</code>; mỗi lần loại tăng <code>epoch</code>, client gọi <code>Evicted</code> và bỏ node đó.</li>
+      <li>Quorum <strong>không giảm</strong> sau khi loại: N=4, Q=3, loại node4 thì node 1–3 đều phải ký mọi height.</li>
+      <li><code>--failover</code> (chỉ cho đọc): chuyển sang node kế tiếp khi gặp <code>DataLoss</code>, <code>PermissionDenied</code>, lỗi proof/cert, node trong <code>evicted</code>, hoặc bị nghi ngờ; không chuyển khi <code>DeadlineExceeded</code>/<code>Unavailable</code>.</li>
+    </ul>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Các mô hình lỗi</h2>
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th scope="col">Mã</th><th scope="col">Node lỗi làm gì</th><th scope="col">Cách tiêm</th><th scope="col">Ai phát hiện được</th><th scope="col">Đo ở</th></tr></thead>
+      <tbody>
+        <tr><td>F1</td><td>Crash: f node dừng giữa lượt</td><td><code>docker stop</code></td><td>Không cần phát hiện; câu hỏi là liveness</td><td>E6</td></tr>
+        <tr><td>F2</td><td>Im lặng: vẫn sống nhưng không gửi phiếu / thông điệp đồng thuận</td><td>FaultPolicy (kafka) hoặc iptables</td><td>Liveness của từng giao thức</td><td>E6</td></tr>
+        <tr><td>F3</td><td>Chậm: trễ 200 ms</td><td><code>tc netem</code></td><td>Liveness, độ trễ</td><td>E6</td></tr>
+        <tr><td>F4</td><td>Ghi sai vào Redis và SMT (<code>corrupt</code>): root lệch, đọc trả giá trị sai</td><td><code>--fault=corrupt</code>, SIGUSR1</td><td>Auditor ngoài (E6); attestation trong giao thức (E9, E11)</td><td>E6, E9, E11</td></tr>
+        <tr><td>F5-F4</td><td>f+1 node cùng F4 (thông đồng)</td><td>như F4 trên f+1 node</td><td>Phụ thuộc quorum: f+1 có thể xác nhận root sai, 2f+1 không xác nhận gì</td><td>E9, E12</td></tr>
+        <tr><td>F6</td><td>Nói dối khi đọc (<code>readlie</code>): trạng thái đúng, <code>Get</code>/<code>GetVerified</code> trả giá trị sai; ký đúng phản hồi sai của nó</td><td><code>--fault=readlie</code></td><td>Root vẫn khớp nên auditor và Certifier không thấy; chỉ đọc certified + phản hồi có chữ ký</td><td>E11</td></tr>
+        <tr><td>F6E</td><td>Như F6 nhưng né ký (<code>readlie-evasive</code>): trả đúng khi bị yêu cầu ký</td><td><code>--fault=readlie-evasive</code></td><td>Client tự tránh node (nghi ngờ), không có bằng chứng</td><td>E11</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="src">docs/superpowers/specs/2026-11-09-phase3-accountability-design.md mục 3–5 · experiments/NOTES.md · commit 88944d0</p>
+</section>
+
+<section class="callout">
+  <p><strong>Giả định nền:</strong> node trung thực ở cùng height thì cùng root (thực thi tất định). Client, TSO và broker Kafka được coi là trung thực; khóa sinh tất định từ seed chung (đủ để đo chi phí, không phải quản lý khóa thật).</p>
+</section>
+
+<footer class="foot">
+  <span>Nguồn: spec giai đoạn 2 và 3, <code>experiments/NOTES.md</code> @ <span class="mono" data-commit>88944d0</span></span>
+  <a href="4-ket-qua.html">Kết quả →</a>
+</footer>
+
+</div>
+<script src="data.js"></script>
+<script src="present.js"></script>
+</body>
+</html>

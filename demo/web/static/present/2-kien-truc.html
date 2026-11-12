@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2 · Kiến trúc · Veritas</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="present.css">
+</head>
+<body class="present">
+<div class="page">
+
+<header class="top">
+  <div class="brand">
+    <h1>2 · Kiến trúc</h1>
+    <span class="subtitle">Lõi chung, lớp đồng thuận, Certifier, Accountant · đường đi của một lần ghi và một lần đọc certified</span>
+  </div>
+  <nav class="pages" aria-label="Trang">
+    <a href="../">Live demo</a>
+    <a href="../overview">Results overview</a>
+    <a href="./" aria-current="page">Trình bày</a>
+  </nav>
+  <div class="deck-nav" id="deck-nav"></div>
+</header>
+<nav class="toc" id="toc" aria-label="Các phần trình bày"></nav>
+
+<section class="card">
+  <div class="card-head"><h2>Một node Veritas</h2><span class="muted">mọi node chạy cùng mã; chỉ hộp tím (đồng thuận) thay đổi giữa các backend</span></div>
+  <svg class="diagram" viewBox="0 0 1120 560" role="img" aria-labelledby="dg-title dg-desc">
+    <title id="dg-title">Sơ đồ kiến trúc một node Veritas</title>
+    <desc id="dg-desc">Client gửi Set và GetVerified tới API gRPC của node. Batcher gom Set thành block và gửi vào lớp đồng thuận. Đồng thuận trả block theo cùng thứ tự cho mọi node. Apply loop áp dụng block qua Executor vào Redis và sổ cái SMT, rồi chuyển attestation và bằng chứng trong block cho Certifier và Accountant.</desc>
+    <defs>
+      <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#2F3540"/></marker>
+      <marker id="ahr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#0F766E"/></marker>
+      <marker id="ahe" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#C2410C"/></marker>
+    </defs>
+
+    <rect class="box client" x="20" y="30" width="250" height="130" rx="10"/>
+    <text class="t" x="36" y="56">Client</text>
+    <text class="s" x="36" y="78">ycsbbench / demo</text>
+    <text class="s" x="36" y="98">ký Set (Ed25519)</text>
+    <text class="s" x="36" y="118">đọc plain · quorum · certified</text>
+    <text class="s" x="36" y="138">failover · gửi bằng chứng</text>
+
+    <rect class="group" x="300" y="10" width="800" height="410" rx="14"/>
+    <text class="s" x="316" y="30">Node i · veritas/core</text>
+
+    <rect class="box core" x="320" y="44" width="210" height="100" rx="10"/>
+    <text class="t" x="334" y="68">gRPC API</text>
+    <text class="m" x="334" y="90">Set · BatchSet</text>
+    <text class="m" x="334" y="108">Get · GetVerified</text>
+    <text class="m" x="334" y="126">ReportEvidence · Evicted</text>
+
+    <rect class="box core" x="560" y="44" width="210" height="100" rx="10"/>
+    <text class="t" x="574" y="68">Batcher</text>
+    <text class="s" x="574" y="90">gom Set thành block</text>
+    <text class="s" x="574" y="108">block 100 · flush 100 ms</text>
+    <text class="s" x="574" y="126">+ attestation, bằng chứng chờ gửi</text>
+
+    <rect class="box core" x="560" y="190" width="210" height="80" rx="10"/>
+    <text class="t" x="574" y="214">Apply loop</text>
+    <text class="s" x="574" y="236">áp dụng block theo thứ tự</text>
+    <text class="s" x="574" y="254">height h tăng 1 mỗi block</text>
+
+    <rect class="box core" x="320" y="190" width="210" height="80" rx="10"/>
+    <text class="t" x="334" y="214">Executor (tất định)</text>
+    <text class="s" x="334" y="236">kiểm version, chữ ký</text>
+    <text class="s" x="334" y="254">hook OnApply (F4) · OnRead (F6)</text>
+
+    <rect class="box core" x="320" y="312" width="210" height="90" rx="10"/>
+    <text class="t" x="334" y="336">Redis + sổ cái SMT</text>
+    <text class="s" x="334" y="358">giá trị · version</text>
+    <text class="s" x="334" y="376">root digest · proof Merkle</text>
+
+    <rect class="box new" x="800" y="190" width="280" height="80" rx="10"/>
+    <text class="t" x="814" y="214">Attestor + Certifier</text>
+    <text class="s" x="814" y="236">ký (h, root) · gom chữ ký theo height</text>
+    <text class="s" x="814" y="254">xác nhận khi đủ Q chữ ký cùng root</text>
+
+    <rect class="box new" x="800" y="312" width="280" height="90" rx="10"/>
+    <text class="t" x="814" y="336">Accountant</text>
+    <text class="s" x="814" y="358">tập evicted + epoch</text>
+    <text class="s" x="814" y="376">lý do divergent_root · bad_read</text>
+    <text class="s" x="814" y="394">node bị loại: PermissionDenied</text>
+
+    <rect class="box cons" x="300" y="450" width="800" height="96" rx="12"/>
+    <text class="t" x="316" y="474">Lớp đồng thuận · consensus.Consensus (Submit · Deliver · Close)</text>
+    <rect class="box" x="316" y="486" width="186" height="46" rx="8"/><text class="t" x="330" y="506">kafka</text><text class="s" x="330" y="524">approve-all, CFT</text>
+    <rect class="box" x="512" y="486" width="186" height="46" rx="8"/><text class="t" x="526" y="506">raft</text><text class="s" x="526" y="524">hashicorp/raft, CFT</text>
+    <rect class="box" x="708" y="486" width="186" height="46" rx="8"/><text class="t" x="722" y="506">tendermint</text><text class="s" x="722" y="524">v0.35.0, BFT, theo block</text>
+    <rect class="box" x="904" y="486" width="186" height="46" rx="8"/><text class="t" x="918" y="506">bft2</text><text class="s" x="918" y="524">HotStuff (relab/hotstuff)</text>
+
+    <rect class="box" x="20" y="450" width="250" height="96" rx="10"/>
+    <text class="t" x="36" y="476">Các node khác</text>
+    <text class="s" x="36" y="498">cùng mã, nhận cùng dãy block</text>
+    <text class="s" x="36" y="516">ký attestation của chính chúng</text>
+
+    <path class="arr" d="M270 66 H318"/><text class="s" x="276" y="60">Set</text>
+    <path class="arr read" d="M270 100 H318"/><text class="s" x="276" y="94" style="fill:#0F766E">đọc</text>
+    <path class="arr ev" d="M270 134 H318"/><text class="s" x="272" y="152" style="fill:#C2410C">bằng chứng</text>
+    <path class="arr" d="M530 80 H558"/>
+    <path class="arr" d="M770 92 H786 V448"/><text class="s" x="792" y="420">Submit(block)</text>
+    <path class="arr" d="M665 448 V272"/><text class="s" x="672" y="300">Deliver: cùng thứ tự</text><text class="s" x="672" y="316">trên mọi node</text>
+    <path class="arr" d="M560 230 H532"/>
+    <path class="arr" d="M425 270 V310"/>
+    <path class="arr" d="M770 230 H798"/>
+    <path class="arr" d="M940 270 V310"/><text class="s" x="948" y="294">root mâu thuẫn</text>
+    <path class="arr" d="M1000 190 V100 H772"/><text class="s" x="800" y="94">chữ ký (h, root) chờ gửi</text>
+    <path class="arr read" d="M345 144 V310"/><text class="s" x="350" y="296" style="fill:#0F766E">ProveValue</text>
+    <path class="arr" d="M270 498 H298"/>
+  </svg>
+</section>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Thành phần</h2>
+    <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th scope="col">Thành phần</th><th scope="col">Vai trò</th></tr></thead>
+        <tbody>
+          <tr><td>Batcher</td><td>Gom Set thành block (đủ <code>size</code> hoặc hết <code>flush</code>), gắn attestation và bằng chứng đang chờ vào block kế tiếp.</td></tr>
+          <tr><td>Executor</td><td>Áp dụng block tất định trên mọi node: kiểm version (TSO cho kafka/raft, theo thứ tự block cho tendermint/bft2), ghi Redis, cập nhật SMT; với <code>--verify-sigs=all</code> kiểm chữ ký từng Set.</td></tr>
+          <tr><td>Sổ cái SMT</td><td>Leaf = <code>value-version</code>; root digest sau mỗi block; proof Merkle cho một key. Cây được cắt tỉa để bộ nhớ có giới hạn.</td></tr>
+          <tr><td>consensus.Consensus</td><td>Ba hàm <code>Submit</code>, <code>Deliver</code>, <code>Close</code>: một dịch vụ total-order broadcast. Mỗi backend nằm trong <code>consensus/&lt;tên&gt;</code>.</td></tr>
+          <tr><td>Attestor + Certifier</td><td>Ký <code>(h, root_h)</code>; gom chữ ký theo height; h được xác nhận khi có Q chữ ký hợp lệ từ Q node khác nhau trên cùng root. Chạy trong apply loop nên tất định.</td></tr>
+          <tr><td>Accountant</td><td>Tập node bị loại (kèm height và lý do), <code>epoch</code>; kiểm lại bằng chứng đọc trong vòng apply.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Nguyên tắc</h2>
+    <ul>
+      <li><strong>Chỉ đồng thuận thay đổi.</strong> Batcher, Executor, SMT, Certifier, Accountant dùng chung cho kafka, raft, tendermint, bft2; block size như nhau cho mọi backend.</li>
+      <li><strong>Mọi quyết định đều tất định.</strong> Attestation và bằng chứng đi trong block, được xử lý theo thứ tự block, nên mọi node trung thực xác nhận cùng root và loại cùng node tại cùng height, không cần giao thức trao đổi thêm.</li>
+      <li><strong>Đồng thuận không phải sửa.</strong> Toàn bộ giai đoạn 2–3 nằm trong core, client và harness; adapter đồng thuận không đổi.</li>
+      <li><strong>Đo được.</strong> Breakdown thời gian (gom block, chờ đồng thuận, thực thi, ghi sổ cái), byte mạng mỗi block, sidecar <code>.evict</code>, <code>.certs</code>, <code>.ops.csv</code> cho mỗi lượt.</li>
+    </ul>
+  </section>
+</div>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Đường đi của một lần ghi</h2>
+    <ol class="steps">
+      <li>Client ký <code>key 0x00 value 0x00 version</code> bằng khóa Ed25519 rồi gửi <code>Set</code> tới node chính của nó.</li>
+      <li>Node kiểm chữ ký (<code>ingress</code>), đưa Set vào batcher.</li>
+      <li>Batcher gửi block vào đồng thuận (<code>Submit</code>); block có thể kèm attestation và bằng chứng của node.</li>
+      <li>Đồng thuận trả block cho mọi node theo cùng thứ tự (<code>Deliver</code>).</li>
+      <li>Apply loop của mỗi node gọi Executor: kiểm version (và chữ ký nếu <code>all</code>), ghi Redis, cập nhật SMT, tính root mới.</li>
+      <li>Certifier xử lý các attestation trong block; ở height được attest, node ký <code>(h, root_h)</code> để gửi trong block kế tiếp.</li>
+      <li>Ở chế độ <code>sync</code>, node đề xuất trả lời client khi block của nó đã được áp dụng.</li>
+    </ol>
+  </section>
+  <section class="card">
+    <h2>Đường đi của một lần đọc certified</h2>
+    <ol class="steps">
+      <li>Client gọi <code>GetVerified</code> (tùy chọn <code>signed</code>).</li>
+      <li>Node lấy value, version, proof và root tại một height đã ký, trong <strong>cùng một lần giữ khóa</strong> của executor, nên proof luôn khớp root.</li>
+      <li>Node chờ tới khi height đó được xác nhận (tổng tối đa 5 s), rồi trả về kèm Q attestation; nếu <code>signed</code> thì ký cả phản hồi.</li>
+      <li>Client kiểm proof theo root, kiểm ≥ Q chữ ký hợp lệ từ các node khác nhau trên đúng <code>(h, root)</code>.</li>
+      <li>Không đạt: từ chối giá trị, chuyển node (failover); nếu phản hồi có chữ ký thì gửi <code>ReportEvidence</code> tới một node khác.</li>
+    </ol>
+    <p class="muted">Giá phải trả: đọc phải chờ height kế tiếp được attest (E9: read p50 ~92–102 ms ở attest 1, so với 1,1 ms đọc thường; E10: 93–112 ms ở workload a).</p>
+  </section>
+</div>
+
+<footer class="foot">
+  <span>Nguồn: <code>docs/superpowers/specs/2026-11-03-phase2-…-design.md</code>, <code>2026-11-09-phase3-accountability-design.md</code>, <code>experiments/NOTES.md</code> @ <span class="mono" data-commit>88944d0</span></span>
+  <a href="3-co-che.html">Cơ chế →</a>
+</footer>
+
+</div>
+<script src="data.js"></script>
+<script src="present.js"></script>
+</body>
+</html>

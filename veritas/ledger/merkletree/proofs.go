@@ -48,6 +48,35 @@ func VerifyProof(proof SparseMerkleProof, root []byte, key []byte, value []byte,
 	return result
 }
 
+// VerifyProofSteps behaves like VerifyProof and additionally returns the hash
+// computed at every level of the proof path, so the path can be drawn.
+//
+// For a non-default value, steps[0] is the leaf hash, followed by one hash per
+// side node from the deepest level up; len(steps) == len(proof.SideNodes)+1
+// and, when ok is true, the last element equals root. The hash of the value
+// itself is not included.
+//
+// For the default (empty) value, steps holds every hash computed while
+// verifying the non-membership proof: the unrelated leaf's hash first (only
+// if proof.NonMembershipLeafData is set), then one hash per side node. When
+// the proof ends in an empty subtree there is no leaf, so steps has just
+// len(proof.SideNodes) entries (empty if there are no side nodes).
+//
+// steps is also returned when ok is false, so a caller can see where the path
+// diverges from root; it is nil if the proof fails the sanity check or the
+// non-membership leaf is not unrelated to key.
+func VerifyProofSteps(proof SparseMerkleProof, root []byte, key []byte, value []byte, hasher hash.Hash) (ok bool, steps [][]byte) {
+	ok, updates := verifyProofWithUpdates(proof, root, key, value, hasher)
+	if !bytes.Equal(value, defaultValue) && len(updates) > 0 {
+		// The first update is (valueHash, value), which is not part of the path.
+		updates = updates[1:]
+	}
+	for _, update := range updates {
+		steps = append(steps, update[0])
+	}
+	return ok, steps
+}
+
 func verifyProofWithUpdates(proof SparseMerkleProof, root []byte, key []byte, value []byte, hasher hash.Hash) (bool, [][][]byte) {
 	th := newTreeHasher(hasher)
 	path := th.path(key)

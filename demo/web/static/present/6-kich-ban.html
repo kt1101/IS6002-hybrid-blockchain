@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6 · Kịch bản trình bày · Veritas</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="present.css">
+</head>
+<body class="present">
+<div class="page">
+
+<header class="top">
+  <div class="brand">
+    <h1>6 · Kịch bản trình bày</h1>
+    <span class="subtitle">Thứ tự các phần, các bước demo trực tiếp và câu nói chính ở mỗi bước</span>
+  </div>
+  <nav class="pages" aria-label="Trang">
+    <a href="../">Live demo</a>
+    <a href="../overview">Results overview</a>
+    <a href="./" aria-current="page">Trình bày</a>
+  </nav>
+  <div class="deck-nav" id="deck-nav"></div>
+</header>
+<nav class="toc" id="toc" aria-label="Các phần trình bày"></nav>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Chuẩn bị</h2>
+    <ul>
+      <li>Chế độ sim (không cần Docker, không cần mạng): <code>go run ./cmd/demo</code>, hoặc binary dựng sẵn <code>./bin/demo</code>. Mở <code>http://127.0.0.1:8080</code>.</li>
+      <li>Chế độ docker: <code>BACKEND=bft2 N=4 experiments/demo_up.sh</code>, chờ cụm sẵn sàng, rồi <code>go run ./cmd/demo --mode=docker --backend=bft2 --n=4</code>.</li>
+      <li>Các trang trình bày nằm ở <code>/present/</code> của cùng server; Results overview ở <code>/overview</code>.</li>
+      <li>Checklist đầy đủ trước buổi bảo vệ: <code>docs/demo.md</code> mục 4.</li>
+    </ul>
+  </section>
+  <section class="card">
+    <h2>Thứ tự</h2>
+    <ol class="steps">
+      <li>Trang 1 · Bài toán và bài gốc.</li>
+      <li>Trang 2 · Kiến trúc.</li>
+      <li>Trang 3 · Cơ chế giai đoạn 2–3.</li>
+      <li><a href="../">Live demo</a> · 5 bước bên dưới.</li>
+      <li>Trang 4 · Kết quả (E7, E9, E10, E11, E12; E1–E6 nếu được hỏi).</li>
+      <li>Trang 5 · Giới hạn và việc còn mở.</li>
+    </ol>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Mở đầu (trang 1–3)</h2>
+  <ul>
+    <li class="say">“Hybrid blockchain database cho nhiều bên không tin nhau cùng giữ một cơ sở dữ liệu: ghi đi qua đồng thuận, mỗi node có sổ cái Merkle để ai cũng kiểm được.”</li>
+    <li class="say">“Bài gốc so Kafka với Tendermint và kết luận đồng thuận là nút cổ chai, nhưng chỉ đo hiệu năng, không có node lỗi.”</li>
+    <li class="say">“Em tách lớp đồng thuận để bốn giao thức chạy trên cùng một lõi, rồi hỏi: khi một node sai hoặc nói dối, ai biết, biết nhanh tới đâu, và giá phải trả bao nhiêu.”</li>
+    <li class="say">“Mỗi node ký root sổ cái theo height, chữ ký đi qua chính đồng thuận; client chỉ tin giá trị có proof khớp một root được quorum ký.”</li>
+  </ul>
+</section>
+
+<section class="card">
+  <h2>Demo trực tiếp: 5 bước</h2>
+  <p>Thanh kịch bản trên trang Live demo có 5 nút; mỗi nút gọi đúng các API mà thao tác tay cũng dùng.</p>
+  <ol class="steps">
+    <li><strong>Write a transaction.</strong> UI điền sẵn <code>user42 = hello-committee</code> và gửi tới node2.
+      <p class="say">“Em gửi một giao dịch Set: khóa user42, giá trị hello-committee, tới node2. Giao dịch được xếp thứ tự rồi mọi node thực thi như nhau.”</p></li>
+    <li><strong>Replicate &amp; commit.</strong> UI bật tải 64 client YCSB-A trong 60 giây (lần đầu nạp trước 1.000 khóa).
+      <p class="say">“Các replica đều ở cùng chiều cao, cùng root: banner đang CONSISTENT.” Chỉ vào biểu đồ tx/s, p50, p99 và dãy block.</p></li>
+    <li><strong>Verify a proof.</strong> UI chuyển sang màn Merkle proof với <code>user42</code> ở node2.
+      <p class="say">“Client không cần tin node: node trả giá trị cùng đường đi Merkle, client tự tính lại root.” Chỉ vào verdict, proof path và bảng replica.</p></li>
+    <li><strong>Inject a fault.</strong> UI cho node3 corrupt (F4), rồi gửi lại <code>user42</code> tới node2.
+      <p class="say">“Node3 thực thi sai trạng thái nhưng vẫn chạy: nó hiện hello-committee-CORRUPT, các node còn lại hiện hello-committee.” Chỉ vào banner DIVERGENT và root khác của node3.</p></li>
+    <li><strong>Detect &amp; recover.</strong> UI hiện khung Recover.
+      <p class="say">“Sai lệch lộ ra vì mỗi replica công bố root sau mỗi block, và hub so root ở cùng chiều cao, giống auditor ngoài.” Sim: Heal node bị crash / silent / slow để thấy catch-up; Reset để làm lại. Corrupt không gỡ được.</p></li>
+  </ol>
+  <div class="callout">
+    <p><strong>Nối sang kết quả:</strong> demo hiện tại cho thấy cách phát hiện của giai đoạn 1 (so root bên ngoài). <span class="say">“Ở giai đoạn 2–3, việc này nằm trong giao thức: với attestation, node lệch bị phát hiện trong 0,3–0,47 s và client nhận 0 giá trị sai, so với ~4,7k giá trị sai mỗi lượt khi không có attestation (E9).”</span> Phần so sánh hai cụm baseline | giai đoạn 2–3 trên UI chưa làm.</p>
+  </div>
+</section>
+
+<div class="grid2">
+  <section class="card">
+    <h2>Câu chốt ở trang Kết quả</h2>
+    <ul>
+      <li class="say">“Ở 480 req/s, attestation phát hiện F4 trong 0,3–0,47 s; client nhận 0 giá trị sai.” (E9)</li>
+      <li class="say">“Đọc certified chỉ đắt khi có ghi: p50 93–112 ms ở workload a, 1,6 ms ở workload c.” (E10)</li>
+      <li class="say">“Node nói dối khi đọc không làm lệch root nên auditor không thấy; ký khi nghi ngờ thì cả 4 node loại nó trong 0,33–0,46 s.” (E11)</li>
+      <li class="say">“Quorum f+1 nhanh nhưng 4/12 lượt xác nhận root sai; 2f+1 an toàn nhưng đọc certified dừng, tps 320.” (E12)</li>
+    </ul>
+  </section>
+  <section class="card">
+    <h2>Phương án dự phòng</h2>
+    <ol>
+      <li>Docker lỗi: chuyển sang sim bằng <code>./bin/demo</code> (cùng kịch bản 5 bước). Trước đó chạy <code>experiments/cluster/down.sh</code> để giải phóng cổng.</li>
+      <li>Sim lỗi: mở <code>/overview</code> nếu server còn chạy, hoặc mở thẳng <code>results/dashboard.html</code>.</li>
+      <li>Dashboard cũng không mở được: dùng hình PNG trong <code>results/figs/</code> kèm <code>results/figs/rq3_summary.csv</code>.</li>
+    </ol>
+    <p class="src">docs/demo.md mục 2, 3, 5</p>
+  </section>
+</div>
+
+<footer class="foot">
+  <span>Nguồn: <code>docs/demo.md</code>, <code>experiments/NOTES.md</code> @ <span class="mono" data-commit>88944d0</span></span>
+  <a href="./">Về mục lục</a>
+</footer>
+
+</div>
+<script src="data.js"></script>
+<script src="present.js"></script>
+</body>
+</html>

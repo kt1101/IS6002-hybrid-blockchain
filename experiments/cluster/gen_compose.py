@@ -78,6 +78,14 @@ KAFKA_IMAGE = "hbdb-kafka"
 
 VERITAS_PORT = 1990
 TSO_PORT = 7070
+# Live demo (--publish-ports): the node observer's HTTP port inside a core
+# node (veritas --demo-events-addr) and the host side of the published ports,
+# all bound to 127.0.0.1: node i gets HOST_GRPC_BASE + i -> VERITAS_PORT and
+# HOST_EVENTS_BASE + i -> DEMO_EVENTS_PORT; the TSO HOST_TSO_PORT -> TSO_PORT.
+DEMO_EVENTS_PORT = 7300
+HOST_GRPC_BASE = 19900
+HOST_EVENTS_BASE = 19800
+HOST_TSO_PORT = 19870
 KAFKA_PORT = 9092
 KAFKA_TOPIC = "shared-log"
 TM_P2P_PORT = 26656
@@ -294,6 +302,15 @@ def _batch_flush_arg(batch_flush):
     return "" if batch_flush is None else " --batch-flush=%s" % batch_flush
 
 
+def _demo_events_arg(demo_events):
+    """veritas flag that starts the node observer (live demo; False: no flag).
+
+    >>> _demo_events_arg(True)
+    ' --demo-events-addr=:7300'
+    """
+    return " --demo-events-addr=:%d" % DEMO_EVENTS_PORT if demo_events else ""
+
+
 def check_batch_flush(batch_flush):
     """Raise ValueError unless batch_flush is None or a positive duration like
     1s, 250ms, 2m, 1h (the forms run_one.sh accepts; Go's ParseDuration reads them)."""
@@ -314,7 +331,8 @@ def _forward_sigterm(start, fault=None, batch_flush=None, extra=""):
     to VERITAS_PIDFILE (the fault injector signals it there). fault (None,
     'silent' or 'corrupt') adds the --fault flags (_fault_args); batch_flush
     (None or a duration) adds --batch-flush (_batch_flush_arg); extra (phase-2
-    core flags, core_flags()) is appended as is.
+    core flags, core_flags(), plus the live demo's --demo-events-addr,
+    _demo_events_arg) is appended as is.
     """
     if not start.endswith(" &"):
         raise ValueError("veritas start line must end with ' &': %r" % (start,))
@@ -581,7 +599,7 @@ def check_node_faults(backend, n, node_faults):
 def gen(backend, n, block_size, commit_mode, cpus, mem,
         tm_dir=None, ycsb_dir=None, results_dir=None, node_faults=None, batch_flush=None,
         kafka_cpus=KAFKA_CPUS, kafka_mem=KAFKA_MEM, verify_sigs="none", key_seed=None, attest_every=0,
-        attest_quorum=0):
+        attest_quorum=0, publish_ports=False):
     """Return the compose document (a dict) for one cluster.
 
     commit_mode is accepted for every backend; the original backends have a
@@ -598,6 +616,11 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
     kafka_cpus / kafka_mem are the Kafka broker's caps (default 2 CPUs,
     1536m as in phase 1). verify_sigs / key_seed are the phase-2 veritas
     --verify-sigs / --key-seed of every core node (core_flags).
+    publish_ports (live demo, off by default: the output is then unchanged)
+    publishes on 127.0.0.1 of the host every node's gRPC port and observer
+    port (HOST_GRPC_BASE + i, HOST_EVENTS_BASE + i) and the TSO's, and starts
+    the observer (veritas --demo-events-addr) on the core backends; the
+    original backends have no observer, so only their ports are published.
     """
     if backend not in ALL_BACKENDS:
         raise ValueError("unknown backend %r" % backend)
@@ -617,6 +640,8 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
     check_node_faults(backend, n, node_faults)
     check_batch_flush(batch_flush)
     extra = core_flags(verify_sigs, key_seed, attest_every, n, attest_quorum)
+    # Flags of the core backends' veritas: phase 2 and 3 plus the demo observer.
+    node_extra = extra + _demo_events_arg(publish_ports)
     if extra and backend not in CORE_BACKENDS:
         raise ValueError("--verify-sigs/--key-seed need a core backend (%s), got %s" % (", ".join(CORE_BACKENDS), backend))
     if batch_flush is not None and backend not in CORE_BACKENDS:
@@ -639,6 +664,8 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
         tso["working_dir"] = "/data"  # the oracle writes orc.log into its cwd
         tso["command"] = ["veritas-tso", "--addr=:%d" % TSO_PORT]
         tso["volumes"] = ["tso-data:/data"]
+        if publish_ports:
+            tso["ports"] = ["127.0.0.1:%d:%d" % (HOST_TSO_PORT, TSO_PORT)]
         volumes["tso-data"] = {}
         services["tso"] = tso
 
@@ -653,22 +680,25 @@ def gen(backend, n, block_size, commit_mode, cpus, mem,
             s["command"] = _bash(_kafka_orig_node(i, n, block_size, memlimit))
             s["depends_on"] = {"kafka": {"condition": "service_healthy"}}
         elif backend == "kafka":
-            s["command"] = _bash(_kafka_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, extra))
+            s["command"] = _bash(_kafka_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, node_extra))
             s["depends_on"] = {"kafka": {"condition": "service_healthy"}}
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "raft":
-            s["command"] = _bash(_raft_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, extra))
+            s["command"] = _bash(_raft_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, node_extra))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "tendermint":
-            s["command"] = _bash(_tendermint_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, extra))
+            s["command"] = _bash(_tendermint_node(i, n, block_size, commit_mode, memlimit, node_faults.get(i), batch_flush, node_extra))
             s["volumes"].append("%s:/tmcfg:ro" % os.path.join(tm_dir, "node%d" % (i - 1)))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "bft2":
-            s["command"] = _bash(_bft2_node(i, n, block_size, commit_mode, memlimit, mem, node_faults.get(i), batch_flush, extra))
+            s["command"] = _bash(_bft2_node(i, n, block_size, commit_mode, memlimit, mem, node_faults.get(i), batch_flush, node_extra))
             s["volumes"].append("%s:/results" % results_dir)
         elif backend == "tm-orig":
             s["command"] = _bash(_tm_orig_node(i, n, block_size, memlimit))
             s["volumes"].append("%s:/tmcfg:ro" % os.path.join(tm_dir, "node%d" % (i - 1)))
+        if publish_ports:
+            s["ports"] = ["127.0.0.1:%d:%d" % (HOST_GRPC_BASE + i, VERITAS_PORT),
+                          "127.0.0.1:%d:%d" % (HOST_EVENTS_BASE + i, DEMO_EVENTS_PORT)]
         services[name] = s
 
     client = _service(NODE_IMAGE, "client", CLIENT_IP, CLIENT_CPUS, CLIENT_MEM)
@@ -717,6 +747,9 @@ def main(argv=None):
                    help="veritas --attest-every (and --n) of every core node (phase 2; 0: off)")
     p.add_argument("--attest-quorum", type=int, default=0,
                    help="veritas --attest-quorum of every core node (phase 3; 0: veritas' default 2f+1)")
+    p.add_argument("--publish-ports", action="store_true",
+                   help="live demo: publish node gRPC/observer ports and the TSO on 127.0.0.1 of the host and"
+                        " start the node observer (veritas --demo-events-addr) on core backends")
     a = p.parse_args(argv)
 
     cpus = int(a.cpus) if a.cpus == int(a.cpus) else a.cpus
@@ -726,7 +759,8 @@ def main(argv=None):
                   tm_dir=a.tm_dir, ycsb_dir=a.ycsb_dir, results_dir=a.results_dir,
                   node_faults=parse_node_faults(a.node_fault), batch_flush=a.batch_flush,
                   kafka_cpus=kafka_cpus, kafka_mem=a.kafka_mem,
-                  verify_sigs=a.verify_sigs, key_seed=a.key_seed, attest_every=a.attest_every, attest_quorum=a.attest_quorum)
+                  verify_sigs=a.verify_sigs, key_seed=a.key_seed, attest_every=a.attest_every,
+                  attest_quorum=a.attest_quorum, publish_ports=a.publish_ports)
     except NotImplementedError as e:
         sys.stderr.write("gen_compose: %s\n" % e)
         return 2

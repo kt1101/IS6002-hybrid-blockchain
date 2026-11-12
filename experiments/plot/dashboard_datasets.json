@@ -1,0 +1,78 @@
+{
+  "p0": "results/p0-baseline.csv",
+  "datasets": [
+    {
+      "id": "cloud",
+      "label": "Cloud · flush 100 ms",
+      "machine": "Cloud session: linux/amd64, 4 CPU, 15.7 GiB, idle host. Per node 0.5 CPU / 768 MiB; Kafka broker 2 CPU / 1.5 GB; batch flush 100 ms; 60 s runs (E6: 180 s, fault at 60 s).",
+      "final": "results/cloud-bf100ms/final",
+      "experiments": [
+        "e1",
+        "e2",
+        "e3",
+        "e4",
+        "e6"
+      ],
+      "extra": [
+        {
+          "exp": "e6mem1g",
+          "into": "e6",
+          "mem": "1g"
+        }
+      ],
+      "rq3": [
+        {
+          "path": "results/cloud-bf100ms/figs/rq3_summary.csv"
+        },
+        {
+          "path": "results/cloud-bf100ms/figs/rq3_summary_e6mem1g.csv",
+          "mem": "1g"
+        }
+      ],
+      "sidecars": {
+        "dir": "results/cloud-bf100ms/cloud-{exp}-bf100ms",
+        "suffix": "_bf100ms"
+      },
+      "kafka_ops": "results/cloud-bf100ms/cloud-e2-bf100ms-kafka-ops.csv",
+      "missing": {
+        "e1-bf100ms": "This whole dataset already uses the 100 ms flush: see E1.",
+        "e5": "Not measured on the cloud machine: its kernel has no sch_netem, so no RTT could be added (see the M3 dataset)."
+      },
+      "notes": [
+        "E5 and F3 were not run: the kernel has no sch_netem (no added RTT, no slow node).",
+        "Every N=7 point (E2, E6) saturated the host CPU (> 90 %): N=7 reflects the 4-CPU machine more than the protocol. Hollow markers show saturated points.",
+        "bft2 F4 and F5-F4 ran out of memory at 768 MiB; those four configurations were re-run with MEM=1g and are marked \"MEM 1g\".",
+        "Tendermint loses blocks when saturated; its E2–E4 runs used a 5 % write-error validity gate.",
+        "Throughput decays during the 180 s E6 runs even without a consensus fault (F4 keeps only about 0.7–0.85 of the pre-fault write rate on Kafka, Raft and HotStuff): compare fault scenarios with F4, not with 1.0.",
+        "RQ3: recovery_status misreads Tendermint's bursty write timeline. Read the write ratio (successful writes/s after the fault ÷ before) instead.",
+        "Tendermint F2 (one silent validator) lost liveness here, unlike on M3: to be investigated before it is used as a conclusion."
+      ]
+    },
+    {
+      "id": "m3",
+      "label": "M3 · flush 1 s",
+      "machine": "MacBook M3 Pro (arm64), Docker VM 11 CPU / 7.65 GiB, host not idle. Per node 0.5 CPU / 768 MiB; Kafka broker 2 CPU / 1.5 GB; batch flush 1 s (E1 also at 100 ms); 60 s runs (E6: 180 s, fault at 60 s).",
+      "final": "results/final",
+      "experiments": [
+        "e1",
+        "e1-bf100ms",
+        "e2",
+        "e3",
+        "e4",
+        "e5",
+        "e6"
+      ],
+      "rq3": [
+        {
+          "path": "results/figs/rq3_summary.csv"
+        }
+      ],
+      "missing": {},
+      "notes": [
+        "With the 1 s batch flush, throughput at low client counts mostly reflects the flush timer, not the consensus protocol. Compare backends on the 100 ms runs (E1 at 100 ms here, or the Cloud dataset).",
+        "Latency here is the CSV mean over all operations (reads and writes): the per-run write-latency sidecars of this campaign are not in the repository.",
+        "Busy host: CV of 13–26 % at 64–256 clients."
+      ]
+    }
+  ]
+}
