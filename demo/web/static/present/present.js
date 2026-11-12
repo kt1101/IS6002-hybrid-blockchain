@@ -181,7 +181,7 @@
       var name = lab.map(function (c) { return r[c]; }).join(' · ');
       s.appendChild(svg('text', { x: L - 10, y: mid + 4, 'text-anchor': 'end' }, name));
       var rect = svg('rect', { x: L, y: top + 5, width: Math.max(1, X(num(r[y])) - L), height: rowH - 10, rx: 3, fill: COLORS[r.backend] || 'var(--accent)' });
-      rect.appendChild(svg('title', null, name + ': ' + y + ' = ' + r[y] + (lo ? ' (' + lo + ' ' + r[lo] + ', ' + hi + ' ' + r[hi] + ')' : '') + ' ' + unit + ', ' + r.reps + ' rep'));
+      rect.appendChild(svg('title', null, name + ': ' + y + ' = ' + r[y] + (lo ? ' (' + lo + ' ' + r[lo] + ', ' + hi + ' ' + r[hi] + ')' : '') + ' ' + unit + ', ' + (r.reps || r.runs) + ' rep'));
       s.appendChild(rect);
       var end = X(num(r[y]));
       if (lo && hi) {

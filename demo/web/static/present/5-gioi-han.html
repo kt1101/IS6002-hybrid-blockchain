@@ -44,7 +44,7 @@
       <li><strong>Thời lượng khác nhau.</strong> E10 chạy 60 s không lỗi, còn E9, E11, E12 chạy 180 s. Ở lượt 180 s độ trễ xấu dần trong lượt (write p99 đã 1–2,7 s), nên đuôi độ trễ của E10 không so trực tiếp với E9/E11/E12: cùng cấu hình certified, workload a, p99 gộp của E10 là 401 / 505 ms (raft / bft2), của E9 a1 là 1436 / 1965 ms; chỉ p50 so được (91 / 113 so với 82 / 99 ms).</li>
       <li><strong>Số lượt ít:</strong> 3 rep mỗi ô; ở E12 số lượt quá ít để so raft với bft2. Hai lượt bị bỏ khỏi tóm tắt vì race khi tiêm lỗi (E9 bft2 a1 certified r1, E12 raft q2f1 quorum r1).</li>
       <li><strong>480 req/s nằm dưới điểm bão hòa:</strong> E9–E12 đo chi phí độ trễ, không đo mất thông lượng.</li>
-      <li><strong>Thứ tự chạy:</strong> E9 chạy a0 → a1 → a10 nên mean/p99 của ghi còn lẫn với thứ tự; E10–E12 đã chạy xen kẽ theo rep.</li>
+      <li><strong>Thứ tự chạy và đuôi độ trễ ghi:</strong> E9 chạy a0 → a1 → a10 nên mean/p99 của ghi lẫn với thứ tự. E9b (xen kẽ, 5 pass) đóng câu hỏi: không tách được ảnh hưởng của attestation lên độ trễ ghi ở 480 req/s, lượt 180 s. Đuôi độ trễ ghi tuyệt đối của E9 và E11–E12 chỉ nên đọc trong cùng một sweep (E9 write p99 1,2–2,3 s, E9b 0,5–0,8 s cùng cấu hình); nguyên nhân đuôi cao ở E9 chưa xác định. E10–E12 đã chạy xen kẽ theo rep.</li>
       <li><strong>Phiên bản:</strong> raft (TSO) có abort, bft2 (phiên bản theo thứ tự block) không bao giờ abort: biến gây nhiễu đã biết.</li>
       <li><strong>Nhất quán đã kiểm:</strong> sau E10–E12, <code>check_consistency.sh</code> với <code>ATTEST_EVERY=1</code> trên mã giai đoạn 3: kafka, raft, tendermint, bft2 đều CONSISTENT, không node nào bị loại. Đây là lần đầu kafka và tendermint chạy với mã giai đoạn 3; hai backend này không có trong E10–E12.</li>
       <li><strong>Một máy:</strong> M3 Pro, Docker VM 11 CPU / 7,65 GiB, N=4. N=7 cần Docker VM ≥ 10 GiB. Host guard loại 5 lượt E10–E12 (swap, CPU ngoài Docker); một lượt E12 chạy lại vì Mac ngủ giữa lượt.</li>
@@ -58,8 +58,8 @@
     <table class="data">
       <thead><tr><th scope="col">Việc</th><th scope="col">Mục đích</th><th scope="col">Trạng thái</th></tr></thead>
       <tbody>
-        <tr><td>E9b</td><td>Chỉ lượt không lỗi, xen kẽ, 5 rep: tách ảnh hưởng của attestation lên đường ghi khỏi thứ tự chạy</td><td class="no">chưa đo</td></tr>
-        <tr><td>E13</td><td>Kafka approve theo quorum (<code>--kafka-quorum</code> {all, 2f+1}) dưới F1, F2</td><td class="no">chưa đo</td></tr>
+        <tr><td>E9b</td><td>Chỉ lượt không lỗi, xen kẽ, 5 rep: tách ảnh hưởng của attestation lên đường ghi khỏi thứ tự chạy</td><td class="yes">đã đo (tag <code>p10-attest</code>): không tách được ảnh hưởng</td></tr>
+        <tr><td>E13</td><td>Kafka approve theo quorum 2f+1 thay cho approve-all, để kafka giữ liveness dưới F1, F2 (hướng mở rộng)</td><td class="no">đã cắt: không hiện thực, không đo (không có cờ <code>--kafka-quorum</code>)</td></tr>
         <tr><td>E8</td><td>Chi phí chữ ký Set (<code>--verify-sigs</code> none / ingress / all) × đọc plain / verified</td><td class="no">chưa đo trên M3</td></tr>
         <tr><td>E7f</td><td>E7 với tài nguyên cân bằng (broker Kafka 0,5 CPU, tendermint <code>timeout-commit</code> 100 ms / 0 s)</td><td class="no">chưa đo</td></tr>
         <tr><td>N=7</td><td>F5-F4 và E10–E12 với f = 2</td><td class="no">chưa đo (Docker VM nhỏ)</td></tr>
@@ -68,11 +68,11 @@
       </tbody>
     </table>
   </div>
-  <p class="src">experiments/NOTES.md (mục E9, E10–E12, Sự cố) · docs/superpowers/specs/2026-11-09-phase3-accountability-design.md mục 3.1–3.3, 11 · commit e54bb11</p>
+  <p class="src">experiments/NOTES.md (mục E9, E10–E12, Sự cố) · docs/superpowers/specs/2026-11-09-phase3-accountability-design.md mục 3.1–3.3, 11 · commit 88944d0 (tag p10-attest)</p>
 </section>
 
 <footer class="foot">
-  <span>Nguồn: <code>experiments/NOTES.md</code>, spec giai đoạn 3 @ <span class="mono" data-commit>e54bb11</span></span>
+  <span>Nguồn: <code>experiments/NOTES.md</code>, spec giai đoạn 3 @ <span class="mono" data-commit>88944d0</span></span>
   <a href="6-kich-ban.html">Kịch bản →</a>
 </footer>
 

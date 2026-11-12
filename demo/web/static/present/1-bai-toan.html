@@ -68,7 +68,7 @@
       <li>Nguyên nhân chính: kafka-orig trả lời ngay khi tx vào Kafka (async), còn tm-orig chờ khối chứa tx (sync). So sánh trong bài gốc lẫn ngữ nghĩa trả lời với chi phí đồng thuận.</li>
       <li>Ở chế độ sync với bộ hẹn giờ flush 1 s, kafka, raft, bft2 trùng nhau (c256: 478–488), vì thông lượng bị bộ hẹn giờ chặn. Vì vậy giai đoạn 2 chuyển sang flush 100 ms và tải vòng hở.</li>
     </ul>
-    <p class="src">experiments/NOTES.md · mục “Kết quả P0” và “Kết quả chính (tps trung bình, dữ liệu cuối)” · commit e54bb11</p>
+    <p class="src">experiments/NOTES.md · mục “Kết quả P0” và “Kết quả chính (tps trung bình, dữ liệu cuối)” · commit 88944d0</p>
   </section>
   <section class="card">
     <h2>Phần cứng hạn chế</h2>
@@ -78,7 +78,7 @@
       <li>N=4, 256 client, block 100, flush 100 ms, workload A; backend raft (CFT) và bft2 (BFT) cho E7, E9–E12.</li>
       <li>Có host guard: lượt nào máy bị swap hoặc CPU ngoài Docker cao thì bị loại và chạy lại.</li>
     </ul>
-    <p class="src">experiments/NOTES.md · mục “Cấu hình máy”, “Giai đoạn 2: chạy trên M3”, “Giai đoạn 3: E10–E12 trên M3” · commit e54bb11</p>
+    <p class="src">experiments/NOTES.md · mục “Cấu hình máy”, “Giai đoạn 2: chạy trên M3”, “Giai đoạn 3: E10–E12 trên M3” · commit 88944d0</p>
   </section>
 </div>
 
@@ -91,7 +91,7 @@
       <li><strong>RQ4:</strong> chi phí của đọc kiểm chứng và chữ ký thật (E8: chưa đo trên M3).</li>
     </ul>
     <ul>
-      <li><strong>RQ5:</strong> attestation root rút ngắn thời gian phát hiện và số đọc sai được chấp nhận bao nhiêu (E9).</li>
+      <li><strong>RQ5:</strong> attestation root rút ngắn thời gian phát hiện và số đọc sai được chấp nhận bao nhiêu, và làm chậm đường ghi tới đâu (E9, E9b).</li>
       <li><strong>RQ6:</strong> truy vết trong giao thức chỉ ra và loại node lỗi nhanh tới đâu dưới F4, F6 (E10, E11).</li>
       <li><strong>RQ7:</strong> với f+1 node thông đồng, quorum f+1 và 2f+1 đánh đổi an toàn và sẵn sàng ra sao (E12).</li>
     </ul>
@@ -99,7 +99,7 @@
 </section>
 
 <footer class="foot">
-  <span>Nguồn: <code>README.md</code> (bài gốc), <code>docs/superpowers/specs/</code> (câu hỏi nghiên cứu), <code>experiments/NOTES.md</code> @ <span class="mono" data-commit>e54bb11</span></span>
+  <span>Nguồn: <code>README.md</code> (bài gốc), <code>docs/superpowers/specs/</code> (câu hỏi nghiên cứu), <code>experiments/NOTES.md</code> @ <span class="mono" data-commit>88944d0</span></span>
   <a href="2-kien-truc.html">Kiến trúc →</a>
 </footer>
 

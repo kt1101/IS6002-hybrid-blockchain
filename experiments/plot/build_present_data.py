@@ -4,17 +4,17 @@
 The pages (demo/web/static/present/*.html) show phase 2-3 results that live
 on another branch. This script copies them, unchanged, from one commit:
 
-- CSV files (results/e7, results/e9, results/e1x) as lists of string rows,
+- CSV files (results/e7, results/e9, results/e9b, results/e1x) as lists of string rows,
   exactly as written in the file (no parsing of numbers, no rounding);
 - the markdown tables of experiments/NOTES.md that the pages show (E6, E7,
-  E9, E11, E12), cell by cell; E10 comes from results/e1x/e10_latency.csv.
+  E9, E9b, E11, E12), cell by cell; E10 comes from results/e1x/e10_latency.csv.
 
 Every dataset carries its file path and the commit, so the page can print
 its source next to each table and chart.
 
 Run from the repo root (stdlib only; needs git and the commit):
 
-    python3 experiments/plot/build_present_data.py --ref p11-accountability \\
+    python3 experiments/plot/build_present_data.py --ref p10-attest \\
         --out demo/web/static/present/data.js
 
 --check compares instead of writing (exit 1 when the file is stale).
@@ -33,6 +33,9 @@ CSV_FILES = {
     "e1x_summary": "results/e1x/rq6_summary.csv",
     "e1x_runs": "results/e1x/rq6_runs.csv",
     "e10_latency": "results/e1x/e10_latency.csv",
+    "e9b_summary": "results/e9b/rq5_summary.csv",
+    "e9b_paired": "results/e9b/e9b_paired.csv",
+    "e9b_runs": "results/e9b/e9b_runs.csv",
 }
 
 NOTES = "experiments/NOTES.md"
@@ -43,6 +46,8 @@ NOTES_TABLES = [
     ("e7", "## Giai đoạn 2/3: E7 quét tốc độ trên M3", 0),
     ("e9_detect", "## Giai đoạn 2/3: E9 attestation trên M3", 0),
     ("e9_latency", "## Giai đoạn 2/3: E9 attestation trên M3", 1),
+    ("e9b", "## Giai đoạn 2/3: E9b đối chứng độ trễ của attestation", 0),
+    ("e9b_paired", "## Giai đoạn 2/3: E9b đối chứng độ trễ của attestation", 1),
     ("e11", "### E11: truy vết 1 node lỗi", 0),
     ("e12", "### E12: ngưỡng quorum", 0),
 ]
@@ -144,7 +149,7 @@ def render(data):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--ref", required=True, help="commit or tag that holds the results (e.g. p11-accountability)")
+    p.add_argument("--ref", required=True, help="commit or tag that holds the results (e.g. p10-attest)")
     p.add_argument("--out", required=True, help="data.js to write")
     p.add_argument("--check", action="store_true", help="compare with --out instead of writing")
     a = p.parse_args(argv)

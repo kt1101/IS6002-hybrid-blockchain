@@ -4,7 +4,7 @@ pages it feeds (demo/web/static/present/).
 Run: cd experiments/plot && python3 -m pytest -q test_build_present_data.py
 
 The parser tests are hermetic. The tests marked "source" need the results
-commit (PRESENT_REF, default the tag p11-accountability) in the local git repo and are skipped
+commit (PRESENT_REF, default the tag p10-attest) in the local git repo and are skipped
 without it: data.js must be up to date, and every number the pages print
 must appear in one of the source files of that commit.
 """
@@ -22,7 +22,7 @@ import build_present_data as bp
 ROOT = Path(__file__).resolve().parents[2]
 PRESENT = ROOT / "demo" / "web" / "static" / "present"
 DATA_JS = PRESENT / "data.js"
-REF = os.environ.get("PRESENT_REF", "p11-accountability")
+REF = os.environ.get("PRESENT_REF", "p10-attest")
 PAGES = ["index.html", "1-bai-toan.html", "2-kien-truc.html", "3-co-che.html",
          "4-ket-qua.html", "5-gioi-han.html", "6-kich-ban.html"]
 

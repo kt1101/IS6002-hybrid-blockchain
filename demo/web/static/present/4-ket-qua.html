@@ -14,7 +14,7 @@
 <header class="top">
   <div class="brand">
     <h1>4 · Kết quả</h1>
-    <span class="subtitle">E7 điểm bão hòa · E9 attestation · E10 chi phí không lỗi · E11 truy vết · E12 ngưỡng quorum · E1–E6</span>
+    <span class="subtitle">E7 điểm bão hòa · E9 attestation · E9b đối chứng · E10 chi phí không lỗi · E11 truy vết · E12 ngưỡng quorum · E1–E6</span>
   </div>
   <nav class="pages" aria-label="Trang">
     <a href="../">Live demo</a>
@@ -28,7 +28,7 @@
 <section class="callout">
   <p><strong>Cấu hình chung của E7, E9–E12:</strong> MacBook M3 Pro, N=4, 256 client, block 100, flush 100 ms, <code>MEM=1g</code>, attestation K=1 (E10–E12), tải vòng hở; backend <span class="pill raft">raft</span> và <span class="pill bft2">bft2</span>; 3 rep mỗi ô. E10: 60 s + 10 s warmup, không lỗi, workload a và c. E9, E11, E12: 180 s + 10 s warmup, lỗi ở giây 60 của cửa sổ đo.</p>
   <p><strong>Kiểm tra nhất quán với mã giai đoạn 3</strong> (<code>ATTEST_EVERY=1</code>, sau E10–E12): kafka, raft, tendermint, bft2 đều <strong>CONSISTENT</strong>, log không có dòng <code>core: evicted</code> hay <code>core: diverged</code>.</p>
-  <p class="src">experiments/NOTES.md · mục “Giai đoạn 3: E10–E12 trên M3” · commit e54bb11 (tag p11-accountability)</p>
+  <p class="src">experiments/NOTES.md · mục “Giai đoạn 3: E10–E12 trên M3” · commit 88944d0 (tag p10-attest)</p>
 </section>
 
 <!-- E7 -->
@@ -65,8 +65,32 @@
     <div data-notes="e9_latency"></div>
     <ul>
       <li>Đọc certified đắt: read p50 ~92–102 ms ở attest 1 và ~223–225 ms ở attest 10, so với 1,1 ms đọc thường; read p99 1,5–2,6 s.</li>
-      <li>Không tách được chênh lệch write p50 dưới ~10 ms giữa các mức attestation. Ảnh hưởng lên đuôi độ trễ ghi chưa chắc (write p99 lệch 300–1100 ms giữa các rep).</li>
+      <li>Không tách được chênh lệch write p50 dưới ~10 ms giữa các mức attestation. Ở E9 các cặp chạy theo thứ tự a0 → a1 → a10 nên đuôi độ trễ ghi không đọc được; <a href="#e9b">E9b</a> (xen kẽ, 5 pass) kết luận không tách được ảnh hưởng của attestation lên độ trễ ghi.</li>
     </ul>
+  </details>
+</section>
+
+<!-- E9b -->
+<section class="card" id="e9b">
+  <div class="card-head"><h2>E9b · Đối chứng độ trễ ghi của attestation (RQ5)</h2><span class="muted">chỉ lượt không lỗi · 5 pass xen kẽ · 480 req/s · lượt 180 s · đo ở commit e54bb11</span></div>
+  <div class="callout ok">
+    <p><strong>Kết luận cho câu hỏi còn mở của E9:</strong> ở 480 req/s, lượt 180 s, không tách được ảnh hưởng của attestation (K = 1 hay 10) lên độ trễ ghi, kể cả đuôi. Hiệu theo pass đổi dấu giữa các pass ở mọi cặp; không cặp nào (độ trễ ghi hay queue/block) có hiệu cùng dấu ở cả 5 pass.</p>
+  </div>
+  <div class="grid2">
+    <figure class="chart" data-csv-chart="e9b_summary" data-where="fault_kind=none" data-label="backend,attest_every,read_mode" data-y="write_p99_ms" data-lo="write_p99_min_ms" data-hi="write_p99_max_ms" data-unit="ms"><figcaption>Write p99 (trung bình 5 rep, vạch min–max) theo backend · attest_every · chế độ đọc: các khoảng chồng nhau</figcaption></figure>
+    <figure class="chart" data-csv-chart="e9b_summary" data-where="fault_kind=none" data-label="backend,attest_every,read_mode" data-y="read_p50_ms" data-unit="ms"><figcaption>Read p50 (trung bình 5 rep): chi phí của đọc certified lặp lại</figcaption></figure>
+  </div>
+  <ul>
+    <li><strong>Không lặp lại được</strong> mức tăng queue/block của E9: ở E9b queue/block của raft là 1,9–3,0 ms ở mọi cấu hình, của bft2 0,6–1,9 ms.</li>
+    <li><strong>Lặp lại được:</strong> chi phí đọc certified (read p50 86 / 105 ms ở attest 1, 211 / 221 ms ở attest 10 cho raft / bft2, so với 1,1–1,2 ms đọc thường) và write p50 như nhau giữa các mức (raft 80–88, bft2 95–100 ms).</li>
+  </ul>
+  <div class="callout warn">
+    <p><strong>Lưu ý:</strong> lượt raft a0-plain rep 1 (p99 1657 ms, queue/block 16,5 ms) trùng với tải ngoài trên host và kéo dòng raft a0 của bảng tóm tắt lên. Các con số đuôi độ trễ ghi tuyệt đối của E9 và E11–E12 chỉ nên đọc trong cùng một sweep; so sánh có ý nghĩa là so trong cùng pass.</p>
+  </div>
+  <div data-notes="e9b"></div>
+  <details>
+    <summary class="muted">Hiệu theo pass (e9b_paired.csv: trung vị của 5 hiệu và số pass có hiệu &gt; 0)</summary>
+    <div data-notes="e9b_paired"></div>
   </details>
 </section>
 
@@ -90,7 +114,7 @@
     <summary class="muted">Bảng đầy đủ E10 (e10_latency.csv)</summary>
     <div data-csv="e10_latency" data-digits="1" data-cols="backend,read_mode,workload,op,reps,p50_ms,p50_min_ms,p50_max_ms,p99_ms,p99_min_ms,p99_max_ms,mean_ms,tps"></div>
   </details>
-  <p class="src">Các câu trên: experiments/NOTES.md · mục “E10: chi phí không lỗi” · commit e54bb11</p>
+  <p class="src">Các câu trên: experiments/NOTES.md · mục “E10: chi phí không lỗi” · commit 88944d0</p>
 </section>
 
 <!-- E11 -->
@@ -138,7 +162,7 @@
 </section>
 
 <footer class="foot">
-  <span>Nguồn: <code>experiments/NOTES.md</code>, <code>results/e7</code>, <code>results/e1x</code> @ <span class="mono" data-commit>e54bb11</span> (nhánh <code>claude/wizardly-robinson-fdaa8d</code>)</span>
+  <span>Nguồn: <code>experiments/NOTES.md</code>, <code>results/e7</code>, <code>results/e9b</code>, <code>results/e1x</code> @ <span class="mono" data-commit>88944d0</span> (nhánh <code>claude/wizardly-robinson-fdaa8d</code>)</span>
   <a href="5-gioi-han.html">Giới hạn →</a>
 </footer>
 

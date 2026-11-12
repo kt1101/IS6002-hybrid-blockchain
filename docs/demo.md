@@ -125,16 +125,16 @@ Thứ tự (phím ← / → hoặc Page Up / Page Down chuyển trang):
 5. Giới hạn và việc còn mở (`5-gioi-han.html`)
 6. Kịch bản trình bày (`6-kich-ban.html`): thứ tự cả buổi, câu nói cho 5 bước demo ở mục 3
 
-Bảng và biểu đồ đọc từ `demo/web/static/present/data.js`, sinh từ NOTES và các CSV của một tag kết quả (hiện là `p11-accountability`). Chạy từ gốc repo, rồi build lại demo (file được nhúng bằng `go:embed`):
+Bảng và biểu đồ đọc từ `demo/web/static/present/data.js`, sinh từ NOTES và các CSV của một tag kết quả (hiện là `p10-attest`). Chạy từ gốc repo, rồi build lại demo (file được nhúng bằng `go:embed`):
 
 ```bash
-python3 experiments/plot/build_present_data.py --ref p11-accountability --out demo/web/static/present/data.js
+python3 experiments/plot/build_present_data.py --ref p10-attest --out demo/web/static/present/data.js
 ```
 
 `--check` chỉ so sánh, không ghi (exit 1 khi `data.js` cũ so với tag):
 
 ```bash
-python3 experiments/plot/build_present_data.py --ref p11-accountability --out demo/web/static/present/data.js --check
+python3 experiments/plot/build_present_data.py --ref p10-attest --out demo/web/static/present/data.js --check
 ```
 
 ## 3. Kịch bản 5 bước
